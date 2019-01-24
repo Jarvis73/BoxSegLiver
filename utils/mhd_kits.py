@@ -1,9 +1,18 @@
-# Copyright 2019 Zhang Jianwei All Right Reserved.
+# Copyright 2019 Jianwei Zhang All Right Reserved.
 #
-# TODO: Choice a License
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 #
 # =================================================================================
-
 import zlib
 import numpy as np
 from pathlib import Path
@@ -127,10 +136,9 @@ def mhd_reader(mhd_path, only_meta=False, compress=False, ranges=None, readonly=
 
         if compress:
             buffer = zlib.decompress(buffer)
-        if readonly:
-            raw_image = np.frombuffer(buffer, dtype=METType[meta_info['ElementType']])
-        else:
-            raw_image = np.fromstring(buffer, dtype=METType[meta_info['ElementType']])
+        raw_image = np.frombuffer(buffer, dtype=METType[meta_info['ElementType']])
+        if not readonly:
+            raw_image.setflags(write=1)
         raw_image = np.reshape(raw_image, new_shape)
 
     return meta_info, raw_image
