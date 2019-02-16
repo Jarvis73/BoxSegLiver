@@ -22,7 +22,9 @@ METRICS = "metrics"
 
 
 def get_losses():
-    total_losses = tf.losses.get_losses() + [tf.losses.get_regularization_loss()]
+    with tf.name_scope("Losses"):
+        regu_loss = [tf.losses.get_regularization_loss()]
+    total_losses = tf.losses.get_losses() + regu_loss
     for loss in total_losses:
         yield loss
 
@@ -80,9 +82,9 @@ def metric_dice(logits, labels, eps=1e-5, collections=METRICS, name=None):
 
     Parameters
     ----------
-    logits: Tensor
+    logits: tf.Tensor
         shape [batch_size, ..., 1]
-    labels: Tensor
+    labels: tf.Tensor
         shape [batch_size, ..., 1]
     eps: float
         epsilon is set to avoid dividing zero
@@ -161,28 +163,26 @@ def metric_3d(logits3d, labels3d, required=None, **kwargs):
     Parameters
     ----------
     logits3d: ndarray
-        3D binary prediction, shape is the same with `labels3d`, it should be an int array or boolean array.
+        3D binary prediction, shape is the same with `labels3d`, it should be an int
+        array or boolean array.
     labels3d: ndarray
-        3D labels for segmentation, shape [None, None, None], it should be an int array or boolean array.
-        If the dimensions of `logits3d` and `labels3d` are greater than 3, then `np.squeeze` will be applied
-        to remove extra single dimension and then please make sure these two variables are still have 3
-        dimensions. For example, shape [None, None, None, 1] or [1, None, None, None, 1] are allowed.
+        3D labels for segmentation, shape [None, None, None], it should be an int array
+        or boolean array. If the dimensions of `logits3d` and `labels3d` are greater than
+        3, then `np.squeeze` will be applied to remove extra single dimension and then
+        please make sure these two variables are still have 3 dimensions. For example,
+        shape [None, None, None, 1] or [1, None, None, None, 1] are allowed.
     required: str or list
-        a string or a list of string to specify which metrics need to be return, default this function will
-        return all the metrics listed above. For example, if use
+        a string or a list of string to specify which metrics need to be return, default
+        this function will return all the metrics listed above. For example, if use
         ```python
         _metric_3D(logits3D, labels3D, require=["Dice", "VOE", "ASD"])
         ```
         then only these three metrics will be returned.
     kwargs: dict
         sampling: list
-            the pixel resolution or pixel size. This is entered as an n-vector where n is equal to the number
-            of dimensions in the segmentation i.e. 2D or 3D. The default value is 1 which means pixls are
-            1x1x1 mm in size
-        connectivity: int
-            creates either a 2D(3x3) or 3D(3x3x3) matrix defining the neighbourhood around which the function
-            looks for neighbouring pixels. Typically, this is defined as a six-neighbour kernel which is the
-            default behaviour of the function
+            the pixel resolution or pixel size. This is entered as an n-vector where n
+            is equal to the number of dimensions in the segmentation i.e. 2D or 3D. The
+            default value is 1 which means pixls are 1x1x1 mm in size
 
     Returns
     -------

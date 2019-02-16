@@ -85,8 +85,8 @@ def random_adjust_window_width_level(image, w_width, w_level, seed1=None, seed2=
     with tf.name_scope(None, 'random_adjust_wwl', [image, w_width, w_level, seed1, seed2]):
         rd_width = tf.random_uniform([], -50, 50, seed=seed1)
         rd_level = tf.random_uniform([], -15, 15, seed=seed2)
-        new_width = tf.add(w_width + rd_width, name="rw_width")
-        new_level = tf.add(w_level + rd_level, name="rw_level")
+        new_width = tf.add(float(w_width), rd_width, name="rw_width")
+        new_level = tf.add(float(w_level), rd_level, name="rw_level")
         adjusted = adjust_window_width_level(image, new_width, new_level)
 
         return adjusted

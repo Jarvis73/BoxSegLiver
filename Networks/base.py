@@ -65,6 +65,10 @@ class BaseNet(object):
     def num_classes(self):
         return len(self.classes)
 
+    @property
+    def layers(self):
+        return self._layers
+
     def _net_arg_scope(self, *args, **kwargs):
         raise NotImplementedError
 
@@ -143,10 +147,11 @@ class BaseNet(object):
             with slim.arg_scope(self._net_arg_scope()):
                 self._build_network(*args, **kwargs)
 
-        loss = self._build_loss()
-        self._build_metrics()
+        if self.mode == ModeKeys.TRAIN:
+            loss = self._build_loss()
+            self._build_metrics()
 
-        # Call _build_summaries() after _build_loss() to summarize losses and _build_metrics() to summarize metrics
-        self._build_summaries()
+            # Call _build_summaries() after _build_loss() to summarize losses and _build_metrics() to summarize metrics
+            self._build_summaries()
 
-        return loss
+            return loss

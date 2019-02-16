@@ -14,65 +14,25 @@
 #
 # =================================================================================
 import argparse
+from pathlib import Path
+from tensorflow.python.estimator.model_fn import ModeKeys
 
 
 def add_arguments(parser):
     group = parser.add_argument_group(title="Global Arguments")
-    group.add_argument("--tag",
-                       type=str,
-                       required=True, help="Configuration tag(like UID)")
-
-    group = parser.add_argument_group(title="Input Pipeline Arguments")
-    group.add_argument("--w_width",
-                       type=float,
-                       default=450,
-                       required=False, help="Medical image window width (default: %(default)d)")
-    group.add_argument("--w_level",
-                       type=float,
-                       default=50,
-                       required=False, help="Medical image window level (default: %(default)d)")
-    group.add_argument("--zoom",
-                       action="store_true",
-                       required=False, help="Augment dataset with random zoom in and shift")
-    group.add_argument("--zoom_scale",
-                       type=float,
-                       default=1.5,
-                       required=False, help="Maximum random zoom-in scale. Make sure zoom_scale >= 1. "
-                                            "(default: %(default)f)")
-    group.add_argument("--noise",
-                       action="store_true",
-                       required=False, help="Augment dataset with random noise")
-    group.add_argument("--noise_scale",
-                       type=float,
-                       default=0.05,
-                       required=False, help="Random noise scale (default: %(default)f)")
-
-    group = parser.add_argument_group(title="Model Arguments")
     group.add_argument("--mode",
                        type=str,
                        default="TRAIN",
                        choices=["TRAIN", "EVAL", "PREDICT"],
                        required=True, help="Model mode for train/val/test (default: %(default)s)")
-    group.add_argument("--classes",
+    group.add_argument("--tag",
                        type=str,
-                       nargs="+",
-                       required=True, help="Class names of the objects")
-    group.add_argument("--batch_size",
-                       type=int,
-                       default=8,
-                       required=False, help="Model batch size (default: %(default)d)")
-    group.add_argument("--weight_init",
+                       required=True, help="Configuration tag(like UID)")
+    group.add_argument("--model_dir",
                        type=str,
-                       default="trunc_norm",
-                       choices=["trunc_norm", "xavier"],
-                       required=False, help="Model variable initialization method (default: %(default)s)")
-    group.add_argument("--normalizer",
-                       type=str,
-                       default="batch_norm",
-                       choices=["batch_norm"],
-                       required=False, help="Normalization method (default: %(default)s)")
+                       required=True, help="Directory to save model parameters, graph and etc")
 
-    group = parser.add_argument_group(title="Training Arguments")
+    group = parser.add_argument_group(title="Loss Arguments")
     group.add_argument("--weight_decay_rate",
                        type=float,
                        default=1e-5,
@@ -117,6 +77,17 @@ def check_args(args, parser):
         raise parser.error("Asserting {} >= 1 failed!".format(args.zoom_scale))
     if len(args.loss_numeric_w) != len(args.classes) + 1:
         raise parser.error("Asserting len(args.loss_numeric_w) = len(args.classes) + 1 failed!")
+    for x in args.dataset_for_train:
+        record = Path(__file__).parent / "data" / x
+        if not record.exists():
+            raise parser.error("File not found: " + str(record))
+    if args.mode == ModeKeys.EVAL:
+        if not args.dataset_for_eval:
+            raise parser.error("EVAL mode need `dataset_for_eval`")
+        for x in args.dataset_for_eval:
+            record = Path(__file__).parent / "data" / x
+            if not record.exists():
+                raise parser.error("File not found: " + str(record))
 
 
 def main():

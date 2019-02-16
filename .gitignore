@@ -110,3 +110,5 @@ venv.bak/
 
 # project settings
 data/*/
+logs/
+*deprecated*

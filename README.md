@@ -3,12 +3,12 @@ Medical image segmentation using deep learning methods
 
 ## Need implemented
 
-- [ ] Data loader
+- [x] Data loader
 - [ ] Training routine
-- [ ] Summaries
-- [ ] Metrics
-- [ ] Loss functions
-- [ ] UNet
+- [x] Summaries
+- [x] Metrics
+- [x] Loss functions
+- [x] UNet
 - [ ] ResUnet
 - [ ] Atrous Conv Nets
 - [ ] Visualization

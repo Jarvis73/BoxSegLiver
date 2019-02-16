@@ -13,8 +13,8 @@
 # limitations under the License.
 #
 # =================================================================================
+import numpy as np
 import nibabel as nib   # conda install -c conda-forge nibabel
-
 
 __all__ = [
     "nii_reader",
@@ -38,6 +38,13 @@ def nii_reader(nii_path, only_meta=False):
             a dictionary contains all the information in nii file
         raw_image: ndarray
             raw data of this image. If `only_meta` is True, this return will be None.
+
+        Notes
+        -----
+        Order: (x, y, z) or (width, height, depth)
+        Get spacing: (meta_info["srow_x"][0], meta_info["srow_y"][1], meta_info["srow_z"][2])
+        Get shape: meta_info.get_data_shape()
+        Get data type: meta_info["data_type"].dtype
 
         """
     data = nib.load(str(nii_path))

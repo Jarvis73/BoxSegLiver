@@ -14,6 +14,7 @@
 #
 # =================================================================================
 import numpy as np
+import scipy.ndimage as ndi
 
 
 def bbox_from_mask(mask, mask_values, min_shape=None, padding=None):
@@ -147,8 +148,38 @@ def find_empty_slices(src_image, axis=0, empty_value=0):
     ndim = src_image.ndim
     axes = list(range(ndim))
     axes.remove(axis)
-    empty_slices = np.all(src_image == empty_value, axis=axes)
+    empty_slices = np.all(src_image == empty_value, axis=tuple(axes))
     return empty_slices
+
+
+def get_largest_component(inputs, rank, connectivity=1):
+    """
+    Extract the largest connected component in input array.
+
+    Parameters
+    ----------
+    inputs: ndarray
+        An N-D array. Type of the array will be converted to boolean internally.
+    rank: int
+        Passed to generate_binary_structure
+    connectivity: int
+        Passed to generate_binary_structure
+
+    Returns
+    -------
+    An int8 array with the same size as `inputs`. Entries in largest component have value 1, else 0.
+    Return zeros array if `inputs` is a zero array.
+
+    """
+    struct = ndi.morphology.generate_binary_structure(rank, connectivity)
+    res = inputs.astype(bool)
+    if np.count_nonzero(res) == 0:
+        return np.zeros_like(inputs, dtype=np.int8)
+
+    labeled_res, n_res = ndi.label(res, struct)
+    areas = np.bincount(labeled_res.flat)
+    arg_min = np.argsort(areas[1:])     # without background
+    return merge_labels(labeled_res, [-1, int(arg_min[-1])])
 
 
 if __name__ == "__main__":

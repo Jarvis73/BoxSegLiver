@@ -27,8 +27,6 @@ LiTS liver dataset is expected to have the following directory structure:
     + data
       + LiTS
         - image_list.txt
-        + origin
-        + mask
         + records
           - data_fold_0.tfrecord
           - data_fold_1.tfrecord
@@ -70,8 +68,6 @@ from data_kits.build_data import ImageReader, image_to_examples
 from data_kits.preprocess import random_split_k_fold
 from utils.array_kits import find_empty_slices
 
-_NUM_FOLDS = 5
-
 LiTS_Dir = Path(__file__).parent.parent / "data" / "LiTS"
 
 
@@ -101,33 +97,72 @@ def get_lits_list(dataset, keep_only_liver=True):
     return sorted(image_files)
 
 
-def _convert_data_set(dataset, k_split=5, seed=None):
-    file_names = get_lits_list(dataset)
+def _convert_data_set(dataset, keep_only_liver, k_split=5, seed=None):
+    """
+    Convert dataset list to several tf-record files.
+
+    Parameters
+    ----------
+    dataset: str
+        Pass to `get_lits_list()`
+    keep_only_liver: bool
+        Pass to `get_lits_list()`
+    k_split: int
+        Number of splits of the tf-record files.
+    seed: int
+        Random seed to generate k-split lists.
+
+    """
+    file_names = get_lits_list(dataset, keep_only_liver)
     num_images = len(file_names)
     if k_split < 1:
         raise ValueError("k_split should >= 1, but get {}".format(k_split))
     k_folds = random_split_k_fold(file_names, k_split, seed) if k_split > 1 else [file_names]
+    folds_list_save_to = Path(__file__).parent.parent / "data/LiTS/k_folds.txt"
+    with folds_list_save_to.open("w") as f:
+        for i, fold in enumerate(k_folds):
+            f.write("Fold %d:" % i)
+            write_str = "  "
+            for name in fold:
+                write_str += "{} ".format(name.replace(".nii", "").split("-")[-1])
+            f.write(write_str + "\n")
 
-    image_reader = ImageReader("nii", np.int16, extend_channel=True)
-    label_reader = ImageReader("nii", np.uint8, extend_channel=False)     # use uint8 to save space
+    image_reader = ImageReader(np.int16, extend_channel=True)
+    label_reader = ImageReader(np.uint8, extend_channel=False)     # use uint8 to save space
 
     # Convert each split
+    counter = 1
     for i, fold in enumerate(k_folds):
-        output_filename = LiTS_Dir / "records" / "{}-{}-of-{}.tfrecord".format(dataset, i + 1, k_split)
-        with tf.io.TFRecordWriter(output_filename) as writer:
-            for j, image_name in enumerate(fold):
-                print("\r>> Converting image {}/{} fold {}".format(j + 1, num_images, i + 1), flush=True)
-                # Read image
-                image_file = LiTS_Dir / image_name
-                image_reader.read(image_file)
-                seg_file = image_file.parent / image_file.name.replace("volume", "segmentation")
-                label_reader.read(seg_file)
-                if image_reader.shape[:-1] != label_reader.shape:   # we have extended extra dimension for image
-                    raise RuntimeError("Shape mismatched between image and label: {} vs {}".format(
-                        image_reader.shape, label_reader.shape))
-                # Find empty slices(we skip them in training)
-                extra_info = {"empty": find_empty_slices(label_reader.image())}
-                # Convert to example
-                for example in image_to_examples(image_reader, label_reader, extra_int_info=extra_info):
-                    writer.write(example.SerializeToString())
-        print(flush=True)
+        # Split to 2D slices for training
+        output_filename_2d = LiTS_Dir / "records" / "{}-2D-{}-of-{}.tfrecord".format(dataset, i + 1, k_split)
+        # 3D volume for evaluation and prediction
+        output_filename_3d = LiTS_Dir / "records" / "{}-3D-{}-of-{}.tfrecord".format(dataset, i + 1, k_split)
+        with tf.io.TFRecordWriter(str(output_filename_2d)) as writer_2d:
+            with tf.io.TFRecordWriter(str(output_filename_3d)) as writer_3d:
+                for j, image_name in enumerate(fold):
+                    print("\r>> Converting fold {}, {}/{}, {}/{}"
+                          .format(i + 1, j + 1, len(fold), counter, num_images), end="")
+                    # Read image
+                    image_file = LiTS_Dir / image_name
+                    image_reader.read(image_file)
+                    seg_file = image_file.parent / image_file.name.replace("volume", "segmentation")
+                    label_reader.read(seg_file)
+                    # we have extended extra dimension for image
+                    if image_reader.shape[:-1] != label_reader.shape:
+                        raise RuntimeError("Shape mismatched between image and label: {} vs {}".format(
+                            image_reader.shape, label_reader.shape))
+                    # Find empty slices(we skip them in training)
+                    extra_info = {"empty": find_empty_slices(label_reader.image())}
+                    # Convert 2D slices to example
+                    for example in image_to_examples(image_reader, label_reader, split=True,
+                                                     extra_int_info=extra_info):
+                        writer_2d.write(example.SerializeToString())
+                        # Convert 3D volume to example
+                    for example in image_to_examples(image_reader, label_reader, split=False):
+                        writer_3d.write(example.SerializeToString())
+                    counter += 1
+                print()
+
+
+if __name__ == "__main__":
+    _convert_data_set("test", False, seed=1234)

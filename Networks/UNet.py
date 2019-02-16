@@ -17,7 +17,7 @@
 import tensorflow as tf
 import tensorflow.contrib.slim as slim
 
-import loss_metrices as losses
+import loss_metrics as losses
 from Networks import base
 
 ModeKeys = tf.estimator.ModeKeys
@@ -95,6 +95,7 @@ class UNet(base.BaseNet):
             self._layers["logits"], self._inputs["labels"],
             self.args.loss_weight_type, self._get_weights_params(), name="Losses")
 
+        # Set the name of the total loss as "loss" which will be summarized by Estimator
         with tf.name_scope("Losses"):
             return tf.losses.get_total_loss()
 
@@ -112,7 +113,7 @@ class UNet(base.BaseNet):
                     logits = self._layers[obj + "Pred"]
                     labels = split_labels[i]
                     for met in self.args.metrics_train:
-                        metric_func = eval("metrics_" + met.lower())
+                        metric_func = eval("metrics.metric_" + met.lower())
                         metric_func(logits, labels, name=obj + met)
 
     def _build_summaries(self):
@@ -130,7 +131,7 @@ class UNet(base.BaseNet):
                                  max_outputs=1, collections=[self.DEFAULT])
 
             for tensor in losses.get_losses():
-                tf.summary.scalar("{}/Loss/{}".format(self.args.tag, tensor.op.name), tensor,
+                tf.summary.scalar("{}/{}".format(self.args.tag, tensor.op.name), tensor,
                                   collections=[self.DEFAULT])
 
             for tensor in metrics.get_metrics():
