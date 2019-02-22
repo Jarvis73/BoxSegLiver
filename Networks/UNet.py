@@ -24,11 +24,23 @@ ModeKeys = tf.estimator.ModeKeys
 metrics = losses
 
 
+def _check_size_type(size):
+    if size < 0:
+        return None
+    return size
+
+
 class UNet(base.BaseNet):
     def __init__(self, args, name=None):
+        """ Don't create ops/tensors in __init__() """
         super(UNet, self).__init__(args)
-        self.name = name
+        self.name = name or "UNet"
         self.classes.extend(self.args.classes)
+
+        self.bs = args.batch_size
+        self.height = args.im_height
+        self.width = args.im_width
+        self.channel = args.im_channel
 
     def _net_arg_scope(self, *args, **kwargs):
         normalizer, params = self._get_normalization()
@@ -42,6 +54,12 @@ class UNet(base.BaseNet):
         num_down_samples = kwargs.get("num_down_samples", 4)
 
         tensor_out = self._inputs["images"]
+
+        # Tensorflow can not infer input tensor shape when constructing graph
+        self.height = _check_size_type(self.height)
+        self.width = _check_size_type(self.width)
+        tensor_out.set_shape([self.bs, self.height, self.width, self.channel])
+
         with tf.variable_scope(self.name, "UNet"):
             encoder_layers = {}
 
@@ -82,8 +100,8 @@ class UNet(base.BaseNet):
                     for i in range(1, self.num_classes):
                         self._layers[self.classes[i] + "Prob"] = split[i]
                 if ret_pred:
-                    zeros = tf.zeros_like(split[0], dtype=tf.int32)
-                    ones = tf.ones_like(zeros, dtype=tf.int32)
+                    zeros = tf.zeros_like(split[0], dtype=tf.uint8)
+                    ones = tf.ones_like(zeros, dtype=tf.uint8)
                     for i in range(1, self.num_classes):
                         obj = self.classes[i] + "Pred"
                         self._layers[obj] = tf.where(split[i] > 0.5, ones, zeros, name=obj)
@@ -93,20 +111,29 @@ class UNet(base.BaseNet):
     def _build_loss(self):
         losses.weighted_sparse_softmax_cross_entropy(
             self._layers["logits"], self._inputs["labels"],
-            self.args.loss_weight_type, self._get_weights_params(), name="Losses")
+            self.args.loss_weight_type, name="Losses/", **self._get_weights_params())
 
         # Set the name of the total loss as "loss" which will be summarized by Estimator
-        with tf.name_scope("Losses"):
-            return tf.losses.get_total_loss()
+        with tf.name_scope("Losses/"):
+            total_loss = tf.losses.get_total_loss()
+            tf.losses.add_loss(total_loss)
+            return total_loss
 
     def _build_metrics(self):
         if self.mode in [ModeKeys.TRAIN, ModeKeys.EVAL]:
-            with tf.name_scope("LabelProcess"):
+            with tf.name_scope("LabelProcess/"):
                 try:
                     one_hot_label = tf.get_default_graph().get_tensor_by_name("LabelProcess/one_hot:0")
                 except KeyError:
                     one_hot_label = tf.one_hot(self._inputs["labels"], self.num_classes)
-                split_labels = tf.split(one_hot_label, self.num_classes, axis=-1)
+
+                split_labels = []
+                try:
+                    for i in range(self.num_classes):
+                        split_labels.append(graph.get_tensor_by_name("LabelProcess/split:{}".format(i)))
+                except KeyError:
+                    split_labels = tf.split(one_hot_label, self.num_classes, axis=-1)
+
             with tf.name_scope("Metrics"):
                 for i in range(1, self.num_classes):
                     obj = self.classes[i]
@@ -118,16 +145,19 @@ class UNet(base.BaseNet):
 
     def _build_summaries(self):
         if self.mode == ModeKeys.TRAIN:
-            images = self._inputs["images"]
+            # Make sure all the elements are positive
+            images = self._inputs["images"] + tf.reduce_min(self._inputs["images"])
             tf.summary.image("{}/{}".format(self.args.tag, images.op.name), images,
                              max_outputs=1, collections=[self.DEFAULT])
 
             labels = tf.expand_dims(self._inputs["labels"], axis=-1)
-            tf.summary.image("{}/{}".format(self.args.tag, labels.op.name), labels,
+            with tf.name_scope("LabelProcess/"):
+                labels_uint8 = tf.cast(labels * 255 / len(self.args.classes), tf.uint8)
+            tf.summary.image("{}/{}".format(self.args.tag, labels.op.name), labels_uint8,
                              max_outputs=1, collections=[self.DEFAULT])
 
             for key, value in self._image_summaries.items():
-                tf.summary.image("{}/{}".format(self.args.tag, key), value,
+                tf.summary.image("{}/{}".format(self.args.tag, key), value * 255,
                                  max_outputs=1, collections=[self.DEFAULT])
 
             for tensor in losses.get_losses():

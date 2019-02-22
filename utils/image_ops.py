@@ -121,29 +121,35 @@ def random_zoom_in(image, label=None, max_scale=1.5, seed_scale=None, seed_shift
             shape = tf.shape(image)
             size = tf.to_int32(tf.to_float(shape[:-1]) * rd_scale)
             expanded_image = tf.expand_dims(image, axis=0)
-            central_zoom_in = tf.image.resize_bilinear(expanded_image, size)
-            central_zoom_in = tf.squeeze(central_zoom_in, axis=0)
+            central_zoom_in_image = tf.image.resize_bilinear(expanded_image, size)
+            central_zoom_in_image = tf.squeeze(central_zoom_in_image, axis=0)
             seed = random.randint(0, 2147482647) if seed_shift is None else seed_shift
-            cropped_image = tf.image.random_crop(central_zoom_in, shape, seed=seed)
 
             cropped_label = None
             if label is not None:
                 label_shape = label.get_shape()
                 assert label_shape.ndims is None or image_shape.ndims is None or \
-                       image_shape.ndims - label_shape.ndims == 1, \
+                    image_shape.ndims - label_shape.ndims == 1, \
                     "image and label shape: {} vs {}".format(image_shape, label_shape)
                 # Zoom in also with label
                 expanded_label = tf.expand_dims(tf.expand_dims(label, 0), -1)
-                central_zoom_in = tf.image.resize_nearest_neighbor(expanded_label, size)
-                central_zoom_in = tf.squeeze(central_zoom_in, [0, -1])
-                cropped_label = tf.image.random_crop(central_zoom_in, tf.shape(label), seed=seed)
+                central_zoom_in_label = tf.image.resize_nearest_neighbor(expanded_label, size)
+                central_zoom_in_label = tf.to_float(tf.squeeze(central_zoom_in_label, axis=0))
+
+                combined = tf.concat(axis=-1, values=[central_zoom_in_image, central_zoom_in_label])
+                new_shape = tf.concat([shape[:-1], [shape[-1] + 1]], axis=0)
+                cropped_combined = tf.image.random_crop(combined, new_shape, seed=seed)
+                cropped_image = cropped_combined[..., :-1]
+                cropped_label = tf.to_int32(cropped_combined[..., -1])
+            else:
+                cropped_image = tf.image.random_crop(central_zoom_in_image, shape, seed=seed)
+
         elif image_shape.ndims == 4:
             rd_scale = tf.random_uniform([2], 1, max_scale, seed=seed_scale)
             shape = tf.shape(image)
             size = tf.to_int32(tf.to_float(shape[1:-1]) * rd_scale)
-            central_zoom_in = tf.image.resize_bilinear(image, size)
+            central_zoom_in_image = tf.image.resize_bilinear(image, size)
             seed = random.randint(0, 2147482647) if seed_shift is None else seed_shift
-            cropped_image = tf.image.random_crop(central_zoom_in, shape, seed=seed)
 
             cropped_label = None
             if label is not None:
@@ -153,9 +159,16 @@ def random_zoom_in(image, label=None, max_scale=1.5, seed_scale=None, seed_shift
                     "image and label shape: {} vs {}".format(image_shape, label_shape)
                 # Zoom in also with label
                 extended_label = tf.expand_dims(label, axis=-1)
-                central_zoom_in = tf.image.resize_nearest_neighbor(extended_label, size)
-                central_zoom_in = tf.squeeze(central_zoom_in, axis=-1)
-                cropped_label = tf.image.random_crop(central_zoom_in, tf.shape(label), seed=seed)
+                central_zoom_in_label = tf.image.resize_nearest_neighbor(extended_label, size)
+                central_zoom_in_label = tf.to_float(central_zoom_in_label)
+
+                combined = tf.concat(axis=-1, values=[central_zoom_in_image, central_zoom_in_label])
+                new_shape = tf.concat([shape[:-1], [shape[-1] + 1]], axis=0)
+                cropped_combined = tf.image.random_crop(combined, new_shape, seed=seed)
+                cropped_image = cropped_combined[..., :-1]
+                cropped_label = tf.to_int32(cropped_combined[..., -1])
+            else:
+                cropped_image = tf.image.random_crop(central_zoom_in_image, shape, seed=seed)
         else:
             raise ValueError('\'image\' must have either 3 or 4 dimensions.')
 

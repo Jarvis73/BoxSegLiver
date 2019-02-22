@@ -17,7 +17,7 @@
 import tensorflow as tf
 
 
-def parse_arguments(parser):
+def add_arguments(parser):
     group = parser.add_argument_group(title="Training Arguments")
     group.add_argument("--learning_rate",
                        type=float,
@@ -28,9 +28,13 @@ def parse_arguments(parser):
                        default="step",
                        choices=["step", "poly"],
                        required=False, help="Learning rate policy for training (default: %(default)s)")
+    group.add_argument("--num_of_steps",
+                       type=int,
+                       default=0,
+                       required=False, help="Number of steps for training")
     group.add_argument("--num_of_total_steps",
                        type=int,
-                       required=True, help="Number of steps for training")
+                       required=True, help="Number of total steps for training")
     group.add_argument("--lr_decay_step",
                        type=int,
                        default=1e5,
@@ -72,12 +76,13 @@ def get_solver_params(args, warm_up=False, slow_start_step=None, slow_start_lear
 
 class Solver(object):
     def __init__(self, args, name=None):
+        """ Don't create ops/tensors in __init__() """
         self._args = args
         self.name = name or "Optimizer"
 
-        # Get global step tensor
-        # Actually, global step tensor will be created by Estimator
-        self.global_step = tf.train.get_or_create_global_step()
+        # global step tensor
+        # Warning: Don't create global step in __init__() function, but __call__()
+        self.global_step = None
 
         self.learning_policy = self.args.learning_policy
         self.base_learning_rate = self.args.learning_rate
@@ -165,14 +170,20 @@ class Solver(object):
             lr_params["slow_start_step"] = kwargs.pop("slow_start_step")
         if "slow_start_learning_rate" in kwargs:
             lr_params["slow_start_learning_rate"] = kwargs.pop("slow_start_learning_rate")
-        lr = self._get_model_learning_rate(**lr_params)
-        optimizer = self._get_model_optimizer(lr)
 
-        update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
-        if update_ops:
-            with tf.control_dependencies(update_ops):
-                train_op = optimizer.minimize(loss)
-        else:
-            train_op = optimizer.minimize(loss, self.global_step)
+        # Get global step here.
+        # __call__() function will be called inside user-defined graph
+        self.global_step = tf.train.get_or_create_global_step()
+
+        with tf.variable_scope("Optimizer"):
+            lr = self._get_model_learning_rate(**lr_params)
+            optimizer = self._get_model_optimizer(lr)
+
+            update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+            if update_ops:
+                with tf.control_dependencies(update_ops):
+                    train_op = optimizer.minimize(loss, global_step=self.global_step)
+            else:
+                train_op = optimizer.minimize(loss, global_step=self.global_step)
 
         return train_op

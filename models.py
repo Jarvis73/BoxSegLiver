@@ -14,11 +14,11 @@
 #
 # =================================================================================
 
-import yaml  # pip install pyyaml
+import yaml  # conda install -c conda-forge pyyaml
 import tensorflow as tf
 from pathlib import Path
 
-from Networks import UNet
+from Networks.UNet import UNet
 
 ModeKeys = tf.estimator.ModeKeys
 
@@ -34,6 +34,9 @@ def add_arguments(parser):
                        type=str,
                        choices=[cls.__name__ for cls in MODEL_ZOO],
                        required=True, help="Model backbone")
+    group.add_argument("--model_config",
+                       type=str,
+                       required=False, help="Model configuration. (default: <model>.yml)")
     group.add_argument("--classes",
                        type=str,
                        nargs="+",
@@ -61,8 +64,11 @@ def get_model_params(args):
         pass
     else:   # Simpler model (only need "args" to initialize)
         params["model"] = eval(args.model)(args)
-        model_config_path = Path(__file__).parent / "Networks" / args.model
-        params["model_kwargs"] = yaml.load(str(model_config_path.with_suffix(".yml")))
+        if not args.model_config:
+            args.model_config = args.model + ".yml"
+        model_config_path = Path(__file__).parent / "Networks" / args.model_config
+        with model_config_path.open() as f:
+            params["model_kwargs"] = yaml.load(f)
 
     return params
 
@@ -73,6 +79,10 @@ def model_fn(features, labels, mode, params):
         labels = tf.identity(labels, name="Labels")
     elif "labels" in features:
         labels = tf.identity(features["labels"], name="Labels")
+
+    loss = None
+    train_op = None
+    predictions = None
 
     if mode == ModeKeys.TRAIN:
         inputs = {"images": images, "labels": labels}
@@ -89,12 +99,6 @@ def model_fn(features, labels, mode, params):
         solver_kwargs = params.get("solver_kwargs", {})
         train_op = solver(loss, *solver_args, **solver_kwargs)
 
-        return tf.estimator.EstimatorSpec(
-            mode=ModeKeys.TRAIN,
-            loss=loss,
-            train_op=train_op
-        )
-
     if mode == ModeKeys.PREDICT:
         inputs = {"images": images}
 
@@ -104,15 +108,23 @@ def model_fn(features, labels, mode, params):
         model_kwargs = params.get("model_kwargs", {})
         model(inputs, ModeKeys.PREDICT, *model_args, **model_kwargs)
 
+    if mode == ModeKeys.PREDICT or (mode == ModeKeys.TRAIN and not params["args"].train_without_eval):
         obj_tensors = [model.layers[obj + "Pred"] for obj in model.classes if obj != "Background"]
         predictions = {obj.op.name: obj for obj in obj_tensors}
 
-        with tf.name_scope("LabelProcess"):
+        with tf.name_scope("LabelProcess/"):
+            graph = tf.get_default_graph()
             try:
-                one_hot_label = tf.get_default_graph().get_tensor_by_name("LabelProcess/one_hot:0")
+                one_hot_label = graph.get_tensor_by_name("LabelProcess/one_hot:0")
             except KeyError:
                 one_hot_label = tf.one_hot(labels, model.num_classes)
-            split_labels = tf.split(one_hot_label, model.num_classes, axis=-1)
+
+            split_labels = []
+            try:
+                for i in range(model.num_classes):
+                    split_labels.append(graph.get_tensor_by_name("LabelProcess/split:{}".format(i)))
+            except KeyError:
+                split_labels = tf.split(one_hot_label, model.num_classes, axis=-1)
 
         others = {
             "Labels": split_labels[1:],
@@ -122,7 +134,13 @@ def model_fn(features, labels, mode, params):
         }
         predictions.update(others)
 
-        return tf.estimator.EstimatorSpec(
-            mode=ModeKeys.PREDICT,
-            predictions=predictions
-        )
+    #############################################################################
+    kwargs = {"loss": loss,
+              "train_op": train_op,
+              "predictions": predictions}
+
+    if mode == ModeKeys.TRAIN:
+        return tf.estimator.EstimatorSpec(mode=ModeKeys.TRAIN, **kwargs)
+
+    if mode == ModeKeys.PREDICT:
+        return tf.estimator.EstimatorSpec(mode=ModeKeys.PREDICT, **kwargs)

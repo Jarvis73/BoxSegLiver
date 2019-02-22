@@ -22,15 +22,18 @@ def add_arguments(parser):
     group = parser.add_argument_group(title="Global Arguments")
     group.add_argument("--mode",
                        type=str,
-                       default="TRAIN",
-                       choices=["TRAIN", "EVAL", "PREDICT"],
-                       required=True, help="Model mode for train/val/test (default: %(default)s)")
+                       choices=["train", "eval", "infer"],
+                       required=True, help="Model mode for train/val/test")
     group.add_argument("--tag",
                        type=str,
                        required=True, help="Configuration tag(like UID)")
+    group.add_argument("--train_without_eval",
+                       action="store_true",
+                       required=False, help="Evaluate model during training")
     group.add_argument("--model_dir",
                        type=str,
-                       required=True, help="Directory to save model parameters, graph and etc")
+                       default="",
+                       required=False, help="Directory to save model parameters, graph and etc")
 
     group = parser.add_argument_group(title="Loss Arguments")
     group.add_argument("--weight_decay_rate",
@@ -44,7 +47,7 @@ def add_arguments(parser):
                        type=str,
                        default="none",
                        choices=["none", "numerical", "proportion"],
-                       required=False, help="Weights used in loss function for alleviating class imbalance problem"
+                       required=False, help="Weights used in loss function for alleviating class imbalance problem "
                                             "(default %(default)s)")
     group.add_argument("--loss_numeric_w",
                        type=float,
@@ -58,36 +61,60 @@ def add_arguments(parser):
                                             "for details. (default: %(default)f)")
     group.add_argument("--metrics_train",
                        type=str,
-                       default="Dice",
+                       default=["Dice"],
                        choices=["Dice", "VOE", "VD"],
-                       nargs="+",
-                       required=False, help="Evaluation metric names (default: %(default)s)")
-
-    group = parser.add_argument_group(title="Evaluation Arguments")
-    group.add_argument("--metrics_eval",
-                       type=str,
-                       default="Dice",
-                       choices=["Dice", "VOE", "RVD", "ASSD", "RMSD", "MSD"],
                        nargs="+",
                        required=False, help="Evaluation metric names (default: %(default)s)")
 
 
 def check_args(args, parser):
+
     if args.zoom_scale < 1:
         raise parser.error("Asserting {} >= 1 failed!".format(args.zoom_scale))
-    if len(args.loss_numeric_w) != len(args.classes) + 1:
-        raise parser.error("Asserting len(args.loss_numeric_w) = len(args.classes) + 1 failed!")
-    for x in args.dataset_for_train:
-        record = Path(__file__).parent / "data" / x
-        if not record.exists():
-            raise parser.error("File not found: " + str(record))
+
+    if args.loss_weight_type == "numerical":
+        if not args.loss_numeric_w:
+            raise parser.error("loss_weight_type==numerical need parameter: --loss_numeric_w")
+        if len(args.loss_numeric_w) != len(args.classes) + 1:
+            raise parser.error("Asserting len(args.loss_numeric_w) = len(args.classes) + 1 failed!")
+    elif args.loss_weight_type == "proportion":
+        if not args.loss_proportion_decay:
+            raise parser.error("loss_weight_type==proportion need parameter: --loss_proportion_decay")
+
+    if args.primary_metric:
+        parts = args.primary_metric.split("/")
+        if len(parts) == 2:
+            if parts[0] not in args.classes or parts[1] not in args.metrics_eval:
+                raise ValueError("Wrong primary_metric: {}".format(args.primary_metric))
+    if args.secondary_metric:
+        parts = args.secondary_metric.split("/")
+        if len(parts) == 2:
+            if parts[0] not in args.classes or parts[1] not in args.metrics_eval:
+                raise ValueError("Wrong secondary_metric: {}".format(args.secondary_metric))
+
+    if args.mode == ModeKeys.TRAIN:
+        if not args.dataset_for_train:
+            raise parser.error("TRAIN mode need parameter: --dataset_for_train")
+        for x in args.dataset_for_train:
+            record = Path(__file__).parent / "data" / x
+            if not record.exists():
+                raise parser.error("File not found: " + str(record))
+
     if args.mode == ModeKeys.EVAL:
         if not args.dataset_for_eval:
-            raise parser.error("EVAL mode need `dataset_for_eval`")
+            raise parser.error("EVAL mode need parameter: --dataset_for_eval")
         for x in args.dataset_for_eval:
             record = Path(__file__).parent / "data" / x
             if not record.exists():
                 raise parser.error("File not found: " + str(record))
+
+
+def fill_default_args(args):
+    if not args.model_dir:
+        model_dir = Path(__file__).parent / "model_dir"
+        if not model_dir.exists():
+            model_dir.mkdir(exist_ok=True)
+        args.model_dir = str(model_dir / args.tag)
 
 
 def main():

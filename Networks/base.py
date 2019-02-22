@@ -18,6 +18,8 @@ import tensorflow as tf
 import tensorflow.contrib.slim as slim
 from tensorflow.python.ops import init_ops
 
+import loss_metrics as metrics
+
 ModeKeys = tf.estimator.ModeKeys
 
 
@@ -31,6 +33,9 @@ class BaseNet(object):
         self._layers = {}
         self._image_summaries = {}
         self.classes = ["Background"]
+
+        self._is_training = self.mode == ModeKeys.TRAIN
+        self._feed_dict = {}
 
         # Summary collections
         self.DEFAULT = tf.GraphKeys.SUMMARIES
@@ -55,7 +60,7 @@ class BaseNet(object):
 
     @property
     def is_training(self):
-        return self.mode == ModeKeys.TRAIN
+        return self._is_training
 
     @property
     def args(self):
@@ -68,6 +73,22 @@ class BaseNet(object):
     @property
     def layers(self):
         return self._layers
+
+    @property
+    def feed_dict(self):
+        return self._feed_dict
+
+    @property
+    def metrics(self):
+        all_metrics = {}
+        for tensor in metrics.get_metrics():
+            name = tensor.op.name
+            parts = name.split("/")
+            if parts[-1] == "value" and len(parts) > 1:
+                all_metrics[parts[-2]] = tensor
+            else:
+                all_metrics[name] = tensor
+        return all_metrics
 
     def _net_arg_scope(self, *args, **kwargs):
         raise NotImplementedError
@@ -136,6 +157,11 @@ class BaseNet(object):
         self._inputs = inputs
         self.mode = mode
 
+        if self._args.normalizer == "batch_norm" and self.mode == ModeKeys.TRAIN:
+            # If training, add a placeholder for batch norm which can be changed in evaluation during training
+            self._is_training = tf.placeholder(tf.bool, shape=(), name="IsTraining")
+            self._feed_dict[self._is_training] = True
+
         default_w_regu, default_b_regu = self._get_regularizer()
         default_w_init, default_b_init = self._get_initializer()
 
@@ -155,3 +181,8 @@ class BaseNet(object):
             self._build_summaries()
 
             return loss
+
+    def get_eval_feed_dict(self):
+        if self._args.normalizer == "batch_norm" and not isinstance(self._is_training, bool):
+            return {self._is_training: False}
+        return {}

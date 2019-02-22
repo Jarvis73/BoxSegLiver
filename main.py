@@ -15,26 +15,33 @@
 # =================================================================================
 
 import argparse
-import tensorflow as tf
+import tensorflow as tf     # Tensorflow >= 1.12.0
+from pathlib import Path
+from tensorflow.python.platform import tf_logging as logging
 
 import config
 import models
 import solver
 import input_pipeline
-import session_run_helper as training
+import custom_evaluator
+from utils.logger import create_logger
+from custom_estimator import CustomEstimator
 
 ModeKeys = tf.estimator.ModeKeys
 TF_RANDOM_SEED = 13579
 
 
-def _get_arguments():
+def _get_arguments(argv):
     parser = argparse.ArgumentParser()
     config.add_arguments(parser)
     models.add_arguments(parser)
     input_pipeline.add_arguments(parser)
+    solver.add_arguments(parser)
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv[1:])
     config.check_args(args, parser)
+    config.fill_default_args(args)
+
     return args
 
 
@@ -44,49 +51,49 @@ def _get_session_config():
     return sess_cfg
 
 
-def main():
-    """
-    Estimator-defined running hooks:
-        - _DatasetInitializerHook
-        - NanTensorHook
-        - LoggingTensorHook
-        - CheckpointSaverHook
-        - StepCounterHook
-        - SummarySaverHook
+def _custom_tf_logger(args):
+    # Set custom logger
+    log_dir = Path(__file__).parent / "logs"
+    if not log_dir.exists():
+        log_dir.mkdir(exist_ok=True)
 
-    """
-    args = _get_arguments()
+    log_file = log_dir / "{}_{}".format(args.mode, args.tag)
+    logging._logger = create_logger(log_file=log_file, with_time=True,
+                                    clear_exist_handlers=True, name="tensorflow")
+
+
+def main(argv):
+    args = _get_arguments(argv)
+    _custom_tf_logger(args)
+    logging.info(args)
 
     if args.mode == ModeKeys.TRAIN:
         run_config = tf.estimator.RunConfig(
             tf_random_seed=TF_RANDOM_SEED,
-            save_summary_steps=100,
+            save_summary_steps=200,
             save_checkpoints_steps=5000,
             session_config=_get_session_config(),
             keep_checkpoint_max=3,
-            log_step_count_steps=200,
+            log_step_count_steps=500,
         )
 
         params = {"args": args}
         params.update(models.get_model_params(args))
         params.update(solver.get_solver_params(args))
+        if not args.train_without_eval:
+            params.update(custom_evaluator.get_eval_params(eval_steps=args.eval_steps,
+                                                           primary_metric=args.primary_metric,
+                                                           secondary_metric=args.secondary_metric))
 
-        # Construct estimator
-        model = tf.estimator.Estimator(models.model_fn, args.model_dir, run_config, params)
+        estimator = CustomEstimator(models.model_fn, args.model_dir, run_config, params)
 
-        # Train the model
-        model.train(input_pipeline.input_fn, max_steps=args.num_of_total_steps)
-
-        # Evaluate the model
-        # model.evaluate()
-
-        # Train and evaluate the model
-        train_spec = tf.estimator.TrainSpec(input_pipeline.input_fn, max_steps=args.num_of_total_steps)
-        best_expoter = tf.estimator.BestExporter()
-        eval_spec = tf.estimator.EvalSpec(input_pipeline.input_fn, steps=None, name=None,
-                                          hooks=None)
-        training.train_and_evaluate(model, train_spec, eval_spec)
+        kwargs = {"save_best_ckpt": args.save_best}
+        if args.num_of_steps > 0:
+            kwargs["steps"] = args.num_of_steps
+        else:
+            kwargs["max_steps"] = args.num_of_total_steps
+        estimator.train(input_pipeline.input_fn, **kwargs)
 
 
 if __name__ == "__main__":
-    main()
+    tf.app.run(main)

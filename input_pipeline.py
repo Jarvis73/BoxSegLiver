@@ -17,6 +17,7 @@
 import tensorflow as tf
 from functools import partial
 from pathlib import Path
+from tensorflow.python.platform import tf_logging as logging
 
 from utils import image_ops
 
@@ -43,24 +44,36 @@ def add_arguments(parser):
     group = parser.add_argument_group(title="Input Pipeline Arguments")
     group.add_argument("--dataset_for_train",
                        type=str,
-                       nargs="+",
-                       required=True, help="TFRecord names for model input. Such as "
-                                           "\"LiTS/records/data_fold_0.tfrecord\" or a *.json file "
-                                           "(Check data/dataset_example.json for details)")
+                       nargs="*",
+                       required=False, help="TFRecord names for model input. Such as "
+                                            "\"LiTS/records/data_fold_0.tfrecord\" or a *.json file "
+                                            "(Check data/dataset_example.json for details)")
     group.add_argument("--dataset_for_eval",
                        type=str,
                        nargs="*",
                        required=False, help="TFRecord names for model input. Such as "
                                             "\"LiTS/records/data_fold_0.tfrecord\" or a *.json file "
                                             "(Check data/dataset_example.json for details)")
+    group.add_argument("--im_height",
+                       type=int,
+                       default=512,
+                       required=False, help="Image height (default: %(default)d)")
+    group.add_argument("--im_width",
+                       type=int,
+                       default=512,
+                       required=False, help="Image width (default: %(default)d)")
+    group.add_argument("--im_channel",
+                       type=int,
+                       default=1,
+                       required=False, help="Image channel (default: %(default)d)")
     group.add_argument("--w_width",
                        type=float,
                        default=450,
-                       required=False, help="Medical image window width (default: %(default)d)")
+                       required=False, help="Medical image window width (default: %(default)f)")
     group.add_argument("--w_level",
                        type=float,
                        default=50,
-                       required=False, help="Medical image window level (default: %(default)d)")
+                       required=False, help="Medical image window level (default: %(default)f)")
     group.add_argument("--zoom",
                        action="store_true",
                        required=False, help="Augment dataset with random zoom in and shift")
@@ -87,13 +100,14 @@ def _collect_datasets(datasets):
             tf_records.append(str(record))
         elif record.suffix == ".json":
             import json
-            records = json.load(str(record))["dataset"]
+            with record.open() as f:
+                records = json.load(f)["dataset"]
             for one_file in records:
                 record_ = Path(__file__).parent / "data" / one_file
                 if record_.suffix == ".tfrecord":
-                    tf_records.append(str(record))
+                    tf_records.append(str(record_))
                 else:
-                    raise ValueError("Not supported data format: " + str(record))
+                    raise ValueError("Not supported data format: " + str(record_))
         else:
             raise ValueError("Not supported data format: " + str(record))
 
@@ -106,7 +120,7 @@ def input_fn(mode, params):
 
     args = params["args"]
 
-    with tf.name_scope("InputPipeline"):
+    with tf.variable_scope("InputPipeline"):
         if mode == ModeKeys.TRAIN:
             tf_records = _collect_datasets(args.dataset_for_train)
             if len(tf_records) > 1:
@@ -207,6 +221,8 @@ def parse_2d_example_proto(example_proto, args):
         label = tf.decode_raw(features["segmentation/encoded"], tf.uint8, name="DecodeMask")
         label = tf.reshape(label, features["segmentation/shape"], name="ReshapeMask")
         label = tf.to_int32(label)
+        if len(args.classes) == 1:  # Only liver
+            label = tf.clip_by_value(label, 0, 1)
 
     with tf.name_scope(PREPROCESS):
         image = image_ops.random_adjust_window_width_level(image, args.w_width, args.w_level,
@@ -251,6 +267,8 @@ def parse_3d_example_proto(example_proto, args):
         label = tf.decode_raw(features["segmentation/encoded"], tf.uint8, name="DecodeMask")
         label = tf.reshape(label, features["segmentation/shape"], name="ReshapeMask")
         label = tf.to_int32(label)
+        if len(args.classes) == 1:  # Only liver
+            label = tf.clip_by_value(label, 0, 1)
 
     with tf.name_scope(PREPROCESS):
         # image shape [depth, height, width, channel]
@@ -292,8 +310,11 @@ def data_augmentation(features, labels, args):
             if args.zoom:
                 features["images"], labels = image_ops.random_zoom_in(features["images"], labels,
                                                                       args.zoom_scale)
+                logging.info("Add random zoom, scale = {}".format(args.zoom_scale))
+
             if args.noise:
                 features["images"] = image_ops.random_noise(features["images"], args.noise_scale)
+                logging.info("Add random noise, scale = {}".format(args.noise_scale))
 
             return features, labels
 
@@ -392,3 +413,34 @@ def get_multi_records_dataset_for_eval(file_names, args):
                .prefetch(buffer_size=args.batch_size))
 
     return dataset
+
+
+# def main():
+#     import argparse
+#     import models
+#     import matplotlib.pyplot as plt
+#     parser = argparse.ArgumentParser()
+#     add_arguments(parser)
+#     models.add_arguments(parser)
+#     args = parser.parse_args()
+#     logging.set_verbosity(logging.INFO)
+#
+#     file_names = [r"D:\documents\MLearning\MultiOrganDetection\core\MedicalImageSegmentation\data\LiTS\records\test-2D-3-of-5.tfrecord",
+#                   r"D:\documents\MLearning\MultiOrganDetection\core\MedicalImageSegmentation\data\LiTS\records\test-2D-4-of-5.tfrecord"]
+#     dataset = get_multi_records_dataset_for_train(file_names, args)
+#
+#     features, labels = dataset.make_one_shot_iterator().get_next()
+#
+#     sess = tf.Session()
+#
+#     while True:
+#         img, lab = sess.run([features["images"], labels])
+#         plt.subplot(121)
+#         plt.imshow(img[0, ..., 0], cmap="gray")
+#         plt.subplot(122)
+#         plt.imshow(lab[0], cmap="gray")
+#         plt.show()
+#
+#
+# if __name__ == "__main__":
+#     main()

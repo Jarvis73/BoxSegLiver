@@ -21,12 +21,49 @@ from medpy import metric as mtr     # pip install medpy
 METRICS = "metrics"
 
 
-def get_losses():
-    with tf.name_scope("Losses"):
-        regu_loss = [tf.losses.get_regularization_loss()]
-    total_losses = tf.losses.get_losses() + regu_loss
+def get_losses(graph=None):
+    graph = graph or tf.get_default_graph()
+    total_losses = tf.losses.get_losses() + [get_or_create_regularization_loss(graph)]
     for loss in total_losses:
         yield loss
+
+
+def get_or_create_regularization_loss(graph, regu_loss_name="Losses/total_regularization_loss:0"):
+    try:
+        regu_loss = graph.get_tensor_by_name(regu_loss_name)
+    except KeyError:
+        with tf.name_scope("Losses/"):
+            regu_loss = tf.losses.get_regularization_loss()
+    return regu_loss
+
+
+def get_total_loss(add_regularization_losses=True, graph=None, name="total_loss"):
+    """Returns a tensor whose value represents the total loss.
+
+      In particular, this adds any losses you have added with `tf.add_loss()` to
+      any regularization losses that have been added by regularization parameters
+      on layers constructors e.g. `tf.layers`. Be very sure to use this if you
+      are constructing a loss_op manually. Otherwise regularization arguments
+      on `tf.layers` methods will not function.
+
+      Args:
+        add_regularization_losses: A boolean indicating whether or not to use the
+          regularization losses in the sum.
+        graph: A Graph object
+        name: The name of the returned tensor.
+
+      Returns:
+        A `Tensor` whose value represents the total loss.
+
+      Raises:
+        ValueError: if `losses` is not iterable.
+      """
+    losses = tf.losses.get_losses()
+    graph = graph or tf.get_default_graph()
+
+    if add_regularization_losses:
+        losses += [get_or_create_regularization_loss(graph)]
+    return tf.add_n(losses, name=name)
 
 
 def _compute_weights(w_type, one_hot_labels, name=None, **kwargs):
@@ -69,6 +106,10 @@ def weighted_sparse_softmax_cross_entropy(logits, labels, w_type, name=None, **k
 
 
 ################################################################################################
+#
+#   API for metrics
+#
+################################################################################################
 def get_metrics():
     for metric in tf.get_collection(METRICS):
         yield metric
@@ -107,7 +148,7 @@ def metric_dice(logits, labels, eps=1e-5, collections=METRICS, name=None):
         left = tf.reduce_sum(logits, axis=sum_axis)
         right = tf.reduce_sum(labels, axis=sum_axis)
         dice = (2 * intersection) / (left + right + eps)
-        dice = tf.reduce_mean(dice)
+        dice = tf.reduce_mean(dice, name="value")
         tf.add_to_collection(collections, dice)
         return dice
 
@@ -123,7 +164,7 @@ def metric_voe(logits, labels, eps=1e-5, collections=METRICS, name=None):
         numerator = tf.reduce_sum(logits * labels, axis=sum_axis)
         denominator = tf.reduce_sum(tf.clip_by_value(logits + labels, 0.0, 1.0), axis=sum_axis)
         voe = 100 * (1.0 - numerator / (denominator + eps))
-        voe = tf.reduce_mean(voe)
+        voe = tf.reduce_mean(voe, name="value")
         tf.add_to_collection(collections, voe)
         return voe
 
@@ -139,7 +180,7 @@ def metric_vd(logits, labels, eps=1e-5, collections=METRICS, name=None):
         a = tf.reduce_sum(logits, axis=sum_axis)
         b = tf.reduce_sum(labels, axis=sum_axis)
         vd = 100 * (tf.abs(a - b) / (b + eps))
-        vd = tf.reduce_mean(vd)
+        vd = tf.reduce_mean(vd, name="value")
         tf.add_to_collection(collections, vd)
         return vd
 
