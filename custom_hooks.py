@@ -14,11 +14,23 @@
 #
 # =================================================================================
 
+import os
+import json
+import numpy as np
+from pathlib import Path
+
+from tensorflow.python.framework import ops
+from tensorflow.python.framework import dtypes
+# from tensorflow.python.framework import meta_graph
+from tensorflow.python.platform import tf_logging as logging
+from tensorflow.python.training import training_util
 from tensorflow.python.training import session_run_hook
 from tensorflow.python.training import basic_session_run_hooks
-from tensorflow.python.platform import tf_logging as logging
+from tensorflow.python.training import saver as saver_lib
+from tensorflow.python.training.summary_io import SummaryWriterCache
 
-from custom_evaluator import EvaluateVolume
+from custom_evaluator_base import EvaluateBase
+from utils.summary_kits import summary_scalar
 
 
 class IteratorStringHandleHook(session_run_hook.SessionRunHook):
@@ -46,6 +58,7 @@ class IteratorStringHandleHook(session_run_hook.SessionRunHook):
         del coord
         self._train_handle, self._eval_handle = session.run([self._train_string_handle,
                                                              self._eval_string_handle])
+        logging.info("Initialize Dataset.string_handle done!")
 
 
 class BestCheckpointSaverHook(session_run_hook.SessionRunHook):
@@ -55,52 +68,70 @@ class BestCheckpointSaverHook(session_run_hook.SessionRunHook):
                  evaluator,
                  checkpoint_dir,
                  compare_fn,
+                 tag=None,
                  save_secs=None,
                  save_steps=None,
                  saver=None,
-                 checkpoint_basename="best_model.ckpt",
-                 scaffold=None):
+                 checkpoint_basename="best_model.ckpt"):
         """Initializes a `CheckpointSaverHook`.
 
         Args:
-          evaluator: `` for evaluate model
+          tag: `str`, model tag
+          evaluator: for evaluate model
           checkpoint_dir: `str`, base directory for the checkpoint files.
           compare_fn: `function`, compare function for the better results
           save_secs: `int`, save every N secs.
           save_steps: `int`, save every N steps.
           saver: `Saver` object, used for saving.
           checkpoint_basename: `str`, base name for the checkpoint files.
-          scaffold: `Scaffold`, use to get saver object.
 
         Raises:
           ValueError: One of `save_steps` or `save_secs` should be set.
           ValueError: At most one of `saver` or `scaffold` should be set.
         """
         logging.info("Create BestCheckpointSaverHook.")
-        if saver is not None and scaffold is not None:
-            raise ValueError("You cannot provide both saver and scaffold.")
-        if not isinstance(evaluator, EvaluateVolume):
-            raise TypeError("`evaluator` must be an EvaluateVolume instance")
+        if not isinstance(evaluator, EvaluateBase):
+            raise TypeError("`evaluator` must be an EvaluateBase instance")
+        self._summary_tag = tag + "/Eval/{}" if tag else "Eval/{}"
         self._evaluator = evaluator
         self._compare_fn = compare_fn
         self._saver = saver
         self._checkpoint_dir = checkpoint_dir
         self._save_path = os.path.join(checkpoint_dir, checkpoint_basename)
-        self._scaffold = scaffold
         self._timer = basic_session_run_hooks.SecondOrStepTimer(every_secs=save_secs,
                                                                 every_steps=save_steps)
         self._steps_per_run = 1
-        self._better_result = None
         self._need_save = False
+
+        self._better_result = None
+        if self._get_best_result_dump_file().exists():
+            with self._get_best_result_dump_file().open() as f:
+                self._better_result = json.load(f)
+            logging.info("Best result records loaded!")
 
     def _set_steps_per_run(self, steps_per_run):
         self._steps_per_run = steps_per_run
 
     def begin(self):
+        self._summary_writer = SummaryWriterCache.get(self._checkpoint_dir)
         self._global_step_tensor = training_util._get_or_create_global_step_read()  # pylint: disable=protected-access
         if self._global_step_tensor is None:
             raise RuntimeError(
-                "Global step should be created to use CheckpointSaverHook.")
+                "Global step should be created to use BestCheckpointSaverHook.")
+
+    # def after_create_session(self, session, coord):
+    #     global_step = session.run(self._global_step_tensor)
+    #
+    #     # We do write graph and saver_def at the first call of before_run.
+    #     # We cannot do this in begin, since we let other hooks to change graph and
+    #     # add variables in begin. Graph is finalized after all begin calls.
+    #     training_util.write_graph(
+    #         ops.get_default_graph().as_graph_def(add_shapes=True),
+    #         self._checkpoint_dir,
+    #         "best_graph.pbtxt")
+    #     # The checkpoint saved here is the state at step "global_step".
+    #     self._evaluate(session, global_step)
+    #     self._timer.update_last_triggered_step(global_step)
 
     def before_run(self, run_context):
         return session_run_hook.SessionRunArgs(self._global_step_tensor)
@@ -113,22 +144,78 @@ class BestCheckpointSaverHook(session_run_hook.SessionRunHook):
             global_step = run_context.session.run(self._global_step_tensor)
             if self._timer.should_trigger_for_step(global_step):
                 self._timer.update_last_triggered_step(global_step)
-                self._evaluate(run_context.session)
-                if self._save(run_context.session, global_step):
+                if self._evaluate(run_context.session, global_step):
                     run_context.request_stop()
 
-    def _evaluate(self, session):
+    def _evaluate(self, session, step):
         results = self._evaluator.evaluate_with_session(session)
 
         if not self._better_result or self._compare_fn(results, self._better_result):
             self._better_result = results
             self._need_save = True
 
+        return self._save(session, step)
+
     def _save(self, session, step):
         """Saves the better checkpoint, returns should_stop."""
         if not self._need_save:
             return False
         self._need_save = False
+        logging.info("Saving (best) checkpoints for %d into %s.", step, self._save_path)
 
-        
+        # We must use a different latest_filename comparing with the default "checkpoint"
+        self._get_saver().save(session, self._save_path, global_step=step,
+                               latest_filename="checkpoint_best")
+        with self._get_best_result_dump_file().open("w") as f:
+            json.dump(self._get_result_for_json_dump(), f)
 
+        self._summary(step)
+
+        should_stop = False
+        return should_stop
+
+    def _summary(self, step):
+        tags, values = [], []
+        for key, value in self._better_result.items():
+            if key == ops.GraphKeys.GLOBAL_STEP:
+                continue
+            tags.append(self._summary_tag.format(key))
+            values.append(value)
+
+        summary_scalar(self._summary_writer, step, tags, values)
+
+    def _get_result_for_json_dump(self):
+        res = {}
+        for key, val in self._better_result.items():
+            if isinstance(val, np.int64):
+                val = int(val)
+            res[key] = val
+
+        return res
+
+    def _get_best_result_dump_file(self, name="best_result"):
+        return Path(self._save_path).parent / name
+
+    def _get_saver(self):
+        if self._saver is not None:
+            return self._saver
+
+        # Get saver from the SAVERS collection if present.
+        collection_key = ops.GraphKeys.SAVERS
+        savers = ops.get_collection(collection_key)
+        if not savers:
+            raise RuntimeError(
+                "No items in collection {}. Please add a saver to the collection "
+                "or provide a saver or scaffold.".format(collection_key))
+        elif len(savers) > 1:
+            raise RuntimeError(
+                "More than one item in collection {}. "
+                "Please indicate which one to use by passing it to the constructor."
+                .format(collection_key))
+
+        # We create a new saver with the SaverDef of the model main saver
+        # With SaverDef we don't need create extra graph nodes
+        # It is pity that parameter `max_to_keep` is saved to SaverDef and we cannot
+        # change it in duplicate Saver
+        self._saver = saver_lib.Saver(saver_def=savers[0].as_saver_def())
+        return self._saver

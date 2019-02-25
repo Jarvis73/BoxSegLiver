@@ -13,6 +13,9 @@
 # limitations under the License.
 #
 # =================================================================================
+
+import random
+import functools
 import numpy as np
 import scipy.ndimage as ndi
 
@@ -47,6 +50,9 @@ def bbox_from_mask(mask, mask_values, min_shape=None, padding=None):
 
     """
     # assert mask.ndim in [2, 3], "Wrong dimension of `mask`"
+    if np.count_nonzero(mask) == 0:
+        print("Warning: mask is empty!")
+        return np.zeros(shape=(mask.ndim * 2,))
 
     if min_shape is not None:
         assert len(min_shape) == mask.ndim, "Dimensions are mismatch between `mask` and `min_shape`"
@@ -91,7 +97,7 @@ def merge_labels(masks, merges):
     for i, m_list in enumerate(merges):
         if isinstance(m_list, int):
             t_masks[np.where(masks == m_list)] = i
-        elif isinstance(m_list, list):
+        elif isinstance(m_list, (list, tuple)):
             for m_digit in m_list:
                 t_masks[np.where(masks == m_digit)] = i
         else:
@@ -99,8 +105,42 @@ def merge_labels(masks, merges):
     return t_masks
 
 
+def bbox_to_slices(bbox):
+    if not isinstance(bbox, (list, tuple, np.ndarray)):
+        raise TypeError("`bbox` must be an iterable object, got {}"
+                        .format(type(bbox)))
+    if isinstance(bbox, np.ndarray) and len(bbox.shape) > 1:
+        raise TypeError("`bbox` must be an 1-D array, got {}"
+                        .format(bbox))
+    if len(bbox) % 2 != 0:
+        raise ValueError("`bbox` should have even number of elements, got {}"
+                         .format(len(bbox)))
+
+    ndim = len(bbox) // 2
+    slices = [slice(bbox[d], bbox[d + ndim] + 1) for d in reversed(range(ndim))]
+    return tuple(slices)
+
+
+def bbox_to_shape(bbox):
+    if not isinstance(bbox, (list, tuple, np.ndarray)):
+        raise TypeError("`bbox` must be an iterable object, got {}"
+                        .format(type(bbox)))
+    if isinstance(bbox, np.ndarray) and len(bbox.shape) > 1:
+        raise TypeError("`bbox` must be an 1-D array, got {}"
+                        .format(bbox))
+    if len(bbox) % 2 != 0:
+        raise ValueError("`bbox` should have even number of elements, got {}"
+                         .format(len(bbox)))
+
+    ndim = len(bbox) // 2
+    shape = [bbox[d + ndim] - bbox[d] + 1 for d in reversed(range(ndim))]
+    return tuple(shape)
+
+
 def extract_object(src_image, src_mask=None):
     """
+    Extract a sub-volume of src_image where corresponding elements
+    in src_mask is not zero.
 
     Parameters
     ----------
@@ -119,12 +159,62 @@ def extract_object(src_image, src_mask=None):
         src_mask = src_image
     assert np.unique(src_mask).shape[0] == 2, "Mask should only contain two value {0, 1}"
 
-    ndim = mask.ndim
-    bbox = bbox_from_mask(mask, 1, padding=25)
-    slices = [slice(bbox[d], bbox[d + ndim] + 1) for d in reversed(range(ndim))]
-    object_image = src_image[tuple(slices)]
+    bbox = bbox_from_mask(src_mask, 1, padding=25)
+    object_image = src_image[bbox_to_slices(bbox)]
 
     return object_image, bbox
+
+
+def extract_region(mask, align=1, padding=0, min_bbox_shape=None):
+    """ Extract a sub-region. Final region need meet several conditions:
+
+    1. The shape of the sub-region is an integral multiple of `align`
+    2. The shape of the sub-region is not less than `min_shape`
+
+    Parameters
+    ----------
+    mask: ndarray
+        a binary mask to represent liver region
+    align: int or list of int
+        the returned image should be aligned with `align`, default 1(ignore align)
+    padding: int or list of int
+        number pixels of padding in the image border (x, y, z, ...)
+    min_bbox_shape: list of int
+        minimum bounding box shape, passed to bbox_from_mask()
+
+    Returns
+    -------
+    post_bbox: final bounding box
+    """
+    pattern = "Length of `{:s}` should be match with dimension of the image."
+
+    # change to binary mask
+    mask = np.asarray(mask, np.bool)
+    ndim = mask.ndim
+
+    if isinstance(align, int):
+        align = (align,) * ndim
+    elif isinstance(align, (list, tuple)):
+        assert len(align) == ndim, pattern.format("align")
+    else:
+        raise TypeError("`align` must be an integer or a list of integer, got {}"
+                        .format(type(align)))
+    align = np.array(align, dtype=np.int32)
+
+    if min_bbox_shape is None:
+        min_bbox_shape = (1, ) * ndim
+    pre_bbox = bbox_from_mask(mask, mask_values=1, min_shape=min_bbox_shape[::-1])
+    ctr = (pre_bbox[:ndim] + pre_bbox[ndim:]) / 2
+    liver_shape = pre_bbox[ndim:] - pre_bbox[:ndim] + 1     # (x, y) / (x, y, z)
+
+    needed_shape = np.ceil(liver_shape / align).astype(np.int32) * align
+    point1 = np.maximum(0, np.int32(ctr - (needed_shape - 1) / 2))
+    point2 = np.minimum(np.array(mask.shape)[::-1] - 1, point1 + needed_shape - 1)
+    point1 = np.maximum(0, point1 - padding)
+    point2 = np.minimum(np.array(mask.shape)[::-1] - 1, point2 + padding)
+    post_bbox = np.concatenate((point1, point2), axis=0)
+
+    return post_bbox
 
 
 def find_empty_slices(src_image, axis=0, empty_value=0):
@@ -177,9 +267,171 @@ def get_largest_component(inputs, rank, connectivity=1):
         return np.zeros_like(inputs, dtype=np.int8)
 
     labeled_res, n_res = ndi.label(res, struct)
-    areas = np.bincount(labeled_res.flat)
-    arg_min = np.argsort(areas[1:])     # without background
-    return merge_labels(labeled_res, [-1, int(arg_min[-1])])
+    areas = np.bincount(labeled_res.flat)[1:]   # without background
+    arg_min = np.argsort(areas)
+    return merge_labels(labeled_res, [-1, int(arg_min[-1]) + 1])
+
+
+def compute_robust_moments(binary_image, isotropic=False):
+    """
+    Compute robust center and standard deviation of a binary image(0: background, 1: foreground).
+
+    Support n-dimension array.
+
+    Parameters
+    ----------
+    binary_image: ndarray
+        Input a image
+    isotropic: boolean
+        Compute isotropic standard deviation or not.
+
+    Returns
+    -------
+    center: ndarray
+        A vector with dimension = `binary_image.ndim`. Median of all the points assigned 1.
+    std_dev: ndarray
+        A vector with dimension = `binary_image.ndim`. Standard deviation of all the points assigned 1.
+
+    Notes
+    -----
+    All the points assigned 1 are considered as a single object.
+
+    """
+    ndim = binary_image.ndim
+    index = np.nonzero(binary_image)
+    points = np.asarray(index).astype(np.float32)
+    if points.shape[1] == 0:
+        return np.array([-1.0] * ndim, dtype=np.float32), np.array([-1.0] * ndim, dtype=np.float32)
+    points = np.transpose(points)
+    points = np.fliplr(points)
+    center = np.median(points, axis=0)
+
+    # Compute median absolute deviation(short for mad) to estimate standard deviation
+    if isotropic:
+        diff = np.linalg.norm(points - center, axis=1)
+        mad = np.median(diff)
+        mad = np.array([mad] * ndim)
+    else:
+        diff = np.absolute(points - center)
+        mad = np.median(diff, axis=0)
+    std_dev = 1.4826 * mad
+    std_dev = np.maximum(std_dev, [5.0] * ndim)
+    return center, std_dev
+
+
+def get_gd_image_single_obj(labels, center_perturb=0.2, stddev_perturb=0.4, blank_prob=0, partial=False):
+    """
+    Get gaussian distribution image with some perturbation. All points assigned 1 are considered
+    to be the same object.
+
+    Support n-dimension array.
+
+    Parameters
+    ----------
+    labels: ndarray
+        A binary image
+    center_perturb: float
+        Position perturbation of central point
+    stddev_perturb: float
+        Scale perturbation of standard deviation
+    blank_prob: float
+        Probability of returning a blank image(which means no gaussian distribution guide)
+    partial: bool
+        For test mode. If true only first slice has spatial guide for each tumor
+
+    Returns
+    -------
+    gd: ndarray
+        Gaussian distribution image
+
+    """
+    labels = np.asarray(labels, dtype=np.float32)
+    ndim = labels.ndim
+    if partial and ndim != 3:
+        raise ValueError("If `partial` is True, `labels` must have rank 3, but get {}".format(ndim))
+
+    if not np.any(labels) or random.random() < blank_prob:
+        # return a blank gd image
+        return np.zeros(labels.shape)
+
+    idx = 0
+    if partial:
+        idx = np.where(np.count_nonzero(labels, axis=(1, 2)) > 0)[0][0]
+        obj_lab = labels[idx]
+        obj_ndim = ndim - 1
+    else:
+        obj_lab = labels
+        obj_ndim = ndim
+
+    center, std = compute_robust_moments(obj_lab)
+    center_p_ratio = np.random.uniform(-center_perturb, center_perturb, obj_ndim)
+    center_p = center_p_ratio * std + center
+    std_p_ratio = np.random.uniform(1.0 / (1 + stddev_perturb), 1.0 + stddev_perturb, obj_ndim)
+    std_p = std_p_ratio * std
+
+    coords = [np.arange(0, shape) for shape in obj_lab.shape]
+    coords = np.stack(np.meshgrid(*coords, indexing="ij"), axis=-1)
+    normalizer = 2 * (std_p * std_p)
+    d = np.exp(-np.sum((coords - center_p[::-1]) ** 2 / normalizer[::-1], axis=-1))
+    cur_gd = np.clip(d, 0, 1)
+
+    if partial:
+        gd = np.zeros_like(labels)
+        gd[idx] = cur_gd
+        return gd
+    else:
+        return cur_gd
+
+
+def get_gd_image_multi_objs(labels, center_perturb=0.2, stddev_perturb=0.4, blank_prob=0,
+                            connectivity=1, partial=False):
+    """
+    Get gaussian distribution image with some perturbation. Only connected points assigned 1
+    are considered to be the same object.
+
+    Support n-dimension array.
+
+    Parameters
+    ----------
+    labels: ndarray
+        An arbitrary binary image
+    center_perturb: float
+        Position perturbation of central point
+    stddev_perturb: float
+        Scale perturbation of standard deviation
+    blank_prob: float
+        Probability of returning a blank image(which means no gaussian distribution guide)
+    connectivity: integer
+        Passed to function generate_binary_structure()
+    partial: bool
+        For test mode. If true only first slice has spatial guide for each tumor
+
+    Returns
+    -------
+    gd: ndarray
+        Gaussian distribution image
+
+    """
+    labels = np.asarray(labels, dtype=np.float32)
+    ndim = labels.ndim
+
+    if not np.any(labels):
+        # return a blank gd image
+        return np.zeros(labels.shape)
+
+    # Label image and find all objects
+    disc = ndi.generate_binary_structure(ndim, connectivity=connectivity)
+    labeled_image, num_obj = ndi.label(labels, structure=disc)
+    obj_images = [labeled_image == n + 1 for n in range(num_obj)]
+
+    # Compute moments for each object
+    gds = [get_gd_image_single_obj(obj_image, center_perturb, stddev_perturb, blank_prob, partial)
+           for obj_image in obj_images]
+
+    # reduce is faster than np.sum when input is a python list
+    merged_gd = functools.reduce(lambda x, y: np.maximum(x, y), gds)
+
+    return merged_gd
 
 
 if __name__ == "__main__":

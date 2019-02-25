@@ -21,6 +21,45 @@ from medpy import metric as mtr     # pip install medpy
 METRICS = "metrics"
 
 
+def add_arguments(parser):
+    group = parser.add_argument_group(title="Loss Arguments")
+    group.add_argument("--weight_decay_rate",
+                       type=float,
+                       default=1e-5,
+                       required=False, help="Weight decay rate for variable regularizers (default: %(default)f)")
+    group.add_argument("--bias_decay",
+                       action="store_true",
+                       required=False, help="Use bias decay or not")
+    group.add_argument("--loss_weight_type",
+                       type=str,
+                       default="none",
+                       choices=["none", "numerical", "proportion"],
+                       required=False, help="Weights used in loss function for alleviating class imbalance problem "
+                                            "(default %(default)s)")
+    group.add_argument("--loss_numeric_w",
+                       type=float,
+                       nargs="+",
+                       required=False, help="Numeric weights for loss_weight_type=\"numerical\". Notice that one value"
+                                            "for one class")
+    group.add_argument("--loss_proportion_decay",
+                       type=float,
+                       default=1000,
+                       required=False, help="Proportion decay for loss_weight_type=\"proportion\". Check source code"
+                                            "for details. (default: %(default)f)")
+    group.add_argument("--metrics_train",
+                       type=str,
+                       default=["Dice"],
+                       choices=["Dice", "VOE", "VD"],
+                       nargs="+",
+                       required=False, help="Evaluation metric names (default: %(default)s)")
+    group.add_argument("--metrics_eval",
+                       type=str,
+                       default=["Dice"],
+                       choices=["Dice", "VOE", "RVD", "ASSD", "RMSD", "MSD"],
+                       nargs="+",
+                       required=False, help="Evaluation metric names (default: %(default)s)")
+
+
 def get_losses(graph=None):
     graph = graph or tf.get_default_graph()
     total_losses = tf.losses.get_losses() + [get_or_create_regularization_loss(graph)]
@@ -66,7 +105,7 @@ def get_total_loss(add_regularization_losses=True, graph=None, name="total_loss"
     return tf.add_n(losses, name=name)
 
 
-def _compute_weights(w_type, one_hot_labels, name=None, **kwargs):
+def _compute_weights(w_type, one_hot_labels, name=None, form="element_wise", **kwargs):
     w_type = w_type.lower()
     # num_cls = one_hot_labels.shape[-1]
     bs = one_hot_labels.shape[0]
@@ -74,7 +113,7 @@ def _compute_weights(w_type, one_hot_labels, name=None, **kwargs):
 
     with tf.name_scope(name, "_compute_weights"):
         if w_type == "none":
-            w = 1.0
+            return 1.0
         elif w_type == "numerical":
             if "numeric_w" not in kwargs:
                 raise KeyError("w_type `numerical` need keyword argument `numeric_w`")
@@ -88,6 +127,11 @@ def _compute_weights(w_type, one_hot_labels, name=None, **kwargs):
             w = proportions / tf.reduce_sum(proportions)
         else:
             raise ValueError("Not supported weight type: " + w_type)
+
+        if form == "element_wise":
+            w = tf.reduce_sum(w[:, None, None, :] * one_hot_labels, axis=-1)  # [bs, h, w]
+        else:
+            raise ValueError("Not supported weight form: {}".format(form))
 
         return w
 

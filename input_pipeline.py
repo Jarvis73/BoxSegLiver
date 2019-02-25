@@ -14,12 +14,14 @@
 #
 # =================================================================================
 
+import numpy as np
 import tensorflow as tf
 from functools import partial
 from pathlib import Path
 from tensorflow.python.platform import tf_logging as logging
 
 from utils import image_ops
+from utils import array_kits
 
 Dataset = tf.data.Dataset
 ModeKeys = tf.estimator.ModeKeys
@@ -37,7 +39,7 @@ BLOCK_LENGTH = 1
 SHUFFLE_BUFFER_SIZE = 160
 
 # Preprocess name scope
-PREPROCESS = "Preprocess"
+PREPROCESS = "Preprocess/"
 
 
 def add_arguments(parser):
@@ -66,6 +68,9 @@ def add_arguments(parser):
                        type=int,
                        default=1,
                        required=False, help="Image channel (default: %(default)d)")
+    group.add_argument("--resize_for_batch",
+                       action="store_true",
+                       required=False, help="Resize image to the same shape for batching")
     group.add_argument("--w_width",
                        type=float,
                        default=450,
@@ -74,6 +79,9 @@ def add_arguments(parser):
                        type=float,
                        default=50,
                        required=False, help="Medical image window level (default: %(default)f)")
+    group.add_argument("--flip",
+                       action="store_true",
+                       required=False, help="Augment dataset with random flip")
     group.add_argument("--zoom",
                        action="store_true",
                        required=False, help="Augment dataset with random zoom in and shift")
@@ -89,10 +97,24 @@ def add_arguments(parser):
                        type=float,
                        default=0.05,
                        required=False, help="Random noise scale (default: %(default)f)")
+    group.add_argument("--use_spatial_guide",
+                       action="store_true",
+                       required=False, help="Use spatial guide")
+    group.add_argument("--center_perturb",
+                       type=float,
+                       default=0.2,
+                       required=False, help="Center perturbation scale for spatial guide (default: %(default)f)")
+    group.add_argument("--stddev_perturb",
+                       type=float,
+                       default=0.4,
+                       required=False, help="stddev perturbation scale for spatial guide (default: %(default)f)")
 
 
 def _collect_datasets(datasets):
     tf_records = []
+
+    if not isinstance(datasets, (list, tuple)):
+        raise TypeError("`datasets` must be iterable, got {}".format(type(datasets)))
 
     for x in datasets:
         record = Path(__file__).parent / "data" / x  # Check exists in config.check_args()
@@ -123,18 +145,14 @@ def input_fn(mode, params):
     with tf.variable_scope("InputPipeline"):
         if mode == ModeKeys.TRAIN:
             tf_records = _collect_datasets(args.dataset_for_train)
-            if len(tf_records) > 1:
+            if len(tf_records) >= 1:
                 return get_multi_records_dataset_for_train(tf_records, args)
-            elif len(tf_records) == 1:
-                return get_record_dataset_for_train(tf_records[0], args)
             else:
                 raise ValueError("No valid dataset found for training")
         elif mode == ModeKeys.EVAL or mode == ModeKeys.PREDICT:
             tf_records = _collect_datasets(args.dataset_for_eval)
-            if len(tf_records) > 1:
+            if len(tf_records) >= 1:
                 return get_multi_records_dataset_for_eval(tf_records, args)
-            elif len(tf_records) == 1:
-                return get_record_dataset_for_eval(tf_records[0], args)
             else:
                 raise ValueError("No valid dataset found for evaluation")
 
@@ -162,8 +180,8 @@ def filter_slices(example_proto, strategy="empty", **kwargs):
         if "size" not in kwargs or not isinstance(kwargs["size"], int):
             raise KeyError("If strategy is `area`, then keyword argument `size` with type "
                            "int is needed.")
-        if kwargs["size"] < 1:
-            raise ValueError("Argument size must be greater than 1, got {}".format(kwargs["size"]))
+        if kwargs["size"] < 0:
+            raise ValueError("Argument size can not be negative, got {}".format(kwargs["size"]))
 
     with tf.name_scope("DecodeProto"):
         if strategy == "empty":
@@ -228,10 +246,16 @@ def parse_2d_example_proto(example_proto, args):
         image = image_ops.random_adjust_window_width_level(image, args.w_width, args.w_level,
                                                            SEED_WIDTH, SEED_LEVEL)
 
+    ret_features = {"images": image,
+                    "names": features["image/name"]}
+
+    if hasattr(args, "train_without_eval") and not args.train_without_eval:
+        ret_features["pads"] = tf.constant(0, dtype=tf.int64)
+    if args.resize_for_batch:
+        ret_features["bboxes"] = tf.constant([0] * 6, dtype=tf.int64)
+
     # return features and labels
-    return {"images": image,
-            "name": features["image/name"],
-            "id": features["extra/number"]}, label
+    return ret_features, label
 
 
 def parse_3d_example_proto(example_proto, args):
@@ -250,16 +274,16 @@ def parse_3d_example_proto(example_proto, args):
 
     """
     with tf.name_scope("DecodeProto"):
-        features = tf.parse_single_example(
-            example_proto,
-            features={
-                "image/encoded": tf.FixedLenFeature([], tf.string),
-                "image/shape": tf.FixedLenFeature([4], tf.int64),
-                "image/name": tf.FixedLenFeature([], tf.string),
-                "segmentation/encoded": tf.FixedLenFeature([], tf.string),
-                "segmentation/shape": tf.FixedLenFeature([3], tf.int64),
-            }
-        )
+        features = {
+            "image/encoded": tf.FixedLenFeature([], tf.string),
+            "image/shape": tf.FixedLenFeature([4], tf.int64),
+            "image/name": tf.FixedLenFeature([], tf.string),
+            "segmentation/encoded": tf.FixedLenFeature([], tf.string),
+            "segmentation/shape": tf.FixedLenFeature([3], tf.int64),
+        }
+        if args.resize_for_batch:
+            features["extra/bbox"] = tf.FixedLenFeature([6], tf.int64)
+        features = tf.parse_single_example(example_proto, features=features)
 
         image = tf.decode_raw(features["image/encoded"], tf.int16, name="DecodeImage")
         image = tf.reshape(image, features["image/shape"], name="ReshapeImage")
@@ -283,9 +307,14 @@ def parse_3d_example_proto(example_proto, args):
         image = tf.concat((image, zero_float), axis=0)
         label = tf.concat((label, zero_int64), axis=0)
 
-    return {"images": image,
-            "name": features["image/name"],
-            "pad": pad}, label
+    ret_features = {"images": image,
+                    "name": features["image/name"],
+                    "pad": pad}
+
+    if args.resize_for_batch:
+        ret_features["bbox"] = features["extra/bbox"]
+
+    return ret_features, label
 
 
 def data_augmentation(features, labels, args):
@@ -306,7 +335,11 @@ def data_augmentation(features, labels, args):
     """
     with tf.name_scope(PREPROCESS):
         with tf.name_scope("Augmentation"):
-            # Random zoom in
+            if args.flip:
+                features["images"], labels = image_ops.random_flip_left_right(
+                    features["images"], labels)
+                logging.info("Add random flip")
+
             if args.zoom:
                 features["images"], labels = image_ops.random_zoom_in(features["images"], labels,
                                                                       args.zoom_scale)
@@ -319,128 +352,124 @@ def data_augmentation(features, labels, args):
             return features, labels
 
 
-def get_record_dataset_for_train(file_name, args):
+def delayed_processing(features, labels, args, for_train, only_first_slice=False, merges=(0, 2)):
+    """ Delayed processing is performed after data augmentation
+
+    Make sure this map function is used before Dataset.batch()
+    """
+
+    def _wrap_get_gd_image_multi_objs(mask):
+        center_perturb = args.center_perturb if args.mode == ModeKeys.TRAIN else 0.
+        stddev_perturb = args.stddev_perturb if args.mode == ModeKeys.TRAIN else 0.
+        guide_image = array_kits.get_gd_image_multi_objs(
+            array_kits.merge_labels(mask, merges),
+            center_perturb,
+            stddev_perturb,
+            partial=only_first_slice)[..., None]
+        return guide_image.astype(np.float32)
+
+    with tf.name_scope(PREPROCESS):
+        if args.use_spatial_guide:
+            guide = tf.py_func(_wrap_get_gd_image_multi_objs, [labels], tf.float32)
+            features["images"] = tf.concat((features["images"], guide), axis=-1)
+
+        if args.resize_for_batch:
+            image = tf.image.resize_bilinear(tf.expand_dims(features["images"], axis=0),
+                                             [args.im_height, args.im_width])
+            features["images"] = tf.squeeze(image, axis=0)
+            if for_train:
+                labels = tf.image.resize_nearest_neighbor(tf.expand_dims(tf.expand_dims(labels, axis=0), axis=-1),
+                                                          [args.im_height, args.im_width])
+                labels = tf.squeeze(labels, axis=(0, -1))
+
+    return features, labels
+
+
+def get_multi_records_dataset_for_train(file_names, args):
     """
     Generate tf.data.Dataset from tf-record file for training
 
     Parameters
     ----------
-    file_name
+    file_names: list or tuple
+        A list of tf-record file names
     args: ArgumentParser
         Used arguments: batch_size, zoom, zoom_scale, noise, noise_scale, w_width, w_level
 
     Returns
     -------
+    A tf.data.Dataset instance
 
     """
     parse_fn = partial(parse_2d_example_proto, args=args)
     augment_fn = partial(data_augmentation, args=args)
     filter_fn = partial(filter_slices, strategy="area", size=100)
+    delayed_fn = partial(delayed_processing, args=args, for_train=True)
 
-    dataset = (tf.data.TFRecordDataset(file_name)
-               .filter(filter_fn)
-               .apply(tf.data.experimental.shuffle_and_repeat(buffer_size=SHUFFLE_BUFFER_SIZE, count=None,
-                                                              seed=SEED_BATCH))
+    if len(file_names) > 1:
+        dataset = (Dataset.from_tensor_slices(file_names)
+                   .shuffle(buffer_size=len(file_names), seed=SEED_FILE)
+                   .interleave(lambda x: (tf.data.TFRecordDataset(x)
+                                          .filter(filter_fn)),
+                               cycle_length=len(file_names),
+                               block_length=BLOCK_LENGTH))
+    else:
+        dataset = tf.data.TFRecordDataset(file_names[0]).filter(filter_fn)
+
+    dataset = (dataset.apply(tf.data.experimental.shuffle_and_repeat(buffer_size=SHUFFLE_BUFFER_SIZE,
+                                                                     count=None, seed=SEED_BATCH))
                .map(parse_fn, num_parallel_calls=args.batch_size)
                .map(augment_fn, num_parallel_calls=args.batch_size)
-               .batch(args.batch_size)
-               .prefetch(buffer_size=args.batch_size))    # for acceleration,
-
-    return dataset
-
-
-def get_multi_records_dataset_for_train(file_names, args):
-    parse_fn = partial(parse_2d_example_proto, args=args)
-    augment_fn = partial(data_augmentation, args=args)
-    filter_fn = partial(filter_slices, strategy="area", size=100)
-
-    dataset = (Dataset.from_tensor_slices(file_names)
-               .shuffle(buffer_size=len(file_names), seed=SEED_FILE)
-               .interleave(lambda x: (tf.data.TFRecordDataset(x)
-                                      .filter(filter_fn)),
-                           cycle_length=len(file_names),
-                           block_length=BLOCK_LENGTH)
-               .apply(tf.data.experimental.shuffle_and_repeat(buffer_size=SHUFFLE_BUFFER_SIZE, count=None,
-                                                              seed=SEED_BATCH))
-               .map(parse_fn, num_parallel_calls=args.batch_size)
-               .map(augment_fn, num_parallel_calls=args.batch_size)
+               .map(delayed_fn, num_parallel_calls=args.batch_size)
                .batch(args.batch_size)
                .prefetch(buffer_size=args.batch_size))
 
     return dataset
 
 
-def _flat_map_fn(x, y):
+def _flat_map_fn(x, y, args):
     repeat_times = tf.shape(x["images"], out_type=tf.int64)[0]
 
-    images = Dataset.from_tensor_slices(x["images"]),
-    labels = Dataset.from_tensor_slices(y),
-    names = Dataset.from_tensors(x["name"]).repeat(repeat_times),
+    images = Dataset.from_tensor_slices(x["images"])
+    labels = Dataset.from_tensor_slices(y)
+    names = Dataset.from_tensors(x["name"]).repeat(repeat_times)
     pads = Dataset.from_tensors(x["pad"]).repeat(repeat_times)
 
     def map_fn(image, label, name, pad):
-        return {"images": image[0],
-                "names": name[0],
+        return {"images": image,
+                "names": name,
+                "pads": pad}, label
+
+    def map_fn_v2(image, label, name, pad, bbox):
+        return {"images": image,
+                "names": name,
                 "pads": pad,
-                "labels": label[0]}
+                "bboxes": bbox}, label
+
+    if args.resize_for_batch:
+        bboxes = Dataset.from_tensors(x["bbox"]).repeat(repeat_times)
+        return Dataset.zip((images, labels, names, pads, bboxes)).map(map_fn_v2)
 
     return Dataset.zip((images, labels, names, pads)).map(map_fn)
 
 
-def get_record_dataset_for_eval(file_name, args):
-    parse_fn = partial(parse_3d_example_proto, args=args)
-
-    # Read 3d dataset and convert to 2d dataset
-    dataset = (tf.data.TFRecordDataset(file_name)
-               .map(parse_fn)
-               .flat_map(_flat_map_fn)
-               .batch(args.batch_size)
-               .prefetch(buffer_size=args.batch_size))
-
-    return dataset
-
-
 def get_multi_records_dataset_for_eval(file_names, args):
     parse_fn = partial(parse_3d_example_proto, args=args)
+    flat_fn = partial(_flat_map_fn, args=args)
+    delayed_fn = partial(delayed_processing, args=args, for_train=False)
 
-    dataset = (Dataset.from_tensor_slices(file_names)
-               .interleave(lambda x: (tf.data.TFRecordDataset(x)),
-                           cycle_length=len(file_names),
-                           block_length=BLOCK_LENGTH)
-               .map(parse_fn, num_parallel_calls=args.batch_size)
-               .flat_map(_flat_map_fn)
+    if len(file_names) > 1:
+        dataset = (Dataset.from_tensor_slices(file_names)
+                   .interleave(lambda x: (tf.data.TFRecordDataset(x)),
+                               cycle_length=len(file_names),
+                               block_length=BLOCK_LENGTH))
+    else:
+        dataset = tf.data.TFRecordDataset(file_names[0])
+
+    dataset = (dataset.map(parse_fn, num_parallel_calls=args.batch_size)
+               .flat_map(flat_fn)
+               .map(delayed_fn, num_parallel_calls=args.batch_size)
                .batch(args.batch_size)
                .prefetch(buffer_size=args.batch_size))
 
     return dataset
-
-
-# def main():
-#     import argparse
-#     import models
-#     import matplotlib.pyplot as plt
-#     parser = argparse.ArgumentParser()
-#     add_arguments(parser)
-#     models.add_arguments(parser)
-#     args = parser.parse_args()
-#     logging.set_verbosity(logging.INFO)
-#
-#     file_names = [r"D:\documents\MLearning\MultiOrganDetection\core\MedicalImageSegmentation\data\LiTS\records\test-2D-3-of-5.tfrecord",
-#                   r"D:\documents\MLearning\MultiOrganDetection\core\MedicalImageSegmentation\data\LiTS\records\test-2D-4-of-5.tfrecord"]
-#     dataset = get_multi_records_dataset_for_train(file_names, args)
-#
-#     features, labels = dataset.make_one_shot_iterator().get_next()
-#
-#     sess = tf.Session()
-#
-#     while True:
-#         img, lab = sess.run([features["images"], labels])
-#         plt.subplot(121)
-#         plt.imshow(img[0, ..., 0], cmap="gray")
-#         plt.subplot(122)
-#         plt.imshow(lab[0], cmap="gray")
-#         plt.show()
-#
-#
-# if __name__ == "__main__":
-#     main()

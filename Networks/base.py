@@ -157,10 +157,10 @@ class BaseNet(object):
         self._inputs = inputs
         self.mode = mode
 
-        if self._args.normalizer == "batch_norm" and self.mode == ModeKeys.TRAIN:
-            # If training, add a placeholder for batch norm which can be changed in evaluation during training
-            self._is_training = tf.placeholder(tf.bool, shape=(), name="IsTraining")
-            self._feed_dict[self._is_training] = True
+        # if self._args.normalizer == "batch_norm" and self.mode == ModeKeys.TRAIN:
+        #     # If training, add a placeholder for batch norm which can be changed in evaluation during training
+        #     self._is_training = tf.placeholder(tf.bool, shape=(), name="IsTraining")
+        #     self._feed_dict[self._is_training] = True
 
         default_w_regu, default_b_regu = self._get_regularizer()
         default_w_init, default_b_init = self._get_initializer()

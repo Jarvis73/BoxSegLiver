@@ -154,7 +154,7 @@ class Solver(object):
 
     def _get_model_optimizer(self, learning_rate):
         if self.optimizer == "adam":
-            optimizer_params = {"beta1": 0.9, "beta2": 0.999}
+            optimizer_params = {"beta1": 0.9, "beta2": 0.99}
             optimizer = tf.train.AdamOptimizer(learning_rate, **optimizer_params)
         elif self.optimizer == "momentum":
             optimizer_params = {"momentum": 0.99}

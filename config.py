@@ -35,37 +35,6 @@ def add_arguments(parser):
                        default="",
                        required=False, help="Directory to save model parameters, graph and etc")
 
-    group = parser.add_argument_group(title="Loss Arguments")
-    group.add_argument("--weight_decay_rate",
-                       type=float,
-                       default=1e-5,
-                       required=False, help="Weight decay rate for variable regularizers (default: %(default)f)")
-    group.add_argument("--bias_decay",
-                       action="store_true",
-                       required=False, help="Use bias decay or not")
-    group.add_argument("--loss_weight_type",
-                       type=str,
-                       default="none",
-                       choices=["none", "numerical", "proportion"],
-                       required=False, help="Weights used in loss function for alleviating class imbalance problem "
-                                            "(default %(default)s)")
-    group.add_argument("--loss_numeric_w",
-                       type=float,
-                       nargs="+",
-                       required=False, help="Numeric weights for loss_weight_type=\"numerical\". Notice that one value"
-                                            "for one class")
-    group.add_argument("--loss_proportion_decay",
-                       type=float,
-                       default=1000,
-                       required=False, help="Proportion decay for loss_weight_type=\"proportion\". Check source code"
-                                            "for details. (default: %(default)f)")
-    group.add_argument("--metrics_train",
-                       type=str,
-                       default=["Dice"],
-                       choices=["Dice", "VOE", "VD"],
-                       nargs="+",
-                       required=False, help="Evaluation metric names (default: %(default)s)")
-
 
 def check_args(args, parser):
 
@@ -107,6 +76,10 @@ def check_args(args, parser):
             record = Path(__file__).parent / "data" / x
             if not record.exists():
                 raise parser.error("File not found: " + str(record))
+
+    if args.use_spatial_guide and args.im_channel <= 1:
+        raise ValueError("When using spatial guide, im_channel should be 2, got {}"
+                         .format(args.im_channel))
 
 
 def fill_default_args(args):

@@ -53,12 +53,18 @@ class UNet(base.BaseNet):
         out_channels = kwargs.get("init_channels", 64)
         num_down_samples = kwargs.get("num_down_samples", 4)
 
-        tensor_out = self._inputs["images"]
-
         # Tensorflow can not infer input tensor shape when constructing graph
         self.height = _check_size_type(self.height)
         self.width = _check_size_type(self.width)
-        tensor_out.set_shape([self.bs, self.height, self.width, self.channel])
+        self._inputs["images"].set_shape([self.bs, self.height, self.width, self.channel])
+        self._inputs["labels"].set_shape([self.bs, None, None])
+
+        tensor_out = self._inputs["images"]
+        down_sample = kwargs.get("input_down_sample", False)
+        h, w = self._inputs["images"].shape[1:3]
+        if down_sample:
+            rate = kwargs.get("input_down_sample_rate", 2)
+            tensor_out = tf.image.resize_bilinear(tensor_out, [h // rate, w // rate])
 
         with tf.variable_scope(self.name, "UNet"):
             encoder_layers = {}
@@ -88,6 +94,8 @@ class UNet(base.BaseNet):
                                 activation_fn=None,
                                 normalizer_fn=None, normalizer_params=None):
                 logits = slim.conv2d(tensor_out, self.num_classes, 1, scope="AdjustChannels")
+                if down_sample:
+                    logits = tf.image.resize_bilinear(logits, [h, w])
                 self._layers["logits"] = logits
 
             # Probability & Prediction
@@ -122,8 +130,9 @@ class UNet(base.BaseNet):
     def _build_metrics(self):
         if self.mode in [ModeKeys.TRAIN, ModeKeys.EVAL]:
             with tf.name_scope("LabelProcess/"):
+                graph = tf.get_default_graph()
                 try:
-                    one_hot_label = tf.get_default_graph().get_tensor_by_name("LabelProcess/one_hot:0")
+                    one_hot_label = graph.get_tensor_by_name("LabelProcess/one_hot:0")
                 except KeyError:
                     one_hot_label = tf.one_hot(self._inputs["labels"], self.num_classes)
 
@@ -146,7 +155,7 @@ class UNet(base.BaseNet):
     def _build_summaries(self):
         if self.mode == ModeKeys.TRAIN:
             # Make sure all the elements are positive
-            images = self._inputs["images"] + tf.reduce_min(self._inputs["images"])
+            images = self._inputs["images"] - tf.reduce_min(self._inputs["images"])
             tf.summary.image("{}/{}".format(self.args.tag, images.op.name), images,
                              max_outputs=1, collections=[self.DEFAULT])
 

@@ -1,9 +1,8 @@
 import tensorflow as tf
+from io import BytesIO
 
-try:
-    from StringIO import StringIO
-except ImportError:
-    from io import StringIO
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 
@@ -23,11 +22,11 @@ def summary_scalar(writer, iter, tags, values):
     """
 
     if not isinstance(tags, (str, list, tuple)):
-        raise TypeError("tags should have type of (str, list, tuple), but got {:r}".format(type(tags)))
+        raise TypeError("tags should have type of (str, list, tuple), but got {}".format(type(tags)))
     if isinstance(tags, str):
         tags = [tags]
     if not isinstance(values, (float, int, list, tuple)):
-        raise TypeError("values should have type of (float, int, list, tuple), but got {:r}".format(type(values)))
+        raise TypeError("values should have type of (float, int, list, tuple), but got {}".format(type(values)))
     if isinstance(values, (float, int)):
         values = [values]
 
@@ -55,7 +54,7 @@ def summary_image(writer, iter, tag, images, max_outputs=3):
 
     all_value = []
     for i, image in enumerate(images):
-        buffer = StringIO()
+        buffer = BytesIO()
         plt.imsave(buffer, image, format="png")
         image_sum_obj = tf.Summary.Image(height=image[0], width=image[1],
                                          encoded_image_string=buffer)

@@ -33,10 +33,11 @@ from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import random_seed
 from tensorflow.python.framework import errors_impl
 from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import variable_scope
 from tensorflow.python.util import function_utils
 # from tensorflow.python.ops import math_ops
 
-from custom_evaluator import EvaluateBase
+from custom_evaluator_base import EvaluateBase
 from custom_hooks import IteratorStringHandleHook
 from custom_hooks import BestCheckpointSaverHook
 
@@ -58,6 +59,23 @@ def _add_key_value(feed_dict, key, value):
         return feed_dict
     else:
         raise TypeError("`feed_dict` must be None or a dict instance")
+
+
+def _check_dataset_structure(ds1, ds2):
+    if not isinstance(ds1, Dataset):
+        raise TypeError("input_fn must return Dataset instance, but got {}"
+                        .format(type(ds1)))
+    if not isinstance(ds2, Dataset):
+        raise TypeError("input_fn must return Dataset instance, but got {}"
+                        .format(type(ds2)))
+
+    # if ds1.output_shapes != ds2.output_shapes:
+    #     raise ValueError("Train/Eval dataset shapes mismatch: {} vs {}"
+    #                      .format(ds1.output_shapes, ds2.output_shapes))
+
+    if ds1.output_types != ds2.output_types:
+        raise ValueError("Train/Eval dataset types mismatch: {} vs {}"
+                         .format(ds1.output_types, ds2.output_types))
 
 
 def parse_input_fn_result(train_with_eval, result, handler=None):
@@ -109,9 +127,7 @@ def parse_input_fn_result(train_with_eval, result, handler=None):
             raise TypeError(err_str)
         if len(result) != 2:
             raise ValueError("`result` should contains 2 Dataset instances, but got {}".format(len(result)))
-        for res in result:
-            if not isinstance(res, Dataset):
-                raise TypeError(err_str)
+        _check_dataset_structure(result[0], result[1])
 
         train_iterator = result[0].make_one_shot_iterator()
         eval_iterator = result[1].make_initializable_iterator()
@@ -127,12 +143,15 @@ class CustomEstimator(object):
     """ Custom Estimator
 
     Predefined hooks:
+        StopAtStepHook
         NanTensorHook
         _DatasetInitializerHook
         LoggingTensorHook
         StepCounterHook
         SummarySaverHook
-        IteratorStringHandleHook
+        IteratorStringHandleHook(custom_hooks): initialize iterator string handle for switching multiple iterator
+        BestCheckpointSaverHook(custom_hooks): save best checkpoints
+        CheckpointInputPipelineHook(tf.data.experiment): save input pipeline
     """
     def __init__(self, model_fn, model_dir=None, config=None, params=None, warm_start_from=None):
         self._config = estimator_lib.maybe_overwrite_model_dir_and_session_config(config, model_dir)
@@ -197,6 +216,8 @@ class CustomEstimator(object):
                     return self
 
             hooks = estimator_lib._check_hooks_type(hooks)
+            hooks.append(training.StopAtStepHook(steps, max_steps))
+
             saving_listeners = estimator_lib._check_listeners_type(saving_listeners)
             loss = self._train_model(input_fn, hooks, saving_listeners, save_best_ckpt)
             logging.info('Loss for final step: %s.', loss)
@@ -213,16 +234,22 @@ class CustomEstimator(object):
         #                  'initialization to predict.'.format(self._model_dir))
         #
         # with ops.Graph().as_default() as g:
-        return
+        raise NotImplementedError
 
-    def predict_with_session(self, session, yield_single_examples):
+    def predict_with_session(self, session, steps=None, yield_single_examples=False):
         predictions = self._predict_keys
         pred_feed_dict = self._params["model"].get_eval_feed_dict()
         if self._train_with_eval:
             pred_feed_dict = _add_key_value(pred_feed_dict, self.handler, self.dataset_handle_hook.eval_handle)
 
         try:
+            # Initialize evaluation iterator
+            session.run(self.eval_iterator.initializer)
+
+            counter = 0
             while True:
+                if steps and counter >= steps:
+                    break
                 preds_evaluated = session.run(predictions, pred_feed_dict)
                 if not yield_single_examples:
                     yield preds_evaluated
@@ -232,8 +259,9 @@ class CustomEstimator(object):
                 else:
                     for i in range(self._extract_batch_length(preds_evaluated)):
                         yield {key: value[i] for key, value in preds_evaluated.items()}
+                counter += 1
         except errors_impl.OutOfRangeError:
-            logging.info("Predict finished!")
+            pass
 
     @staticmethod
     def _extract_batch_length(preds_evaluated):
@@ -255,7 +283,8 @@ class CustomEstimator(object):
         Returns:
             The global step `tf.Tensor`.
         """
-        with ops.name_scope(self.params["args"].tag):
+
+        with variable_scope.variable_scope(self.params["args"].tag):
             step = training.create_global_step(graph)
         assert step.dtype.is_integer
         return step
@@ -292,7 +321,7 @@ class CustomEstimator(object):
         with ops.device('/cpu:0'):
             return input_fn(**kwargs)
 
-    def _get_features_and_labels_from_input_fn(self, mode, input_fn):
+    def _get_features_and_labels_from_input_fn(self, input_fn, mode):
         """Extracts the `features` and labels from return values of `input_fn`."""
         return parse_input_fn_result(False, self._call_input_fn(input_fn, mode))
 
@@ -320,6 +349,7 @@ class CustomEstimator(object):
                 training.LoggingTensorHook(tensors, every_n_iter=self._config.log_step_count_steps))
         worker_hooks.extend(estimator_spec.training_hooks)
 
+        # Create Saver object
         if not (estimator_spec.scaffold.saver or ops.get_collection(ops.GraphKeys.SAVERS)):
             ops.add_to_collection(
                 ops.GraphKeys.SAVERS,
@@ -361,12 +391,11 @@ class CustomEstimator(object):
             self.dataset_handle_hook = IteratorStringHandleHook(self.train_iterator,
                                                                 self.eval_iterator)
             worker_hooks.append(self.dataset_handle_hook)
-            self._feed_dict = _add_key_value(self._feed_dict, self.handler, self.dataset_handle_hook.train_handle)
             self._predict_keys = estimator_spec.predictions
 
         if save_best_ckpt:
             EvaluatorCls = self._params.get("evaluator", None)
-            if not issubclass(EvaluatorCls, EvaluateBase)
+            if not issubclass(EvaluatorCls, EvaluateBase):
                 raise TypeError("Parameter `evaluator` must be a EvaluateBase instance, but got {}"
                                 .format(type(EvaluatorCls)))
             eval_kwargs = self._params.get("eval_kwargs", {})
@@ -384,6 +413,7 @@ class CustomEstimator(object):
                     compare_fn=partial(EvaluatorCls.compare,
                                        primary_metric=primary_metric,
                                        secondary_metric=secondary_metric),
+                    tag=self._params["args"].tag,
                     save_steps=eval_steps))
 
         # Training session monitor
@@ -400,6 +430,10 @@ class CustomEstimator(object):
                 config=self._session_config,
                 log_step_count_steps=self._config.log_step_count_steps) as mon_sess:
             loss = None
+
+            # Make sure that use self.dataset_handle_hook.xxx_handle after create MonitoredSession()
+            self._feed_dict = _add_key_value(self._feed_dict,
+                                             self.handler, self.dataset_handle_hook.train_handle)
             while not mon_sess.should_stop():
                 _, loss = mon_sess.run([estimator_spec.train_op, estimator_spec.loss], self._feed_dict)
             return loss

@@ -18,7 +18,9 @@ from data_kits import build_lits_liver
 
 
 def main():
-    build_lits_liver.convert_data_set("trainval", keep_only_liver=True, seed=1234)
+    # build_lits_liver.convert_to_liver("trainval", keep_only_liver=True, seed=1234)
+    build_lits_liver.convert_to_liver_bounding_box("sample", keep_only_liver=False, seed=1234,
+                                                   align=8, padding=(25, 25, 2))
 
 
 if __name__ == "__main__":

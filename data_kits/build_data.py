@@ -16,10 +16,13 @@
 import numpy as np
 import tensorflow as tf
 from collections import Iterable
+
+from utils import array_kits
 # noinspection PyUnresolvedReferences
 from utils.nii_kits import nii_reader
 # noinspection PyUnresolvedReferences
 from utils.mhd_kits import mhd_reader
+
 
 FORMATS = [
     "mhd",
@@ -33,8 +36,6 @@ class ImageReader(object):
 
     Parameters
     ----------
-    image_format: str
-        image format, supported formats are listed in FORMATS
     image_type: type
         image type to output
     extend_channel: bool
@@ -104,9 +105,54 @@ class ImageReader(object):
 
         def spacing(self):
             if self.format == "mhd":
-                return tuple(self._meta["ElementSpacing"])
+                return tuple(self.header["ElementSpacing"])
             elif self.format == "nii":
-                return self._meta["srow_x"][0], self._meta["srow_y"][1], self._meta["srow_z"][2]
+                return self.header["srow_x"][0], self.header["srow_y"][1], self.header["srow_z"][2]
+
+
+class SubVolumeReader(ImageReader):
+    """
+    Add `bbox` attribute: [x1, y1, z1, ..., x2, y2, z2]
+    """
+    def __init__(self, image_type=np.int16, extend_channel=False):
+        super(SubVolumeReader, self).__init__(image_type, extend_channel)
+        self._bbox = []
+
+    @property
+    def bbox(self):
+        return self._bbox
+
+    @bbox.setter
+    def bbox(self, bbox_):
+        if not isinstance(bbox_, (list, tuple)):
+            raise TypeError("`bbox` must be an iterable object, got {}"
+                            .format(type(bbox_)))
+        if len(bbox_) % 2 != 0:
+            raise ValueError("`bbox` should have even number of elements, got {}"
+                             .format(len(bbox_)))
+
+        self._bbox = bbox_
+        if self._decode is not None:
+            self._clip_image()
+
+    def _clip_image(self):
+        ndim = self._decode.ndim - 1 if self._extend_channel else self._decode.ndim
+        if len(self._bbox) // 2 != ndim:
+                raise ValueError("Mismatched dimensions: self.bbox({}) vs self.image({})"
+                                 .format(len(self._bbox) // 2, ndim))
+
+        self._decode = self._decode[array_kits.bbox_to_slices(self._bbox) +
+                                    ((slice(None, None),) if self._extend_channel else ())]
+
+    def read(self, file_name, idx=None):
+        self._filename = file_name
+        self._check_format(str(file_name).split(".")[-1])
+        self._meta, self._decode = self._reader(file_name)
+        self._decode = self._decode.astype(self._type, copy=False)
+
+        if self._extend_channel:
+            self._decode = self._decode[..., None]
+        return self.image(idx)
 
 
 def _int64_list_feature(values):
@@ -150,6 +196,26 @@ def _bytes_list_feature(values):
     ))
 
 
+def _check_extra_info_type(extra_info):
+    if extra_info is None:
+        return {}, {}
+    if not isinstance(extra_info, dict):
+        raise TypeError("`extra_info` must be a dict, got {}".format(type(extra_info)))
+
+    extra_split, extra_origin = {}, {}
+    for key, val in extra_info.items():
+        p = key.split("_")
+        if len(p) < 2 or p[-1] not in ["split", "origin"]:
+            raise ValueError("Keys in `extra_info` should have format 'xxx_split' or 'xxx_origin'")
+        tag = "_".join(p[:-1])
+        if p[-1] == "split":
+            extra_split[tag] = val
+        else:   # origin
+            extra_origin[tag] = val
+
+    return extra_split, extra_origin
+
+
 def image_to_examples(image_reader, label_reader, split=False, extra_str_info=None, extra_int_info=None):
     """
     Convert N-D image and label to N-D/(N-1)-D tfexamples.
@@ -176,16 +242,14 @@ def image_to_examples(image_reader, label_reader, split=False, extra_str_info=No
     """
     if image_reader.name is None:
         raise RuntimeError("ImageReader need call `read()` first.")
-    if extra_str_info is None:
-        extra_str_info = {}
-    if extra_int_info is None:
-        extra_int_info = {}
+    extra_str_split, extra_str_origin = _check_extra_info_type(extra_str_info)
+    extra_int_split, extra_int_origin = _check_extra_info_type(extra_int_info)
 
     if split:
         num_slices = image_reader.shape[0]
-        for extra_list in extra_str_info.values():
+        for extra_list in extra_str_split.values():
             assert num_slices == len(extra_list), "Length not equal: {} vs {}".format(num_slices, len(extra_list))
-        for extra_list in extra_int_info.values():
+        for extra_list in extra_int_split.values():
             assert num_slices == len(extra_list), "Length not equal: {} vs {}".format(num_slices, len(extra_list))
 
         for idx in range(image_reader.shape[0]):
@@ -200,10 +264,10 @@ def image_to_examples(image_reader, label_reader, split=False, extra_str_info=No
                 "segmentation/shape": _int64_list_feature(label_reader.shape[1:]),
                 "extra/number": _int64_list_feature(idx),
             }
-            for key, val in extra_str_info.items():
-                feature_dict["extra/{}".format(key)] = _bytes_list_feature(str(val[idx]))
-            for key, val in extra_int_info.items():
-                feature_dict["extra/{}".format(key)] = _int64_list_feature(int(val[idx]))
+            for key, val in extra_str_split.items():
+                feature_dict["extra/{}".format(key)] = _bytes_list_feature(val[idx])
+            for key, val in extra_int_split.items():
+                feature_dict["extra/{}".format(key)] = _int64_list_feature(val[idx])
 
             yield tf.train.Example(features=tf.train.Features(feature=feature_dict))
     else:
@@ -217,5 +281,10 @@ def image_to_examples(image_reader, label_reader, split=False, extra_str_info=No
             "segmentation/format": _bytes_list_feature(label_reader.format),
             "segmentation/shape": _int64_list_feature(label_reader.shape)
         }
+
+        for key, val in extra_str_origin.items():
+            feature_dict["extra/{}".format(key)] = _bytes_list_feature(val)
+        for key, val in extra_int_origin.items():
+            feature_dict["extra/{}".format(key)] = _int64_list_feature(val)
 
         yield tf.train.Example(features=tf.train.Features(feature=feature_dict))

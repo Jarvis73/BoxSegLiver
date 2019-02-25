@@ -18,6 +18,7 @@
 Test for image_ops.py
 """
 
+import sys
 import unittest
 import argparse
 import tensorflow as tf
@@ -30,70 +31,46 @@ import input_pipeline
 
 
 def add_arguments(parser):
-    group = parser.add_argument_group(title="Input Pipeline Arguments")
-    group.add_argument("--w_width",
-                       type=float,
-                       default=450,
-                       required=False, help="Medical image window width (default: %(default)d)")
-    group.add_argument("--w_level",
-                       type=float,
-                       default=50,
-                       required=False, help="Medical image window level (default: %(default)d)")
-    group.add_argument("--zoom",
-                       action="store_true",
-                       required=False, help="Augment dataset with random zoom in and shift")
-    group.add_argument("--zoom_scale",
-                       type=float,
-                       default=1.5,
-                       required=False, help="Maximum random zoom-in scale. Make sure zoom_scale >= 1. "
-                                            "(default: %(default)f)")
-    group.add_argument("--noise",
-                       action="store_true",
-                       required=False, help="Augment dataset with random noise")
-    group.add_argument("--noise_scale",
-                       type=float,
-                       default=0.05,
-                       required=False, help="Random noise scale (default: %(default)f)")
+    group = parser.add_argument_group(title="Global Arguments")
     group.add_argument("--batch_size",
                        type=int,
                        default=8,
                        required=False, help="Model batch size (default: %(default)d)")
+    group.add_argument("--classes",
+                       type=str,
+                       nargs="+",
+                       required=True, help="Class names of the objects")
+    group.add_argument("--mode",
+                       type=str,
+                       choices=["train", "eval", "infer"],
+                       required=True, help="Model mode for train/val/test")
 
 
 class TestInputPipeline(unittest.TestCase):
     def setUp(self):
-        record1 = Path(__file__).parent / "data/LiTS/records/test-2D-1-of-5.tfrecord"
-        record2 = Path(__file__).parent / "data/LiTS/records/test-2D-2-of-5.tfrecord"
-        record1_3d = Path(__file__).parent / "data/LiTS/records/test-3D-3-of-5.tfrecord"
-        record2_3d = Path(__file__).parent / "data/LiTS/records/test-3D-2-of-5.tfrecord"
+        record1 = Path(__file__).parent / "data/LiTS/records/sample-bbox-2D-1-of-5.tfrecord"
+        record2 = Path(__file__).parent / "data/LiTS/records/sample-bbox-2D-2-of-5.tfrecord"
+        record1_3d = Path(__file__).parent / "data/LiTS/records/sample-bbox-3D-3-of-5.tfrecord"
+        record2_3d = Path(__file__).parent / "data/LiTS/records/sample-bbox-3D-2-of-5.tfrecord"
         self.records = [str(record1), str(record2)]
         self.records_3d = [str(record1_3d), str(record2_3d)]
-        parser = argparse.ArgumentParser()
-        add_arguments(parser)
-        self.args = parser.parse_args()
+
+        self.parser = argparse.ArgumentParser()
+        add_arguments(self.parser)
+        input_pipeline.add_arguments(self.parser)
+        sys.argv.remove(sys.argv[1])
+        sys.argv.extend([
+            "--classes", "Liver", "Tumor",
+            "--im_height", "256",
+            "--im_width", "256",
+            "--resize_for_batch"
+        ])
         self.sess = tf.Session()
 
-    def test_get_record_dataset_for_train(self):
-        dataset = input_pipeline.get_record_dataset_for_train(self.records[0], self.args)
-        inputs = dataset.make_one_shot_iterator().get_next("Inputs")
-        features, labels = self.sess.run(inputs)
-        print(features["images"].shape)
-        print(features["name"])
-        print(features["id"])
-        print(labels.shape)
-        print(features["images"].max(), features["images"].min())
-        print(labels.max(), labels.min())
-        plt.subplot(221)
-        plt.imshow(features["images"][0, ..., 0], cmap="gray")
-        plt.subplot(222)
-        plt.imshow(features["images"][1, ..., 0], cmap="gray")
-        plt.subplot(223)
-        plt.imshow(labels[0], cmap="gray")
-        plt.subplot(224)
-        plt.imshow(labels[1], cmap="gray")
-        plt.show()
-
     def test_get_multi_records_dataset_for_train(self):
+        self.args = self.parser.parse_args()
+        print(self.args)
+
         dataset = input_pipeline.get_multi_records_dataset_for_train(self.records, self.args)
         inputs = dataset.make_one_shot_iterator().get_next("Inputs")
         features, labels = self.sess.run(inputs)
@@ -113,29 +90,31 @@ class TestInputPipeline(unittest.TestCase):
         plt.imshow(labels[1], cmap="gray")
         plt.show()
 
-    def test_get_record_dataset_for_eval(self):
-        with tf.name_scope("InputPipeline"):
-            dataset = input_pipeline.get_record_dataset_for_eval(self.records_3d[0], self.args)
-            inputs = dataset.make_one_shot_iterator().get_next("Inputs")
-        # writer = tf.summary.FileWriter(logdir=str(Path(__file__).parent / "logs"), graph=self.sess.graph)
-        # writer.close()
+
+    def test_spatial_guide(self):
+        sys.argv.extend([
+            "--use_spatial_guide",
+            "--mode", "train"
+        ])
+        self.args = self.parser.parse_args()
+        print(self.args)
+
+        dataset = input_pipeline.get_multi_records_dataset_for_train(self.records, self.args)
+        # dataset = input_pipeline.get_multi_records_dataset_for_eval(self.records_3d, self.args)
+        inputs = dataset.make_one_shot_iterator().get_next("Inputs")
+
         while True:
             features, labels = self.sess.run(inputs)
-            # print(len(features["images"]))
-            # # print(features["name"])
-            # # print(features["pad"])
-            # print(labels.shape)
-            # print(images.max(), images.min())
+            print(features["images"].shape)
+            # print(features["names"])
+            # print(features["bboxes"])
+            print(labels.shape)
+            # print(features["images"].max(), features["images"].min())
             # print(labels.max(), labels.min())
-            print(features["names"][-1], features["pads"][-1], features["depth"][-1])
-            # idx = int(features["images"].shape[0] * 0.75)
-            idx = 6
             plt.subplot(221)
-            plt.imshow(features["images"][idx, ..., 0], cmap="gray")
+            plt.imshow(features["images"][0, ..., 0], cmap="gray")
             plt.subplot(222)
-            plt.imshow(features["images"][idx + 1, ..., 0], cmap="gray")
+            plt.imshow(features["images"][0, ..., 1], cmap="gray")
             plt.subplot(223)
-            plt.imshow(labels[idx], cmap="gray")
-            plt.subplot(224)
-            plt.imshow(labels[idx + 1], cmap="gray")
+            plt.imshow(labels[0], cmap="gray")
             plt.show()

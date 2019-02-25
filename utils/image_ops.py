@@ -203,3 +203,36 @@ def random_noise(image, scale, seed=None, name=None):
         noised = tf.add(image, rd_tensor, name="NoisedImage")
 
         return noised
+
+
+def random_flip_left_right(image, label=None, seed=None):
+    """Randomly flip an image horizontally (left to right).
+
+    With a 1 in 2 chance, outputs the contents of `image` flipped along the
+    second dimension, which is `width`.  Otherwise output the image as-is.
+
+    Parameters
+    ----------
+    image: 4-D Tensor of shape `[batch, height, width, channels]` or
+           3-D Tensor of shape `[height, width, channels]`.
+    label: 3-D Tensor of shape `[batch, height, width]` or
+           2-D Tensor of shape `[height, width]`.
+    seed: A Python integer. Used to create a random seed. See
+        `tf.set_random_seed`
+        for behavior.
+
+    Returns
+    -------
+    A tensor of the same type and shape as `image`.
+
+    Raises
+    ------
+    ValueError: if the shape of `image` not supported.
+    """
+    if label is None:
+        return tf.image.random_flip_left_right(image, seed)
+    else:
+        label_new = tf.expand_dims(tf.cast(label, image.dtype), axis=-1)
+        combined = tf.concat((image, label_new), axis=-1)
+        combined_flipped = tf.image.random_flip_left_right(combined, seed)
+        return combined_flipped[..., :-1], tf.cast(combined_flipped[..., -1], dtype=label.dtype)

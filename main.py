@@ -22,6 +22,7 @@ from tensorflow.python.platform import tf_logging as logging
 import config
 import models
 import solver
+import loss_metrics
 import input_pipeline
 import custom_evaluator
 from utils.logger import create_logger
@@ -35,8 +36,10 @@ def _get_arguments(argv):
     parser = argparse.ArgumentParser()
     config.add_arguments(parser)
     models.add_arguments(parser)
-    input_pipeline.add_arguments(parser)
     solver.add_arguments(parser)
+    loss_metrics.add_arguments(parser)
+    input_pipeline.add_arguments(parser)
+    custom_evaluator.add_arguments(parser)
 
     args = parser.parse_args(argv[1:])
     config.check_args(args, parser)
@@ -73,7 +76,7 @@ def main(argv):
             save_summary_steps=200,
             save_checkpoints_steps=5000,
             session_config=_get_session_config(),
-            keep_checkpoint_max=3,
+            keep_checkpoint_max=1,
             log_step_count_steps=500,
         )
 
@@ -87,7 +90,9 @@ def main(argv):
 
         estimator = CustomEstimator(models.model_fn, args.model_dir, run_config, params)
 
-        kwargs = {"save_best_ckpt": args.save_best}
+        kwargs = {"save_best_ckpt": args.save_best,
+                  # "hooks": [tf.data.experimental.CheckpointInputPipelineHook(estimator)]
+                  }
         if args.num_of_steps > 0:
             kwargs["steps"] = args.num_of_steps
         else:

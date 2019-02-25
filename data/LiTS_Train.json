@@ -1,0 +1,8 @@
+{
+  "dataset": [
+    "LiTS/records/trainval-2D-1-of-5.tfrecord",
+    "LiTS/records/trainval-2D-2-of-5.tfrecord",
+    "LiTS/records/trainval-2D-4-of-5.tfrecord",
+    "LiTS/records/trainval-2D-5-of-5.tfrecord"
+  ]
+}

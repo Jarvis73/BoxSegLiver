@@ -28,11 +28,16 @@ LiTS liver dataset is expected to have the following directory structure:
       + LiTS
         - image_list.txt
         + records
-          - data_fold_0.tfrecord
-          - data_fold_1.tfrecord
-          - data_fold_2.tfrecord
-          - data_fold_3.tfrecord
-          - data_fold_4.tfrecord
+          - trainval-2D-1-of-5.tfrecord
+          - trainval-2D-2-of-5.tfrecord
+          - trainval-2D-3-of-5.tfrecord
+          - trainval-2D-4-of-5.tfrecord
+          - trainval-2D-5-of-5.tfrecord
+          - trainval-3D-1-of-5.tfrecord
+          - trainval-3D-2-of-5.tfrecord
+          - trainval-3D-3-of-5.tfrecord
+          - trainval-3D-4-of-5.tfrecord
+          - trainval-3D-5-of-5.tfrecord
 
 Image folder:
   ./data/LiTS/Training_Batch_1
@@ -61,9 +66,12 @@ import numpy as np
 import tensorflow as tf
 from pathlib import Path
 
-from data_kits.build_data import ImageReader, image_to_examples
+from data_kits.build_data import ImageReader
+from data_kits.build_data import SubVolumeReader
+from data_kits.build_data import image_to_examples
 from data_kits.preprocess import random_split_k_fold
 from utils.array_kits import find_empty_slices
+from utils.array_kits import extract_region
 
 LiTS_Dir = Path(__file__).parent.parent / "data" / "LiTS"
 
@@ -82,7 +90,7 @@ def get_lits_list(dataset, keep_only_liver=True):
     -------
 
     """
-    assert dataset in ["trainval", "test"], "Wrong dataset: " + dataset
+    assert dataset in ["trainval", "test", "sample"], "Wrong dataset: " + dataset
     image_files = []
     dataset = LiTS_Dir / "{}.txt".format(dataset)
     for line in dataset.open():
@@ -94,23 +102,50 @@ def get_lits_list(dataset, keep_only_liver=True):
     return sorted(image_files)
 
 
-def read_k_folds(path, file_names):
-    folds = []
-    with Path(path).open() as f:
-        for line in f.readlines():
-            folds.append([int(x) for x in line[line.find(":") + 1:].strip().split(" ")])
+def read_or_create_k_folds(path, file_names, k_split=None, seed=None):
+    path = Path(path)
 
-    k_fold_names = [[] for _ in folds]
-    all_nums = {int(x.replace(".nii", "").split("-")[-1]): x for x in file_names}
-    for i, fold in enumerate(folds):
-        for num in fold:
-            if num in all_nums:
-                k_fold_names[i].append(all_nums[num])
+    if path.exists():
+        folds = []
+        with path.open() as f:
+            for line in f.readlines():
+                folds.append([int(x) for x in line[line.find(":") + 1:].strip().split(" ")])
 
-    return k_fold_names
+        k_folds = [[] for _ in folds]
+        all_nums = {int(x.replace(".nii", "").split("-")[-1]): x for x in file_names}
+        for i, fold in enumerate(folds):
+            for num in fold:
+                if num in all_nums:
+                    k_folds[i].append(all_nums[num])
+
+    else:
+        if not isinstance(k_split, int) or k_split <= 0:
+            raise ValueError("Wrong `k_split` value. Need a positive integer, got {}".format(k_split))
+        if k_split < 1:
+            raise ValueError("k_split should >= 1, but get {}".format(k_split))
+        k_folds = random_split_k_fold(file_names, k_split, seed) if k_split > 1 else [file_names]
+
+        with path.open("w") as f:
+            for i, fold in enumerate(k_folds):
+                f.write("Fold %d:" % i)
+                name_nums = [int(name.replace(".nii", "").split("-")[-1]) for name in fold]
+                write_str = " ".join([str(x) for x in sorted(name_nums)])
+                f.write(write_str + "\n")
+
+    for fold in k_folds:
+        print([int(x.replace(".nii", "").split("-")[-1]) for x in fold])
+    return k_folds
 
 
-def convert_data_set(dataset, keep_only_liver, k_split=5, seed=None):
+def _get_lits_records_dir():
+    LiTS_records = LiTS_Dir / "records"
+    if not LiTS_records.exists():
+        LiTS_records.mkdir(parents=True, exist_ok=True)
+
+    return LiTS_records
+
+
+def convert_to_liver(dataset, keep_only_liver, k_split=5, seed=None):
     """
     Convert dataset list to several tf-record files.
 
@@ -129,27 +164,12 @@ def convert_data_set(dataset, keep_only_liver, k_split=5, seed=None):
     file_names = get_lits_list(dataset, keep_only_liver)
     num_images = len(file_names)
 
-    folds_list_save_to = Path(__file__).parent.parent / "data/LiTS/k_folds.txt"
-    if folds_list_save_to.exists():
-        k_folds = read_k_folds(folds_list_save_to, file_names)
-    else:
-        if k_split < 1:
-            raise ValueError("k_split should >= 1, but get {}".format(k_split))
-        k_folds = random_split_k_fold(file_names, k_split, seed) if k_split > 1 else [file_names]
-
-        with folds_list_save_to.open("w") as f:
-            for i, fold in enumerate(k_folds):
-                f.write("Fold %d:" % i)
-                name_nums = [int(name.replace(".nii", "").split("-")[-1]) for name in fold]
-                write_str = " ".join([str(x) for x in sorted(name_nums)])
-                f.write(write_str + "\n")
+    k_folds = read_or_create_k_folds(Path(__file__).parent.parent / "data/LiTS/k_folds.txt",
+                                     file_names, k_split, seed)
+    LiTS_records = _get_lits_records_dir()
 
     image_reader = ImageReader(np.int16, extend_channel=True)
     label_reader = ImageReader(np.uint8, extend_channel=False)     # use uint8 to save space
-
-    LiTS_records = LiTS_Dir / "records"
-    if not LiTS_records.exists():
-        LiTS_records.mkdir(parents=True, exist_ok=True)
 
     # Convert each split
     counter = 1
@@ -173,7 +193,7 @@ def convert_data_set(dataset, keep_only_liver, k_split=5, seed=None):
                         raise RuntimeError("Shape mismatched between image and label: {} vs {}".format(
                             image_reader.shape, label_reader.shape))
                     # Find empty slices(we skip them in training)
-                    extra_info = {"empty": find_empty_slices(label_reader.image())}
+                    extra_info = {"empty_split": find_empty_slices(label_reader.image())}
                     # Convert 2D slices to example
                     for example in image_to_examples(image_reader, label_reader, split=True,
                                                      extra_int_info=extra_info):
@@ -184,3 +204,64 @@ def convert_data_set(dataset, keep_only_liver, k_split=5, seed=None):
                     counter += 1
                 print()
 
+
+def convert_to_liver_bounding_box(dataset,
+                                  keep_only_liver,
+                                  k_split=5,
+                                  seed=None,
+                                  align=1,
+                                  padding=0,
+                                  min_bbox_shape=None):
+    """
+    Convert dataset list to several tf-record files.
+
+    Strip boundary of the CT images.
+    """
+    file_names = get_lits_list(dataset, keep_only_liver)
+    num_images = len(file_names)
+
+    k_folds = read_or_create_k_folds(Path(__file__).parent.parent / "data/LiTS/k_folds.txt",
+                                     file_names, k_split, seed)
+    LiTS_records = _get_lits_records_dir()
+
+    image_reader = SubVolumeReader(np.int16, extend_channel=True)
+    label_reader = SubVolumeReader(np.uint8, extend_channel=False)  # use uint8 to save space
+
+    # Convert each split
+    counter = 1
+    for i, fold in enumerate(k_folds):
+        # Split to 2D slices for training
+        output_filename_2d = LiTS_records / "{}-bbox-2D-{}-of-{}.tfrecord".format(dataset, i + 1, k_split)
+        # 3D volume for evaluation and prediction
+        output_filename_3d = LiTS_records / "{}-bbox-3D-{}-of-{}.tfrecord".format(dataset, i + 1, k_split)
+        with tf.io.TFRecordWriter(str(output_filename_2d)) as writer_2d:
+            with tf.io.TFRecordWriter(str(output_filename_3d)) as writer_3d:
+                for j, image_name in enumerate(fold):
+                    print("\r>> Converting fold {}, {}/{}, {}/{}"
+                          .format(i + 1, j + 1, len(fold), counter, num_images), end="")
+
+                    # Read image
+                    image_file = LiTS_Dir / image_name
+                    seg_file = image_file.parent / image_file.name.replace("volume", "segmentation")
+
+                    label_reader.read(seg_file)
+                    bbox = extract_region(label_reader.image(), align, padding, min_bbox_shape)
+                    label_reader.bbox = bbox.tolist()
+                    image_reader.read(image_file)
+                    image_reader.bbox = bbox.tolist()
+
+                    # we have extended extra dimension for image
+                    if image_reader.shape[:-1] != label_reader.shape:
+                        raise RuntimeError("Shape mismatched between image and label: {} vs {}".format(
+                            image_reader.shape, label_reader.shape))
+                    # Find empty slices(we skip them in training)
+                    extra_info = {"bbox_origin": bbox}
+                    # Convert 2D slices to example
+                    for example in image_to_examples(image_reader, label_reader, split=True):
+                        writer_2d.write(example.SerializeToString())
+                        # Convert 3D volume to example
+                    for example in image_to_examples(image_reader, label_reader, split=False,
+                                                     extra_int_info=extra_info):
+                        writer_3d.write(example.SerializeToString())
+                    counter += 1
+                print()
