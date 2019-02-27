@@ -78,10 +78,21 @@ class ImageReader(object):
         if self._decode is None:
             return bytes()
         else:
-            return self._decode.tobytes() if idx is None else self._decode[idx].tobytes()
+            return self.image(idx).tobytes()
 
     def image(self, idx=None):
-        return self._decode if idx is None else self._decode[idx]
+        if idx is None:
+            return self._decode
+        if isinstance(idx, int):
+            return self._decode[idx]
+        elif isinstance(idx, (list, tuple)):
+            slices = []
+            for i in idx:
+                if i < 0 or i >= self.shape[0]:
+                    slices.append(np.zeros(self.shape[1:], dtype=self._decode.dtype))
+                else:
+                    slices.append(self._decode[i])
+            return np.concatenate(slices, axis=-1)
 
     def read(self, file_name, idx=None):
         self._filename = file_name
@@ -181,18 +192,24 @@ def _bytes_list_feature(values):
 
     Parameters
     ----------
-    values: str
+    values: str or bytes
 
     Returns
     -------
     A TF-Feature
 
     """
-    def tobytes(value):
-        return value.encode() if isinstance(value, str) else value
+    def to_bytes(value):
+        if isinstance(value, str):
+            return value.encode()
+        elif isinstance(value, bytes):
+            return value
+        else:
+            raise TypeError("Only str and bytes are supported, got {}"
+                            .format(type(value)))
 
     return tf.train.Feature(bytes_list=tf.train.BytesList(
-        value=[tobytes(values)]
+        value=[to_bytes(values)]
     ))
 
 
@@ -216,7 +233,12 @@ def _check_extra_info_type(extra_info):
     return extra_split, extra_origin
 
 
-def image_to_examples(image_reader, label_reader, split=False, extra_str_info=None, extra_int_info=None):
+def image_to_examples(image_reader,
+                      label_reader,
+                      split=False,
+                      extra_str_info=None,
+                      extra_int_info=None,
+                      triplet=False):
     """
     Convert N-D image and label to N-D/(N-1)-D tfexamples.
 
@@ -234,6 +256,7 @@ def image_to_examples(image_reader, label_reader, split=False, extra_str_info=No
         extra information added to tfexample. Dict keys will be the tf-feature keys,
         and values must be a list whose length is equal with image_reader.shape[0]
     extra_int_info: dict
+    triplet: bool
 
     Returns
     -------
@@ -253,11 +276,18 @@ def image_to_examples(image_reader, label_reader, split=False, extra_str_info=No
             assert num_slices == len(extra_list), "Length not equal: {} vs {}".format(num_slices, len(extra_list))
 
         for idx in range(image_reader.shape[0]):
+            if triplet:
+                indices = (idx - 1, idx, idx + 1)
+                shape = image_reader.shape[1:-1] + (3,)
+            else:
+                indices = idx
+                shape = image_reader.shape[1:]
+            slices = image_reader.data(indices)
             feature_dict = {
-                "image/encoded": _bytes_list_feature(image_reader.data(idx)),
+                "image/encoded": _bytes_list_feature(slices),
                 "image/name": _bytes_list_feature(image_reader.name),
                 "image/format": _bytes_list_feature(image_reader.format),
-                "image/shape": _int64_list_feature(image_reader.shape[1:]),
+                "image/shape": _int64_list_feature(shape),
                 "segmentation/encoded": _bytes_list_feature(label_reader.data(idx)),
                 "segmentation/name": _bytes_list_feature(label_reader.name),
                 "segmentation/format": _bytes_list_feature(label_reader.format),

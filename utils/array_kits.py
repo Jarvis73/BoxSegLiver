@@ -319,6 +319,15 @@ def compute_robust_moments(binary_image, isotropic=False):
     return center, std_dev
 
 
+def create_gaussian_distribution(shape, center, stddev):
+    stddev = np.asarray(stddev, np.float32)
+    coords = [np.arange(0, s) for s in shape]
+    coords = np.stack(np.meshgrid(*coords, indexing="ij"), axis=-1)
+    normalizer = 2 * (stddev * stddev)
+    d = np.exp(-np.sum((coords - center[::-1]) ** 2 / normalizer[::-1], axis=-1))
+    return np.clip(d, 0, 1)
+
+
 def get_gd_image_single_obj(labels, center_perturb=0.2, stddev_perturb=0.4, blank_prob=0, partial=False):
     """
     Get gaussian distribution image with some perturbation. All points assigned 1 are considered
@@ -369,22 +378,26 @@ def get_gd_image_single_obj(labels, center_perturb=0.2, stddev_perturb=0.4, blan
     std_p_ratio = np.random.uniform(1.0 / (1 + stddev_perturb), 1.0 + stddev_perturb, obj_ndim)
     std_p = std_p_ratio * std
 
-    coords = [np.arange(0, shape) for shape in obj_lab.shape]
-    coords = np.stack(np.meshgrid(*coords, indexing="ij"), axis=-1)
-    normalizer = 2 * (std_p * std_p)
-    d = np.exp(-np.sum((coords - center_p[::-1]) ** 2 / normalizer[::-1], axis=-1))
-    cur_gd = np.clip(d, 0, 1)
+    cur_gd = create_gaussian_distribution(obj_lab.shape, center_p, std_p)
 
     if partial:
         gd = np.zeros_like(labels)
         gd[idx] = cur_gd
-        return gd
+        return gd, center_p, std_p
     else:
-        return cur_gd
+        return cur_gd, center_p, std_p
 
 
-def get_gd_image_multi_objs(labels, center_perturb=0.2, stddev_perturb=0.4, blank_prob=0,
-                            connectivity=1, partial=False):
+def get_gd_image_multi_objs(labels,
+                            obj_value=1,
+                            center_perturb=0.2,
+                            stddev_perturb=0.4,
+                            blank_prob=0,
+                            connectivity=1,
+                            partial=False,
+                            with_fake_guides=False,
+                            fake_rate=1.0,
+                            max_fakes=4):
     """
     Get gaussian distribution image with some perturbation. Only connected points assigned 1
     are considered to be the same object.
@@ -394,7 +407,11 @@ def get_gd_image_multi_objs(labels, center_perturb=0.2, stddev_perturb=0.4, blan
     Parameters
     ----------
     labels: ndarray
-        An arbitrary binary image
+        An arbitrary binary image (for with_fake_guides=false) or an image with 3 unique
+        values {0, 1, 2} (for with_fake_guides=true), where 0 means background, 1 means
+        fake objects' range and 2 means objects
+    obj_value: int
+        object value
     center_perturb: float
         Position perturbation of central point
     stddev_perturb: float
@@ -405,6 +422,12 @@ def get_gd_image_multi_objs(labels, center_perturb=0.2, stddev_perturb=0.4, blan
         Passed to function generate_binary_structure()
     partial: bool
         For test mode. If true only first slice has spatial guide for each tumor
+    with_fake_guides: bool
+        If true, several fake spatial guides will be added for better generalization
+    fake_rate: float
+        Number of fake objects / number of real objects
+    max_fakes: int
+        Max number of fake objects
 
     Returns
     -------
@@ -419,28 +442,54 @@ def get_gd_image_multi_objs(labels, center_perturb=0.2, stddev_perturb=0.4, blan
         # return a blank gd image
         return np.zeros(labels.shape)
 
+    uniques = np.unique(labels)
+    obj_labels = merge_labels(labels, [0, obj_value])
     # Label image and find all objects
     disc = ndi.generate_binary_structure(ndim, connectivity=connectivity)
-    labeled_image, num_obj = ndi.label(labels, structure=disc)
+    labeled_image, num_obj = ndi.label(obj_labels, structure=disc)
     obj_images = [labeled_image == n + 1 for n in range(num_obj)]
 
     # Compute moments for each object
-    gds = [get_gd_image_single_obj(obj_image, center_perturb, stddev_perturb, blank_prob, partial)
-           for obj_image in obj_images]
+    gds, stds = [], []
+    for obj_image in obj_images:
+        gd, _, std = get_gd_image_single_obj(obj_image, center_perturb, stddev_perturb, blank_prob, partial)
+        gds.append(gd)
+        stds.append(std)
 
+    fks = []
+    if with_fake_guides:
+        number_of_fakes = int(fake_rate * num_obj)
+        if number_of_fakes > 0:
+            search_region = list(zip(*np.where(labels == (1 if len(uniques) == 3 else 0))))
+            max_val = len(search_region)
+
+            min_std, max_std = np.min(stds) / 2, np.max(stds)
+            for _ in range(min(number_of_fakes, max_fakes)):
+                center = search_region[np.random.randint(0, max_val)]
+                stddev = (random.random() * (max_std - min_std) + min_std,
+                          random.random() * (max_std - min_std) + min_std)
+                fks.append(create_gaussian_distribution(labels.shape, center[::-1], stddev))
+
+    if not gds and not fks:
+        return np.zeros(labels.shape)
     # reduce is faster than np.sum when input is a python list
-    merged_gd = functools.reduce(lambda x, y: np.maximum(x, y), gds)
+    merged_gd = functools.reduce(lambda x, y: np.maximum(x, y), gds + fks)
 
     return merged_gd
 
 
-if __name__ == "__main__":
-    pass
-    # from utils.mhd_kits import mhd_reader, mhd_writer, MyList
-    #
-    # meta, image = mhd_reader(r"D:\DataSet\LiTS\temp_3D\origin\T128.mhd")
-    # _, mask = mhd_reader(r"D:\DataSet\LiTS\temp_3D\mask\T128_m.mhd")
-    # mask = merge_labels(mask, [0, [255, 510]])
-    # res, _ = extract_object(image, mask)
-    # meta["DimSize"] = MyList(res.shape[::-1])
-    # mhd_writer("./T128.mhd", res, meta, verbose=True)
+def aug_window_width_level(image, ww, wl, rand=False, norm_scale=1.0, normalize=False):
+
+    def randu():
+        return np.random.uniform(-5, 5)
+
+    t1, t2 = (randu(), randu()) if rand else (0, 0)
+    wd2 = ww / 2
+
+    if normalize:
+        image = np.clip(image, wl - wd2 + t1, wl + wd2 + t2)
+        mean, var = moments(image, ret_var=True)
+        return (image - mean) / np.sqrt(var)
+    else:
+        image = (np.clip(image, wl - wd2 + t1, wl + wd2 + t2) - (wl - wd2 + t1)) * (norm_scale / (ww + t2 - t1))
+        return image

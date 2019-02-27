@@ -60,7 +60,7 @@ class EvaluateBase(object):
                  predict_keys=None,
                  hooks=None,
                  checkpoint_path=None,
-                 yield_single_examples=False):
+                 cases=None):
         """
         Evaluate model by combining 2D slices to 3D volume.
 

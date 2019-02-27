@@ -68,6 +68,9 @@ def add_arguments(parser):
                        type=int,
                        default=1,
                        required=False, help="Image channel (default: %(default)d)")
+    group.add_argument("--triplet",
+                       action="store_true",
+                       required=False, help="Use triplet as inputs")
     group.add_argument("--resize_for_batch",
                        action="store_true",
                        required=False, help="Resize image to the same shape for batching")
@@ -77,7 +80,7 @@ def add_arguments(parser):
                        required=False, help="Medical image window width (default: %(default)f)")
     group.add_argument("--w_level",
                        type=float,
-                       default=50,
+                       default=25,
                        required=False, help="Medical image window level (default: %(default)f)")
     group.add_argument("--flip",
                        action="store_true",
@@ -100,6 +103,13 @@ def add_arguments(parser):
     group.add_argument("--use_spatial_guide",
                        action="store_true",
                        required=False, help="Use spatial guide")
+    group.add_argument("--use_fake_guide",
+                       action="store_true",
+                       required=False, help="Use fake spatial guide for better generalization")
+    group.add_argument("--fake_rate",
+                       type=float,
+                       default=1.0,
+                       required=False, help="#Fake / #Real (default: %(default)f)")
     group.add_argument("--center_perturb",
                        type=float,
                        default=0.2,
@@ -146,12 +156,16 @@ def input_fn(mode, params):
         if mode == ModeKeys.TRAIN:
             tf_records = _collect_datasets(args.dataset_for_train)
             if len(tf_records) >= 1:
+                # if args.triplet:
+                #     return get_multi_records_dataset_for_train(tf_records, args)
                 return get_multi_records_dataset_for_train(tf_records, args)
             else:
                 raise ValueError("No valid dataset found for training")
         elif mode == ModeKeys.EVAL or mode == ModeKeys.PREDICT:
             tf_records = _collect_datasets(args.dataset_for_eval)
             if len(tf_records) >= 1:
+                if args.triplet:
+                    return get_multi_channels_dataset_for_eval(tf_records, args)
                 return get_multi_records_dataset_for_eval(tf_records, args)
             else:
                 raise ValueError("No valid dataset found for evaluation")
@@ -183,7 +197,7 @@ def filter_slices(example_proto, strategy="empty", **kwargs):
         if kwargs["size"] < 0:
             raise ValueError("Argument size can not be negative, got {}".format(kwargs["size"]))
 
-    with tf.name_scope("DecodeProto"):
+    with tf.name_scope("DecodeProto/"):
         if strategy == "empty":
             features = tf.parse_single_example(
                 example_proto,
@@ -220,7 +234,7 @@ def parse_2d_example_proto(example_proto, args):
     features and labels
 
     """
-    with tf.name_scope("DecodeProto"):
+    with tf.name_scope("DecodeProto/"):
         features = tf.parse_single_example(
             example_proto,
             features={
@@ -273,7 +287,7 @@ def parse_3d_example_proto(example_proto, args):
     features and labels
 
     """
-    with tf.name_scope("DecodeProto"):
+    with tf.name_scope("DecodeProto/"):
         features = {
             "image/encoded": tf.FixedLenFeature([], tf.string),
             "image/shape": tf.FixedLenFeature([4], tf.int64),
@@ -317,7 +331,7 @@ def parse_3d_example_proto(example_proto, args):
     return ret_features, label
 
 
-def data_augmentation(features, labels, args):
+def data_augmentation(features, labels, args, mode, only_first_slice=False):
     """
     Perform data augmentation
 
@@ -327,57 +341,53 @@ def data_augmentation(features, labels, args):
     labels
     args: ArgumentParser
         Used arguments: zoom, zoom_scale, noise, noise_scale
+    mode:
+    only_first_slice:
 
     Returns
     -------
     features and labels
 
     """
-    with tf.name_scope(PREPROCESS):
-        with tf.name_scope("Augmentation"):
-            if args.flip:
-                features["images"], labels = image_ops.random_flip_left_right(
-                    features["images"], labels)
-                logging.info("Add random flip")
-
-            if args.zoom:
-                features["images"], labels = image_ops.random_zoom_in(features["images"], labels,
-                                                                      args.zoom_scale)
-                logging.info("Add random zoom, scale = {}".format(args.zoom_scale))
-
-            if args.noise:
-                features["images"] = image_ops.random_noise(features["images"], args.noise_scale)
-                logging.info("Add random noise, scale = {}".format(args.noise_scale))
-
-            return features, labels
-
-
-def delayed_processing(features, labels, args, for_train, only_first_slice=False, merges=(0, 2)):
-    """ Delayed processing is performed after data augmentation
-
-    Make sure this map function is used before Dataset.batch()
-    """
-
-    def _wrap_get_gd_image_multi_objs(mask):
+    def _wrap_get_gd_image_multi_objs(mask, for_train):
         center_perturb = args.center_perturb if args.mode == ModeKeys.TRAIN else 0.
         stddev_perturb = args.stddev_perturb if args.mode == ModeKeys.TRAIN else 0.
         guide_image = array_kits.get_gd_image_multi_objs(
-            array_kits.merge_labels(mask, merges),
+            mask,
             center_perturb,
             stddev_perturb,
-            partial=only_first_slice)[..., None]
+            partial=only_first_slice,
+            with_fake_guides=for_train,
+            fake_rate=args.fake_rate)[..., None]
         return guide_image.astype(np.float32)
 
     with tf.name_scope(PREPROCESS):
+        if mode == ModeKeys.TRAIN:
+            with tf.name_scope("Augmentation"):
+                if args.flip:
+                    features["images"], labels = image_ops.random_flip_left_right(
+                        features["images"], labels)
+                    logging.info("Add random flip")
+
+                if args.zoom:
+                    features["images"], labels = image_ops.random_zoom_in(features["images"], labels,
+                                                                          args.zoom_scale)
+                    logging.info("Add random zoom, scale = {}".format(args.zoom_scale))
+
+                if args.noise:
+                    features["images"] = image_ops.random_noise(features["images"], args.noise_scale)
+                    logging.info("Add random noise, scale = {}".format(args.noise_scale))
+
         if args.use_spatial_guide:
-            guide = tf.py_func(_wrap_get_gd_image_multi_objs, [labels], tf.float32)
+            with_fake = args.use_fake_guide if mode == ModeKeys.TRAIN else False
+            guide = tf.py_func(_wrap_get_gd_image_multi_objs, [labels, with_fake], tf.float32)
             features["images"] = tf.concat((features["images"], guide), axis=-1)
 
         if args.resize_for_batch:
             image = tf.image.resize_bilinear(tf.expand_dims(features["images"], axis=0),
                                              [args.im_height, args.im_width])
             features["images"] = tf.squeeze(image, axis=0)
-            if for_train:
+            if mode == ModeKeys.TRAIN:
                 labels = tf.image.resize_nearest_neighbor(tf.expand_dims(tf.expand_dims(labels, axis=0), axis=-1),
                                                           [args.im_height, args.im_width])
                 labels = tf.squeeze(labels, axis=(0, -1))
@@ -402,9 +412,8 @@ def get_multi_records_dataset_for_train(file_names, args):
 
     """
     parse_fn = partial(parse_2d_example_proto, args=args)
-    augment_fn = partial(data_augmentation, args=args)
+    augment_fn = partial(data_augmentation, args=args, mode=ModeKeys.TRAIN)
     filter_fn = partial(filter_slices, strategy="area", size=100)
-    delayed_fn = partial(delayed_processing, args=args, for_train=True)
 
     if len(file_names) > 1:
         dataset = (Dataset.from_tensor_slices(file_names)
@@ -420,7 +429,6 @@ def get_multi_records_dataset_for_train(file_names, args):
                                                                      count=None, seed=SEED_BATCH))
                .map(parse_fn, num_parallel_calls=args.batch_size)
                .map(augment_fn, num_parallel_calls=args.batch_size)
-               .map(delayed_fn, num_parallel_calls=args.batch_size)
                .batch(args.batch_size)
                .prefetch(buffer_size=args.batch_size))
 
@@ -456,19 +464,120 @@ def _flat_map_fn(x, y, args):
 def get_multi_records_dataset_for_eval(file_names, args):
     parse_fn = partial(parse_3d_example_proto, args=args)
     flat_fn = partial(_flat_map_fn, args=args)
-    delayed_fn = partial(delayed_processing, args=args, for_train=False)
+    augment_fn = partial(data_augmentation, args=args, mode=ModeKeys.EVAL)
 
-    if len(file_names) > 1:
-        dataset = (Dataset.from_tensor_slices(file_names)
-                   .interleave(lambda x: (tf.data.TFRecordDataset(x)),
-                               cycle_length=len(file_names),
-                               block_length=BLOCK_LENGTH))
-    else:
-        dataset = tf.data.TFRecordDataset(file_names[0])
+    dataset = tf.data.TFRecordDataset(file_names[0])
+    for file_name in file_names[1:]:
+        dataset = dataset.concatenate(tf.data.TFRecordDataset(file_name))
 
     dataset = (dataset.map(parse_fn, num_parallel_calls=args.batch_size)
                .flat_map(flat_fn)
-               .map(delayed_fn, num_parallel_calls=args.batch_size)
+               .map(augment_fn, num_parallel_calls=args.batch_size)
+               .batch(args.batch_size)
+               .prefetch(buffer_size=args.batch_size))
+
+    return dataset
+
+
+def merge_to_channels(f1, f2, f3):
+    logging.warning("Deprecated function! Use `get_multi_records_dataset_for_train`.")
+    features = {}
+    with tf.name_scope(PREPROCESS):
+        features["images"] = tf.concat((f1[0]["images"], f2[0]["images"], f3[0]["images"]), axis=-1)
+
+    for key, value in f1[0].items():
+        if key == "images":
+            continue
+        features[key] = value
+
+    return features, f2[1]
+
+
+def get_multi_channels_dataset_for_train(file_names, args):
+    logging.warning("Deprecated function! Use `get_multi_records_dataset_for_train`.")
+    parse_fn = partial(parse_2d_example_proto, args=args)
+    augment_fn = partial(data_augmentation, args=args, mode=ModeKeys.TRAIN)
+    filter_fn = partial(filter_slices, strategy="area", size=100)
+
+    def filter_mismatching_elements(f1, f2, f3):
+        with tf.name_scope(PREPROCESS):
+            return tf.logical_and(tf.equal(f1[0]["names"], f2[0]["names"]),
+                                  tf.equal(f2[0]["names"], f3[0]["names"]))
+
+    def filter_triple_slices(f1, f2, f3):
+        del f1, f3
+        with tf.name_scope(PREPROCESS):
+            return tf.greater_equal(tf.count_nonzero(f2[1]), 100)
+
+    if len(file_names) > 1:
+        dataset = (Dataset.from_tensor_slices(file_names)
+                   .shuffle(buffer_size=len(file_names), seed=SEED_FILE)
+                   .interleave(lambda x: (tf.data.TFRecordDataset(x)
+                                          .filter(filter_fn)),
+                               cycle_length=len(file_names),
+                               block_length=BLOCK_LENGTH)
+                   .map(parse_fn, num_parallel_calls=args.batch_size))
+    else:
+        dataset = (tf.data.TFRecordDataset(file_names[0])
+                   .map(parse_fn, num_parallel_calls=args.batch_size))
+
+    dataset = (Dataset.zip((dataset, dataset.skip(1), dataset.skip(2)))
+               .filter(filter_triple_slices)
+               .filter(filter_mismatching_elements)
+               .apply(tf.data.experimental.shuffle_and_repeat(buffer_size=SHUFFLE_BUFFER_SIZE,
+                                                              count=None, seed=SEED_BATCH))
+               .map(merge_to_channels, num_parallel_calls=args.batch_size)
+               .map(augment_fn, num_parallel_calls=args.batch_size)
+               .batch(args.batch_size)
+               .prefetch(buffer_size=args.batch_size))
+
+    return dataset
+
+
+def _flat_map_fn_multi_channels(x, y, args):
+    repeat_times = tf.shape(x["images"], out_type=tf.int64)[0]
+
+    with tf.name_scope(PREPROCESS):
+        shape = tf.concat(([1], tf.shape(x["images"])[1:]), axis=0)
+        zero_float = tf.zeros(shape, dtype=x["images"].dtype)
+        new_images = tf.concat((zero_float, x["images"], zero_float), axis=0)
+        image_multi_channels = tf.concat((new_images[:-2], x["images"], new_images[2:]), axis=-1)
+
+    images = Dataset.from_tensor_slices(image_multi_channels)
+    labels = Dataset.from_tensor_slices(y)
+    names = Dataset.from_tensors(x["name"]).repeat(repeat_times)
+    pads = Dataset.from_tensors(x["pad"]).repeat(repeat_times)
+
+    def map_fn(image, label, name, pad):
+        return {"images": image,
+                "names": name,
+                "pads": pad}, label
+
+    def map_fn_v2(image, label, name, pad, bbox):
+        return {"images": image,
+                "names": name,
+                "pads": pad,
+                "bboxes": bbox}, label
+
+    if args.resize_for_batch:
+        bboxes = Dataset.from_tensors(x["bbox"]).repeat(repeat_times)
+        return Dataset.zip((images, labels, names, pads, bboxes)).map(map_fn_v2)
+
+    return Dataset.zip((images, labels, names, pads)).map(map_fn)
+
+
+def get_multi_channels_dataset_for_eval(file_names, args):
+    parse_fn = partial(parse_3d_example_proto, args=args)
+    flat_fn = partial(_flat_map_fn_multi_channels, args=args)
+    augment_fn = partial(data_augmentation, args=args, mode=ModeKeys.EVAL)
+
+    dataset = tf.data.TFRecordDataset(file_names[0])
+    for file_name in file_names[1:]:
+        dataset = dataset.concatenate(tf.data.TFRecordDataset(file_name))
+
+    dataset = (dataset.map(parse_fn, num_parallel_calls=args.batch_size)
+               .flat_map(flat_fn)
+               .map(augment_fn, num_parallel_calls=args.batch_size)
                .batch(args.batch_size)
                .prefetch(buffer_size=args.batch_size))
 

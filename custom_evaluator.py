@@ -18,6 +18,7 @@ import numpy as np
 import tensorflow as tf
 import scipy.ndimage as ndi
 from collections import defaultdict
+from pathlib import Path
 
 import loss_metrics as metric_ops
 import utils.array_kits as arr_ops
@@ -44,11 +45,22 @@ def add_arguments(parser):
                        type=str,
                        required=False, help="Secondary metric for evaluation. Typically it has format "
                                             "<class>/<metric>")
+    group.add_argument("--eval_final",
+                       action="store_true",
+                       required=False, help="Evaluate with final checkpoint. If not set, then evaluate "
+                                            "with best checkpoint(default).")
+    group.add_argument("--ckpt_path",
+                       type=str,
+                       required=False, help="Given a specified checkpoint for evaluation. "
+                                            "(default best checkpoint)")
+    group.add_argument("--use_fewer_guide",
+                       action="store_true",
+                       required=False, help="Use fewer guide for evaluation")
 
 
 def get_eval_params(eval_steps=2500,
                     largest=True,
-                    merge_tumor_to_liver=False,
+                    merge_tumor_to_liver=True,
                     primary_metric=None,
                     secondary_metric=None):
     return {
@@ -68,7 +80,7 @@ class EvaluateVolume(EvaluateBase):
         ----------
         model: CustomEstimator
             CustomEstimator instance
-        predict_keys: list of str
+        predict_keys: list of str or None
             Passed to self.model.predict
         kwargs: dict
             * merge_tumor_to_liver: bool, if `Tumor` and `Liver` in predictions (default True)
@@ -78,6 +90,7 @@ class EvaluateVolume(EvaluateBase):
             raise TypeError("model need a custom_estimator.CustomEstimator instance")
         super(EvaluateVolume, self).__init__(model, predict_keys, **kwargs)
 
+        self.model = model
         self._metric_values = {"{}/{}".format(cls, met): []
                                for cls in self.classes
                                for met in self._metrics}
@@ -104,7 +117,7 @@ class EvaluateVolume(EvaluateBase):
             if key in self._metric_values:
                 self._metric_values[key].append(value)
 
-    def _evaluate(self, predicts, cases=None):
+    def _evaluate(self, predicts, cases=None, verbose=False):
         # process a 3D image slice by slice or patch by patch
         logits3d = defaultdict(list)
         labels3d = defaultdict(list)
@@ -118,11 +131,12 @@ class EvaluateVolume(EvaluateBase):
         self._timer.tic()
         for pred in predicts:
             new_case = pred["Names"][0].decode("utf-8")     # decode bytes string
-            global_step = global_step if global_step is not None else pred["GlobalStep"]
             cur_case = cur_case or new_case
             pad = pad if pad != -1 else pred["Pads"][0]
             if "Bboxes" in pred:
                 bbox = bbox if bbox is not None else pred["Bboxes"][0]
+            if "GlobalStep" in pred:
+                global_step = global_step if global_step is not None else pred["GlobalStep"]
 
             if cur_case == new_case:
                 # Append batch to collections
@@ -130,10 +144,13 @@ class EvaluateVolume(EvaluateBase):
                     logits3d[cls].append(np.squeeze(pred[cls + "Pred"], axis=-1))
                     labels3d[cls].append(pred["Labels_{}".format(c)])
             else:
-                self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox)
+                result = self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox)
                 self._timer.toc()
-                # tf.logging.info("Evaluate {} cases ({} secs/case)"
-                #                 .format(self._timer.calls, self._timer.average_time))
+                if verbose:
+                    log_str = "Evaluate-{} {}".format(self._timer.calls, Path(cur_case).stem)
+                    for key, value in result.items():
+                        log_str += " {}: {:.3f}".format(key, value)
+                    tf.logging.info(log_str + " ({:.3f} secs/case)".format(self._timer.average_time))
                 for cls in self.classes:
                     logits3d[cls].clear()
                     labels3d[cls].clear()
@@ -150,8 +167,13 @@ class EvaluateVolume(EvaluateBase):
 
         if cases is None:
             # Final case
-            self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox)
+            result = self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox)
             self._timer.toc()
+            if verbose:
+                log_str = "Evaluate-{} {}".format(self._timer.calls, Path(cur_case).stem)
+                for key, value in result.items():
+                    log_str += " {}: {:.3f}".format(key, value)
+                tf.logging.info(log_str + " ({:.3f} secs/case)".format(self._timer.average_time))
         tf.logging.info("Evaluate all the dataset ({} cases) finished! ({} secs/case)"
                         .format(self._timer.calls, self._timer.average_time))
 
@@ -162,24 +184,57 @@ class EvaluateVolume(EvaluateBase):
             display_str += "{}: {} ".format(key, value)
         tf.logging.info(display_str)
 
-        results[tf.GraphKeys.GLOBAL_STEP] = global_step
+        if global_step is not None:
+            results[tf.GraphKeys.GLOBAL_STEP] = global_step
         return results
 
     def evaluate_with_session(self, session=None, cases=None):
-        tf.logging.info("Begin evaluating ...")
         predicts = self.model.predict_with_session(session, yield_single_examples=False)
-        return self._evaluate(predicts, cases=cases)
+        tf.logging.info("Begin evaluating ...")
+        return self._evaluate(predicts, cases=cases, verbose=False)
 
     def evaluate(self,
                  input_fn,
                  predict_keys=None,
                  hooks=None,
                  checkpoint_path=None,
-                 yield_single_examples=False,
                  cases=None):
-        tf.logging.info("Begin evaluating ...")
-        predicts = self.model.predict(input_fn, predict_keys, hooks, checkpoint_path, yield_single_examples)
-        return self._evaluate(predicts, cases=cases)
+        del predict_keys
+
+        if not self.params["args"].use_fewer_guide:
+            predicts = self.model.predict(input_fn, self._predict_keys, hooks, checkpoint_path,
+                                          yield_single_examples=False)
+            tf.logging.info("Begin evaluating ...")
+            return self._evaluate(predicts, cases=cases, verbose=True)
+        else:
+            # Construct model with batch_size = 1
+            # Disconnect input pipeline with model pipeline
+            args = self.params["args"]
+            checkpoint_path = self.model._checkpoint_path(checkpoint_path)
+
+            with tf.Graph().as_default() as g:
+                tf.set_random_seed(self.model.config.tf_random_seed)
+                dataset = input_fn(tf.estimator.ModeKeys.PREDICT, self.params)
+                features_ori, labels_ori = dataset.make_one_shot_iterator().get_next()
+
+                features_placeholder = tf.placeholder(dtype=tf.float32,
+                                                      shape=(1, args.im_height, args.im_width, args.im_channel))
+                features = {"images": features_placeholder}
+                estimator_spec = self.model._call_model_fn(features, None,
+                                                           tf.estimator.ModeKeys.PREDICT,
+                                                           self.model.config)
+                predictions = estimator_spec.predictions
+
+                sess = tf.Session(graph=g, config=self.model._session_config)
+                while True:
+                    features_val, labels_val = sess.run([features_ori, labels_ori])
+                    results = sess.run(predictions, {features_placeholder: features_val["images"]})
+
+
+
+
+
+
 
     def _evaluate_case(self, logits3d, labels3d, cur_case, pad, bbox=None):
         # Process a complete volume
@@ -211,11 +266,15 @@ class EvaluateVolume(EvaluateBase):
         spacing = self.img_reader.header(cur_case).spacing()
 
         # Calculate 3D metrics
+        cur_pairs = {}
         for c, cls in enumerate(self.classes):
             pairs = metric_ops.metric_3d(logits3d[cls], labels3d[cls],
                                          sampling=spacing, required=self.metrics)
-            pairs = {"{}/{}".format(cls, met): value for met, value in pairs.items()}
-            self.append_metrics(pairs)
+            for met, value in pairs.items():
+                cur_pairs["{}/{}".format(cls, met)] = value
+
+        self.append_metrics(cur_pairs)
+        return cur_pairs
 
     @staticmethod
     def compare(cur_result,

@@ -254,7 +254,7 @@ def convert_to_liver_bounding_box(dataset,
                     if image_reader.shape[:-1] != label_reader.shape:
                         raise RuntimeError("Shape mismatched between image and label: {} vs {}".format(
                             image_reader.shape, label_reader.shape))
-                    # Find empty slices(we skip them in training)
+                    #
                     extra_info = {"bbox_origin": bbox}
                     # Convert 2D slices to example
                     for example in image_to_examples(image_reader, label_reader, split=True):
@@ -265,3 +265,52 @@ def convert_to_liver_bounding_box(dataset,
                         writer_3d.write(example.SerializeToString())
                     counter += 1
                 print()
+
+
+def convert_to_liver_bbox_triplet(dataset,
+                                  keep_only_liver,
+                                  k_split=5,
+                                  seed=None,
+                                  align=1,
+                                  padding=0,
+                                  min_bbox_shape=None,
+                                  prefix="bbox-triplet"):
+    file_names = get_lits_list(dataset, keep_only_liver)
+    num_images = len(file_names)
+
+    k_folds = read_or_create_k_folds(Path(__file__).parent.parent / "data/LiTS/k_folds.txt",
+                                     file_names, k_split, seed)
+    LiTS_records = _get_lits_records_dir()
+
+    image_reader = SubVolumeReader(np.int16, extend_channel=True)
+    label_reader = SubVolumeReader(np.uint8, extend_channel=False)  # use uint8 to save space
+
+    # Convert each split
+    counter = 1
+    for i, fold in enumerate(k_folds):
+        # Split to 2D slices for training
+        output_filename_2d = LiTS_records / "{}-{}-2D-{}-of-{}.tfrecord".format(dataset, prefix, i + 1, k_split)
+        with tf.io.TFRecordWriter(str(output_filename_2d)) as writer_2d:
+            for j, image_name in enumerate(fold):
+                print("\r>> Converting fold {}, {}/{}, {}/{}"
+                      .format(i + 1, j + 1, len(fold), counter, num_images), end="")
+
+                # Read image
+                image_file = LiTS_Dir / image_name
+                seg_file = image_file.parent / image_file.name.replace("volume", "segmentation")
+
+                label_reader.read(seg_file)
+                bbox = extract_region(label_reader.image(), align, padding, min_bbox_shape)
+                label_reader.bbox = bbox.tolist()
+                image_reader.read(image_file)
+                image_reader.bbox = bbox.tolist()
+
+                # we have extended extra dimension for image
+                if image_reader.shape[:-1] != label_reader.shape:
+                    raise RuntimeError("Shape mismatched between image and label: {} vs {}".format(
+                        image_reader.shape, label_reader.shape))
+                # Convert 2D slices to example
+                for example in image_to_examples(image_reader, label_reader, split=True, triplet=True):
+                    writer_2d.write(example.SerializeToString())
+                counter += 1
+            print()

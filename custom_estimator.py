@@ -14,8 +14,11 @@
 #
 # =================================================================================
 
+import six
+import json
 import copy
 from functools import partial
+from pathlib import Path
 
 from tensorflow.python.data import Dataset
 from tensorflow.python.data import Iterator
@@ -27,7 +30,8 @@ from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.training import training
 from tensorflow.python.training import training_util
 from tensorflow.python.training import warm_starting_util
-# from tensorflow.python.training import checkpoint_management
+# from tensorflow.python.training import monitored_session
+from tensorflow.python.training import checkpoint_management
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import random_seed
@@ -40,6 +44,7 @@ from tensorflow.python.util import function_utils
 from custom_evaluator_base import EvaluateBase
 from custom_hooks import IteratorStringHandleHook
 from custom_hooks import BestCheckpointSaverHook
+from custom_hooks import FeedGuideHook
 
 
 def _load_global_step_from_checkpoint_dir(checkpoint_dir):
@@ -223,18 +228,115 @@ class CustomEstimator(object):
             logging.info('Loss for final step: %s.', loss)
             return self
 
-    # def evaluate(self):
+    def evaluate(self,
+                 evaluator,
+                 input_fn,
+                 hooks=None,
+                 checkpoint_path=None,
+                 latest_filename=None,
+                 cases=None):
+        if not isinstance(evaluator, EvaluateBase):
+            raise TypeError("`evaluator` must be a EvaluateBase instance")
+        checkpoint_path = self._checkpoint_path(checkpoint_path, latest_filename)
+        results = evaluator.evaluate(input_fn,
+                                     hooks=hooks,
+                                     checkpoint_path=checkpoint_path,
+                                     cases=cases)
+        with (Path(self.model_dir) / "eval_results.txt").open("w") as f:
+            json.dump(results, f)
 
-    def predict(self, input_fn, predict_keys=None, hooks=None, checkpoint_path=None, yield_single_examples=True):
-        # hooks = estimator_lib._check_hooks_type(hooks)
-        # if not checkpoint_path:
-        #     checkpoint_path = checkpoint_management.latest_checkpoint(self._model_dir)
-        # if not checkpoint_path:
-        #     logging.info('Could not find trained model in model_dir: {}, running '
-        #                  'initialization to predict.'.format(self._model_dir))
-        #
-        # with ops.Graph().as_default() as g:
-        raise NotImplementedError
+    def predict(self,
+                input_fn,
+                predict_keys=None,
+                hooks=None,
+                checkpoint_path=None,
+                latest_filename=None,
+                yield_single_examples=True):
+        hooks = estimator_lib._check_hooks_type(hooks)
+
+        checkpoint_path = self._checkpoint_path(checkpoint_path, latest_filename)
+
+        with ops.Graph().as_default() as g:
+            random_seed.set_random_seed(self._config.tf_random_seed)
+            self._create_and_assert_global_step(g)
+            features, labels, input_hooks = self._get_features_and_labels_from_input_fn(
+                input_fn, model_fn_lib.ModeKeys.PREDICT)
+
+            estimator_spec = self._call_model_fn(
+                features, labels, model_fn_lib.ModeKeys.PREDICT, self.config)
+
+            predictions = self._extract_keys(estimator_spec.predictions, predict_keys)
+            all_hooks = list(input_hooks)
+            all_hooks.extend(hooks)
+            all_hooks.extend(list(estimator_spec.prediction_hooks or []))
+
+            with training.MonitoredSession(
+                    session_creator=training.ChiefSessionCreator(
+                        checkpoint_filename_with_path=checkpoint_path,
+                        master=self._config.master,
+                        scaffold=estimator_spec.scaffold,
+                        config=self._session_config),
+                    hooks=all_hooks) as mon_sess:
+                while not mon_sess.should_stop():
+                    preds_evaluated = mon_sess.run(predictions)
+                    if not yield_single_examples:
+                        yield preds_evaluated
+                    elif not isinstance(predictions, dict):
+                        for pred in preds_evaluated:
+                            yield pred
+                    else:
+                        for i in range(self._extract_batch_length(preds_evaluated)):
+                            yield {key: value[i] for key, value in six.iteritems(preds_evaluated)}
+
+    def predict_with_guide(self,
+                           input_fn,
+                           predict_keys=None,
+                           hooks=None,
+                           checkpoint_path=None,
+                           latest_filename=None,
+                           yield_single_examples=True):
+        hooks = estimator_lib._check_hooks_type(hooks)
+
+        checkpoint_path = self._checkpoint_path(checkpoint_path, latest_filename)
+
+        with ops.Graph().as_default() as g:
+            random_seed.set_random_seed(self._config.tf_random_seed)
+            self._create_and_assert_global_step(g)
+            features, labels, input_hooks = self._get_features_and_labels_from_input_fn(
+                input_fn, model_fn_lib.ModeKeys.PREDICT)
+
+            features_ph = {key: array_ops.placeholder(value.dtype, value.shape)
+                           for key, value in features.items()}
+            labels_ph = array_ops.placeholder(labels.dtype, labels.shape)
+            feed_guide_hook = FeedGuideHook(features_ph, labels_ph, features, labels)
+
+            estimator_spec = self._call_model_fn(
+                features_ph["images"], labels_ph, model_fn_lib.ModeKeys.PREDICT, self.config)
+
+            predictions = self._extract_keys(estimator_spec.predictions, predict_keys)
+            feed_guide_hook.predictions = predictions
+
+            all_hooks = list(input_hooks) + [feed_guide_hook]
+            all_hooks.extend(hooks)
+            all_hooks.extend(list(estimator_spec.prediction_hooks or []))
+
+            with training.MonitoredSession(
+                    session_creator=training.ChiefSessionCreator(
+                        checkpoint_filename_with_path=checkpoint_path,
+                        master=self._config.master,
+                        scaffold=estimator_spec.scaffold,
+                        config=self._session_config),
+                    hooks=all_hooks) as mon_sess:
+                while not mon_sess.should_stop():
+                    preds_evaluated = mon_sess.run(predictions)
+                    if not yield_single_examples:
+                        yield preds_evaluated
+                    elif not isinstance(predictions, dict):
+                        for pred in preds_evaluated:
+                            yield pred
+                    else:
+                        for i in range(self._extract_batch_length(preds_evaluated)):
+                            yield {key: value[i] for key, value in six.iteritems(preds_evaluated)}
 
     def predict_with_session(self, session, steps=None, yield_single_examples=False):
         predictions = self._predict_keys
@@ -262,6 +364,34 @@ class CustomEstimator(object):
                 counter += 1
         except errors_impl.OutOfRangeError:
             pass
+
+    def _checkpoint_path(self, checkpoint_path, latest_filename):
+        if not checkpoint_path:
+            latest_path = checkpoint_management.latest_checkpoint(
+                self._model_dir, latest_filename)
+            if not latest_path:
+                logging.info('Could not find trained model in model_dir: {}, running '
+                             'initialization to evaluate.'.format(self._model_dir))
+            checkpoint_path = latest_path
+        return checkpoint_path
+
+    @staticmethod
+    def _extract_keys(predictions, predict_keys):
+        """Extracts `predict_keys` from `predictions`."""
+        if not predict_keys:
+            return predictions
+        if not isinstance(predictions, dict):
+            raise ValueError(
+                'predict_keys argument is not valid in case of non-dict predictions.')
+        existing_keys = predictions.keys()
+        predictions = {
+            key: value
+            for key, value in six.iteritems(predictions) if key in predict_keys
+        }
+        if not predictions:
+            raise ValueError('Expected to run at least one output from %s, '
+                             'provided %s.' % (existing_keys, predict_keys))
+        return predictions
 
     @staticmethod
     def _extract_batch_length(preds_evaluated):
@@ -331,6 +461,72 @@ class CustomEstimator(object):
             [self._call_input_fn(input_fn, model_fn_lib.ModeKeys.TRAIN),  # Keep order: [train, eval]
              self._call_input_fn(input_fn, model_fn_lib.ModeKeys.EVAL)],
             handler)
+
+    def _train_model(self, input_fn, hooks, saving_listeners, save_best_ckpt):
+        """Initiate training with `input_fn`, without `DistributionStrategies`.
+
+        Args:
+            input_fn: A function that provides input data for training as mini-batches.
+            hooks: List of `tf.train.SessionRunHook` subclass instances. Used for
+            callbacks inside the training loop.
+            saving_listeners: list of `tf.train.CheckpointSaverListener` objects. Used
+            for callbacks that run immediately before or after checkpoint savings.
+            save_best_ckpt: boolean
+
+        Returns:
+            Loss from training
+        """
+        worker_hooks = []
+        worker_hooks.extend(hooks)
+        with ops.Graph().as_default() as g:     # Set device if distribution
+            random_seed.set_random_seed(self._config.tf_random_seed)
+            global_step_tensor = self._create_and_assert_global_step(g)
+            training_util._get_or_create_global_step_read(g)
+
+            if self._train_with_eval:
+                self.handler = array_ops.placeholder(dtypes.string, shape=(), name="Handler")
+                features, labels, self.train_iterator, self.eval_iterator, input_hooks = (
+                    self._get_features_and_labels_for_train_and_eval(
+                        input_fn, self.handler))
+            else:
+                self.handler, self.train_iterator, self.eval_iterator = None, None, None
+                features, labels, input_hooks = (
+                    self._get_features_and_labels_from_input_fn(
+                        input_fn, model_fn_lib.ModeKeys.TRAIN))
+
+            worker_hooks.extend(input_hooks)
+
+            estimator_spec = self._call_model_fn(features, labels, model_fn_lib.ModeKeys.TRAIN, self.config)
+            self._feed_dict = self._params["model"].feed_dict
+
+            return self._train_with_estimator_spec(estimator_spec, worker_hooks,
+                                                   global_step_tensor, saving_listeners,
+                                                   save_best_ckpt)
+
+    def _call_model_fn(self, features, labels, mode, config):
+        model_fn_args = function_utils.fn_args(self._model_fn)
+        kwargs = {}
+        if 'labels' in model_fn_args:
+            kwargs['labels'] = labels
+        else:
+            if labels is not None:
+                raise ValueError(
+                    'model_fn does not take labels, but input_fn returns labels.')
+        if 'mode' in model_fn_args:
+            kwargs['mode'] = mode
+        if 'params' in model_fn_args:
+            kwargs['params'] = self.params
+        if 'config' in model_fn_args:
+            kwargs['config'] = config
+
+        logging.info('Calling model_fn.')
+        model_fn_results = self._model_fn(features=features, **kwargs)
+        logging.info('Done calling model_fn.')
+
+        if not isinstance(model_fn_results, model_fn_lib.EstimatorSpec):
+            raise ValueError('model_fn should return an EstimatorSpec.')
+
+        return model_fn_results
 
     def _train_with_estimator_spec(self, estimator_spec, worker_hooks,
                                    global_step_tensor, saving_listeners, save_best_ckpt):
@@ -438,68 +634,15 @@ class CustomEstimator(object):
                 _, loss = mon_sess.run([estimator_spec.train_op, estimator_spec.loss], self._feed_dict)
             return loss
 
-    def _train_model(self, input_fn, hooks, saving_listeners, save_best_ckpt):
-        """Initiate training with `input_fn`, without `DistributionStrategies`.
+    def _evaluate_build_graph(self, input_fn):
+        """Builds the graph and related hooks to run evaluation."""
+        random_seed.set_random_seed(self._config.tf_random_seed)
+        self._create_and_assert_global_step(ops.get_default_graph())
 
-        Args:
-            input_fn: A function that provides input data for training as mini-batches.
-            hooks: List of `tf.train.SessionRunHook` subclass instances. Used for
-            callbacks inside the training loop.
-            saving_listeners: list of `tf.train.CheckpointSaverListener` objects. Used
-            for callbacks that run immediately before or after checkpoint savings.
-            save_best_ckpt: boolean
+        features, labels, input_hooks = self._get_features_and_labels_from_input_fn(
+            input_fn, model_fn_lib.ModeKeys.EVAL)
 
-        Returns:
-            Loss from training
-        """
-        worker_hooks = []
-        worker_hooks.extend(hooks)
-        with ops.Graph().as_default() as g:     # Set device if distribution
-            random_seed.set_random_seed(self._config.tf_random_seed)
-            global_step_tensor = self._create_and_assert_global_step(g)
-            training_util._get_or_create_global_step_read(g)
+        estimator_spec = self._call_model_fn(
+            features, labels, model_fn_lib.ModeKeys.EVAL, self.config)
 
-            if self._train_with_eval:
-                self.handler = array_ops.placeholder(dtypes.string, shape=(), name="Handler")
-                features, labels, self.train_iterator, self.eval_iterator, input_hooks = (
-                    self._get_features_and_labels_for_train_and_eval(
-                        input_fn, self.handler))
-            else:
-                self.handler, self.train_iterator, self.eval_iterator = None, None, None
-                features, labels, input_hooks = (
-                    self._get_features_and_labels_from_input_fn(
-                        input_fn, model_fn_lib.ModeKeys.TRAIN))
-
-            worker_hooks.extend(input_hooks)
-
-            estimator_spec = self._call_model_fn(features, labels, model_fn_lib.ModeKeys.TRAIN, self.config)
-            self._feed_dict = self._params["model"].feed_dict
-
-            return self._train_with_estimator_spec(estimator_spec, worker_hooks,
-                                                   global_step_tensor, saving_listeners,
-                                                   save_best_ckpt)
-
-    def _call_model_fn(self, features, labels, mode, config):
-        model_fn_args = function_utils.fn_args(self._model_fn)
-        kwargs = {}
-        if 'labels' in model_fn_args:
-            kwargs['labels'] = labels
-        else:
-            if labels is not None:
-                raise ValueError(
-                    'model_fn does not take labels, but input_fn returns labels.')
-        if 'mode' in model_fn_args:
-            kwargs['mode'] = mode
-        if 'params' in model_fn_args:
-            kwargs['params'] = self.params
-        if 'config' in model_fn_args:
-            kwargs['config'] = config
-
-        logging.info('Calling model_fn.')
-        model_fn_results = self._model_fn(features=features, **kwargs)
-        logging.info('Done calling model_fn.')
-
-        if not isinstance(model_fn_results, model_fn_lib.EstimatorSpec):
-            raise ValueError('model_fn should return an EstimatorSpec.')
-
-        return model_fn_results
+        return estimator_spec

@@ -20,8 +20,11 @@ import numpy as np
 from pathlib import Path
 
 from tensorflow.python.framework import ops
-from tensorflow.python.framework import dtypes
+# from tensorflow.python.framework import dtypes
+from tensorflow.python.framework import errors_impl
 # from tensorflow.python.framework import meta_graph
+# from tensorflow.python.ops import array_ops
+# from tensorflow.python.ops import state_ops
 from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.training import training_util
 from tensorflow.python.training import session_run_hook
@@ -31,6 +34,7 @@ from tensorflow.python.training.summary_io import SummaryWriterCache
 
 from custom_evaluator_base import EvaluateBase
 from utils.summary_kits import summary_scalar
+from utils.array_kits import get_gd_image_multi_objs
 
 
 class IteratorStringHandleHook(session_run_hook.SessionRunHook):
@@ -219,3 +223,38 @@ class BestCheckpointSaverHook(session_run_hook.SessionRunHook):
         # change it in duplicate Saver
         self._saver = saver_lib.Saver(saver_def=savers[0].as_saver_def())
         return self._saver
+
+
+class FeedGuideHook(session_run_hook.SessionRunHook):
+    def __init__(self, features_ph, labels_ph, features, labels):
+        self.features_ph = features_ph
+        self.labels_ph = labels_ph
+        self.features = features
+        self.labels = labels
+        self.features_val = None
+        self.labels_val = None
+        self.predictions = None
+        self.first = True
+
+    def before_run(self, run_context):
+        if self.first:
+            self.features_val, self.labels_val = run_context.session.run(
+                [self.features, self.labels])
+            self.first = False
+
+        feed_dict = {value: self.features_val[key] for key, value in self.features_ph}
+        feed_dict[self.labels_ph] = self.labels_val
+
+        return session_run_hook.SessionRunArgs(self.predictions, feed_dict=feed_dict)
+
+    def after_run(self, run_context, run_values):
+        predictions = run_values.results
+
+        try:
+            self.features_val, self.labels_val = run_context.session.run(
+                [self.features, self.labels])
+        except errors_impl.OutOfRangeError:
+            return run_context.request_stop()
+
+        self.features_val["images"][0, ..., -1] = get_gd_image_multi_objs(
+            predictions["TumorPred"][0, ..., 0], center_perturb=0., stddev_perturb=0.)

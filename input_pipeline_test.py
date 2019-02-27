@@ -90,7 +90,6 @@ class TestInputPipeline(unittest.TestCase):
         plt.imshow(labels[1], cmap="gray")
         plt.show()
 
-
     def test_spatial_guide(self):
         sys.argv.extend([
             "--use_spatial_guide",
@@ -118,3 +117,66 @@ class TestInputPipeline(unittest.TestCase):
             plt.subplot(223)
             plt.imshow(labels[0], cmap="gray")
             plt.show()
+
+    def test_get_multi_channels_dataset_for_train(self):
+        sys.argv.extend([
+            "--mode", "train",
+            "--noise", "--zoom", "--flip",
+            "--zoom_scale", "1.2",
+            "--use_spatial_guide",
+        ])
+        self.args = self.parser.parse_args()
+        print(self.args)
+
+        dataset = input_pipeline.get_multi_channels_dataset_for_train(self.records, self.args)
+        inputs = dataset.make_one_shot_iterator().get_next("Inputs")
+        while True:
+            features, labels = self.sess.run(inputs)
+            print(features["images"].shape)
+            # print(features["name"])
+            # print(features["id"])
+            print(labels.shape)
+            # print(features["images"].max(), features["images"].min())
+            # print(labels.max(), labels.min())
+            plt.subplot(231)
+            plt.imshow(features["images"][0, ..., 0], cmap="gray")
+            plt.subplot(232)
+            plt.imshow(features["images"][0, ..., 1], cmap="gray")
+            plt.subplot(233)
+            plt.imshow(features["images"][0, ..., 2], cmap="gray")
+            plt.subplot(234)
+            plt.imshow(features["images"][0, ..., 3], cmap="gray")
+            plt.subplot(235)
+            plt.imshow(labels[0], cmap="gray")
+            plt.show()
+
+    def test_get_multi_channels_dataset_for_eval(self):
+        sys.argv.extend([
+            "--mode", "train",
+            "--use_spatial_guide",
+        ])
+        self.args = self.parser.parse_args()
+        print(self.args)
+
+        dataset = input_pipeline.get_multi_channels_dataset_for_eval(self.records_3d, self.args)
+        inputs = dataset.make_one_shot_iterator().get_next("Inputs")
+        while True:
+            features, labels = self.sess.run(inputs)
+            print(features["images"].shape)
+            # print(features["name"])
+            # print(features["id"])
+            print(labels.shape)
+            # print(features["images"].max(), features["images"].min())
+            # print(labels.max(), labels.min())
+            for i in range(labels.shape[0]):
+                plt.subplot(231)
+                plt.imshow(features["images"][i, ..., 0], cmap="gray")
+                plt.subplot(232)
+                plt.imshow(features["images"][i, ..., 1], cmap="gray")
+                plt.subplot(233)
+                plt.imshow(features["images"][i, ..., 2], cmap="gray")
+                plt.subplot(234)
+                plt.imshow(features["images"][i, ..., 3], cmap="gray")
+                plt.subplot(235)
+                plt.imshow(labels[i], cmap="gray")
+                plt.show()

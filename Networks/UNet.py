@@ -155,9 +155,24 @@ class UNet(base.BaseNet):
     def _build_summaries(self):
         if self.mode == ModeKeys.TRAIN:
             # Make sure all the elements are positive
-            images = self._inputs["images"] - tf.reduce_min(self._inputs["images"])
-            tf.summary.image("{}/{}".format(self.args.tag, images.op.name), images,
-                             max_outputs=1, collections=[self.DEFAULT])
+            images = []
+            if self.args.im_channel == 2:
+                image1 = self._inputs["images"][..., 0:1]
+                images.append(image1 - tf.reduce_min(image1))
+                image2 = self._inputs["images"][..., 1:2]
+                images.append(image2 - tf.reduce_min(image2))
+            elif self.args.im_channel == 3:
+                images = self._inputs["images"][..., 1:2]
+                images = [images - tf.reduce_min(images)]
+            elif self.args.im_channel == 4:
+                image1 = self._inputs["images"][..., 1:2]
+                images.append(image1 - tf.reduce_min(image1))
+                image2 = self._inputs["images"][..., 3:4]
+                images.append(image2 - tf.reduce_min(image2))
+
+            for image in images:
+                tf.summary.image("{}/{}".format(self.args.tag, image.op.name), image,
+                                 max_outputs=1, collections=[self.DEFAULT])
 
             labels = tf.expand_dims(self._inputs["labels"], axis=-1)
             with tf.name_scope("LabelProcess/"):

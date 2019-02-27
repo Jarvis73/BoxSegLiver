@@ -34,7 +34,8 @@ def add_arguments(parser):
                        required=False, help="Number of steps for training")
     group.add_argument("--num_of_total_steps",
                        type=int,
-                       required=True, help="Number of total steps for training")
+                       default=1000,
+                       required=False, help="Number of total steps for training")
     group.add_argument("--lr_decay_step",
                        type=int,
                        default=1e5,

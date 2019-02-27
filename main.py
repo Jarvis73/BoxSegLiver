@@ -27,6 +27,7 @@ import input_pipeline
 import custom_evaluator
 from utils.logger import create_logger
 from custom_estimator import CustomEstimator
+from custom_evaluator import EvaluateVolume
 
 ModeKeys = tf.estimator.ModeKeys
 TF_RANDOM_SEED = 13579
@@ -90,14 +91,31 @@ def main(argv):
 
         estimator = CustomEstimator(models.model_fn, args.model_dir, run_config, params)
 
-        kwargs = {"save_best_ckpt": args.save_best,
-                  # "hooks": [tf.data.experimental.CheckpointInputPipelineHook(estimator)]
-                  }
-        if args.num_of_steps > 0:
-            kwargs["steps"] = args.num_of_steps
-        else:
-            kwargs["max_steps"] = args.num_of_total_steps
-        estimator.train(input_pipeline.input_fn, **kwargs)
+        steps, max_steps = ((args.num_of_steps, None)
+                            if args.num_of_steps > 0 else (None, args.num_of_total_steps))
+        estimator.train(input_pipeline.input_fn,
+                        steps=steps,
+                        max_steps=max_steps,
+                        save_best_ckpt=args.save_best)
+
+    elif args.mode == ModeKeys.EVAL:
+        run_config = tf.estimator.RunConfig(
+            tf_random_seed=TF_RANDOM_SEED,
+            session_config=_get_session_config()
+        )
+
+        params = {"args": args}
+        params.update(models.get_model_params(args))
+
+        estimator = CustomEstimator(models.model_fn, args.model_dir, run_config, params)
+
+        predict_keys = None
+        evaluator = EvaluateVolume(estimator, predict_keys)
+
+        estimator.evaluate(evaluator,
+                           input_pipeline.input_fn,
+                           checkpoint_path=args.ckpt_path,
+                           latest_filename=("checkpoint_best" if not args.eval_final else None))
 
 
 if __name__ == "__main__":
