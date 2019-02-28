@@ -112,3 +112,4 @@ venv.bak/
 data/*/
 logs/
 *deprecated*
+model_dir/

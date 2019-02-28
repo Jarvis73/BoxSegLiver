@@ -308,10 +308,11 @@ class CustomEstimator(object):
             features_ph = {key: array_ops.placeholder(value.dtype, value.shape)
                            for key, value in features.items()}
             labels_ph = array_ops.placeholder(labels.dtype, labels.shape)
-            feed_guide_hook = FeedGuideHook(features_ph, labels_ph, features, labels)
+            feed_guide_hook = FeedGuideHook(features_ph, labels_ph, features, labels,
+                                            self.model_dir)
 
             estimator_spec = self._call_model_fn(
-                features_ph["images"], labels_ph, model_fn_lib.ModeKeys.PREDICT, self.config)
+                features_ph, labels_ph, model_fn_lib.ModeKeys.PREDICT, self.config)
 
             predictions = self._extract_keys(estimator_spec.predictions, predict_keys)
             feed_guide_hook.predictions = predictions

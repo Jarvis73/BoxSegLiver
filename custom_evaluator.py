@@ -56,6 +56,9 @@ def add_arguments(parser):
     group.add_argument("--use_fewer_guide",
                        action="store_true",
                        required=False, help="Use fewer guide for evaluation")
+    group.add_argument("--eval_num",
+                       type=int,
+                       required=False, help="Number of cases for evaluation")
 
 
 def get_eval_params(eval_steps=2500,
@@ -117,7 +120,7 @@ class EvaluateVolume(EvaluateBase):
             if key in self._metric_values:
                 self._metric_values[key].append(value)
 
-    def _evaluate(self, predicts, cases=None, verbose=False):
+    def _evaluate(self, predicts, cases=None, verbose=False, save=False):
         # process a 3D image slice by slice or patch by patch
         logits3d = defaultdict(list)
         labels3d = defaultdict(list)
@@ -144,7 +147,7 @@ class EvaluateVolume(EvaluateBase):
                     logits3d[cls].append(np.squeeze(pred[cls + "Pred"], axis=-1))
                     labels3d[cls].append(pred["Labels_{}".format(c)])
             else:
-                result = self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox)
+                result = self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox, save)
                 self._timer.toc()
                 if verbose:
                     log_str = "Evaluate-{} {}".format(self._timer.calls, Path(cur_case).stem)
@@ -167,21 +170,21 @@ class EvaluateVolume(EvaluateBase):
 
         if cases is None:
             # Final case
-            result = self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox)
+            result = self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox, save)
             self._timer.toc()
             if verbose:
                 log_str = "Evaluate-{} {}".format(self._timer.calls, Path(cur_case).stem)
                 for key, value in result.items():
                     log_str += " {}: {:.3f}".format(key, value)
                 tf.logging.info(log_str + " ({:.3f} secs/case)".format(self._timer.average_time))
-        tf.logging.info("Evaluate all the dataset ({} cases) finished! ({} secs/case)"
+        tf.logging.info("Evaluate all the dataset ({} cases) finished! ({:.3f} secs/case)"
                         .format(self._timer.calls, self._timer.average_time))
 
         # Compute average metrics
         results = {key: np.mean(values) for key, values in self._metric_values.items()}
         display_str = ""
         for key, value in results.items():
-            display_str += "{}: {} ".format(key, value)
+            display_str += "{}: {:.3f} ".format(key, value)
         tf.logging.info(display_str)
 
         if global_step is not None:
@@ -205,38 +208,19 @@ class EvaluateVolume(EvaluateBase):
             predicts = self.model.predict(input_fn, self._predict_keys, hooks, checkpoint_path,
                                           yield_single_examples=False)
             tf.logging.info("Begin evaluating ...")
-            return self._evaluate(predicts, cases=cases, verbose=True)
+            return self._evaluate(predicts, cases=cases, verbose=True,
+                                  save=self.params["args"].save_predict)
         else:
             # Construct model with batch_size = 1
             # Disconnect input pipeline with model pipeline
-            args = self.params["args"]
-            checkpoint_path = self.model._checkpoint_path(checkpoint_path)
+            self.params["args"].batch_size = 1
+            predicts = self.model.predict_with_guide(input_fn, self._predict_keys, hooks,
+                                                     checkpoint_path, yield_single_examples=False)
+            tf.logging.info("Begin evaluating ...")
+            return self._evaluate(predicts, cases=cases, verbose=True,
+                                  save=self.params["args"].save_predict)
 
-            with tf.Graph().as_default() as g:
-                tf.set_random_seed(self.model.config.tf_random_seed)
-                dataset = input_fn(tf.estimator.ModeKeys.PREDICT, self.params)
-                features_ori, labels_ori = dataset.make_one_shot_iterator().get_next()
-
-                features_placeholder = tf.placeholder(dtype=tf.float32,
-                                                      shape=(1, args.im_height, args.im_width, args.im_channel))
-                features = {"images": features_placeholder}
-                estimator_spec = self.model._call_model_fn(features, None,
-                                                           tf.estimator.ModeKeys.PREDICT,
-                                                           self.model.config)
-                predictions = estimator_spec.predictions
-
-                sess = tf.Session(graph=g, config=self.model._session_config)
-                while True:
-                    features_val, labels_val = sess.run([features_ori, labels_ori])
-                    results = sess.run(predictions, {features_placeholder: features_val["images"]})
-
-
-
-
-
-
-
-    def _evaluate_case(self, logits3d, labels3d, cur_case, pad, bbox=None):
+    def _evaluate_case(self, logits3d, labels3d, cur_case, pad, bbox=None, save=False):
         # Process a complete volume
         logits3d = {cls: np.concatenate(values)[:-pad] if pad != 0 else np.concatenate(values)
                     for cls, values in logits3d.items()}
@@ -263,17 +247,33 @@ class EvaluateVolume(EvaluateBase):
             logits3d["Liver"] = arr_ops.get_largest_component(logits3d["Liver"], rank=3)
 
         # Find volume voxel spacing from data source
-        spacing = self.img_reader.header(cur_case).spacing()
+        header = self.img_reader.header(cur_case)
 
         # Calculate 3D metrics
         cur_pairs = {}
         for c, cls in enumerate(self.classes):
             pairs = metric_ops.metric_3d(logits3d[cls], labels3d[cls],
-                                         sampling=spacing, required=self.metrics)
+                                         sampling=header.spacing, required=self.metrics)
             for met, value in pairs.items():
                 cur_pairs["{}/{}".format(cls, met)] = value
 
         self.append_metrics(cur_pairs)
+
+        if save:
+            cur_case = Path(cur_case)
+            case_name = cur_case.name.replace("volume", "prediction") + ".gz"
+            save_path = Path(self.model.model_dir) / "prediction"
+            if not save_path.exists():
+                save_path.mkdir(exist_ok=True)
+            save_path = save_path / case_name
+
+            img_array = logits3d["Liver"] + logits3d["Tumor"] if "Tumor" in logits3d else logits3d["Liver"]
+            pad_with = tuple(zip(bbox[2::-1], np.array(header.shape) - bbox[:2:-1] - 1))
+            img_array = np.pad(img_array, pad_with, mode="constant", constant_values=0)
+
+            self.img_reader.save(save_path, img_array, fmt=cur_case.suffix[1:])
+            tf.logging.info("    ==> Save to {}"
+                            .format(str(save_path.relative_to(save_path.parent.parent.parent))))
         return cur_pairs
 
     @staticmethod

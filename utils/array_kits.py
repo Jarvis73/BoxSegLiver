@@ -435,7 +435,7 @@ def get_gd_image_multi_objs(labels,
         Gaussian distribution image
 
     """
-    labels = np.asarray(labels, dtype=np.float32)
+    labels = np.asarray(labels, dtype=np.uint8)
     ndim = labels.ndim
 
     if not np.any(labels):

@@ -2,6 +2,7 @@
 
 TASK=$1
 GPU_ID=$2
+shift 2
 
 PROJECT_DIR=$(dirname $(dirname $(realpath $0)))
 BASE_NAME=$(basename $0)
@@ -18,15 +19,20 @@ if [ "$TASK" == "train" ]; then
         --zoom_scale 1.2 \
         --im_height 256 \
         --im_width 256 \
+        --im_channel 2 \
         --resize_for_batch \
         --num_of_total_steps 400000 \
         --lr_decay_step 400001 \
         --primary_metric "Tumor/Dice" \
         --secondary_metric "Liver/Dice" \
-        --eval_steps 5000 \
+        --loss_weight_type numerical \
+        --loss_numeric_w 0.2 0.4 4.4 \
+        --eval_steps 2500 \
         --batch_size 8 \
         --weight_init "xavier" \
         --weight_decay_rate 0 \
+        --use_spatial_guide \
+        --use_fake_guide \
         $@
 elif [ "$TASK" == "eval" ]; then
     PYTHONPATH=${PROJECT_DIR} CUDA_VISIBLE_DEVICES=${GPU_ID} python ./main.py \
@@ -37,9 +43,11 @@ elif [ "$TASK" == "eval" ]; then
         --dataset_for_eval LiTS_Eval_Tumor.json \
         --im_height 256 \
         --im_width 256 \
+        --im_channel 2 \
         --resize_for_batch \
         --primary_metric "Tumor/Dice" \
         --secondary_metric "Liver/Dice" \
         --weight_init "xavier" \
+        --use_spatial_guide \
         $@
 fi

@@ -32,6 +32,7 @@ from tensorflow.python.training import basic_session_run_hooks
 from tensorflow.python.training import saver as saver_lib
 from tensorflow.python.training.summary_io import SummaryWriterCache
 
+import data_kits.build_data as data_ops
 from custom_evaluator_base import EvaluateBase
 from utils.summary_kits import summary_scalar
 from utils.array_kits import get_gd_image_multi_objs
@@ -158,6 +159,7 @@ class BestCheckpointSaverHook(session_run_hook.SessionRunHook):
             self._better_result = results
             self._need_save = True
 
+        self._summary(step, results)
         return self._save(session, step)
 
     def _save(self, session, step):
@@ -173,14 +175,15 @@ class BestCheckpointSaverHook(session_run_hook.SessionRunHook):
         with self._get_best_result_dump_file().open("w") as f:
             json.dump(self._get_result_for_json_dump(), f)
 
-        self._summary(step)
-
         should_stop = False
         return should_stop
 
-    def _summary(self, step):
+    def _summary(self, step, result=None):
+        if result is None:
+            result = self._better_result
+
         tags, values = [], []
-        for key, value in self._better_result.items():
+        for key, value in result.items():
             if key == ops.GraphKeys.GLOBAL_STEP:
                 continue
             tags.append(self._summary_tag.format(key))
@@ -226,7 +229,7 @@ class BestCheckpointSaverHook(session_run_hook.SessionRunHook):
 
 
 class FeedGuideHook(session_run_hook.SessionRunHook):
-    def __init__(self, features_ph, labels_ph, features, labels):
+    def __init__(self, features_ph, labels_ph, features, labels, model_dir):
         self.features_ph = features_ph
         self.labels_ph = labels_ph
         self.features = features
@@ -235,14 +238,22 @@ class FeedGuideHook(session_run_hook.SessionRunHook):
         self.labels_val = None
         self.predictions = None
         self.first = True
+        self.guides = []
+        self.cur_case = None
+        self.bbox = None
+        self.img_reader = data_ops.ImageReader()
+        self.model_dir = model_dir
 
     def before_run(self, run_context):
         if self.first:
             self.features_val, self.labels_val = run_context.session.run(
                 [self.features, self.labels])
             self.first = False
+            self.guides.append(self.features_val["images"][0, ..., -1])
+            self.cur_case = self.features_val["names"][0].decode("utf-8")
+            self.bbox = self.features_val["bboxes"][0]
 
-        feed_dict = {value: self.features_val[key] for key, value in self.features_ph}
+        feed_dict = {value: self.features_val[key] for key, value in self.features_ph.items()}
         feed_dict[self.labels_ph] = self.labels_val
 
         return session_run_hook.SessionRunArgs(self.predictions, feed_dict=feed_dict)
@@ -254,7 +265,44 @@ class FeedGuideHook(session_run_hook.SessionRunHook):
             self.features_val, self.labels_val = run_context.session.run(
                 [self.features, self.labels])
         except errors_impl.OutOfRangeError:
+            self._save_guide()
             return run_context.request_stop()
+        else:
+            new_case = self.features_val["names"][0].decode("utf-8")
+            if new_case != self.cur_case:
+                self._save_guide()
+                self.cur_case = new_case
+                self.bbox = self.features_val["bboxes"][0]
 
-        self.features_val["images"][0, ..., -1] = get_gd_image_multi_objs(
-            predictions["TumorPred"][0, ..., 0], center_perturb=0., stddev_perturb=0.)
+        self.features_val["images"][0, ..., -1] = np.maximum(
+            self.features_val["images"][0, ..., -1],
+            get_gd_image_multi_objs(predictions["TumorPred"][0, ..., 0],
+                                    center_perturb=0., stddev_perturb=0.))
+        self.guides.append(self.features_val["images"][0, ..., -1])
+
+    def _save_guide(self):
+        from utils import array_kits as arr_ops
+        import scipy.ndimage as ndi
+
+        img_array = np.stack(self.guides, axis=0)
+        # Resize logits3d to the shape of labels3d
+        ori_shape = list(arr_ops.bbox_to_shape(self.bbox))
+        cur_shape = img_array.shape
+        ori_shape[0] = cur_shape[0]
+        scales = np.array(ori_shape) / np.array(cur_shape)
+        img_array = ndi.zoom(img_array, scales, order=1)
+        img_array = (img_array * 255).astype(np.int16)
+
+        header = self.img_reader.header(self.cur_case)
+
+        cur_case = Path(self.cur_case)
+        case_name = cur_case.name.replace("volume", "guide") + ".gz"
+        save_path = Path(self.model_dir) / "spatial_guide"
+        if not save_path.exists():
+            save_path.mkdir(exist_ok=True)
+        save_path = save_path / case_name
+
+        pad_with = tuple(zip(self.bbox[2::-1], np.array(header.shape) - self.bbox[:2:-1] - 1))
+        img_array = np.pad(img_array, pad_with, mode="constant", constant_values=0)
+
+        self.img_reader.save(save_path, img_array, fmt=cur_case.suffix[1:])

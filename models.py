@@ -81,7 +81,6 @@ def model_fn(features, labels, mode, params):
         labels = tf.identity(features["labels"], name="Labels")
     inputs = {"images": images, "labels": labels}
 
-    loss = None
     train_op = None
     predictions = None
 

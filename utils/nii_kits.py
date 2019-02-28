@@ -67,8 +67,8 @@ def nii_reader(nii_path, only_meta=False):
     return meta_info, raw_image
 
 
-def nii_writer(nii_path, image, affine, header=None, verbose=False):
-    new_image = nib.Nifti1Image(image, affine=affine, header=header)
+def nii_writer(nii_path, image, meta_info=None, affine=None, verbose=False):
+    new_image = nib.Nifti1Image(image, affine=affine, header=meta_info)
     nib.save(new_image, str(nii_path))
     if verbose:
         print("Write nii to", nii_path)

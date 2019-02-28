@@ -349,15 +349,17 @@ def data_augmentation(features, labels, args, mode, only_first_slice=False):
     features and labels
 
     """
-    def _wrap_get_gd_image_multi_objs(mask, for_train):
+    def _wrap_get_gd_image_multi_objs(mask):
         center_perturb = args.center_perturb if args.mode == ModeKeys.TRAIN else 0.
         stddev_perturb = args.stddev_perturb if args.mode == ModeKeys.TRAIN else 0.
+        with_fake = args.use_fake_guide if mode == ModeKeys.TRAIN else False
         guide_image = array_kits.get_gd_image_multi_objs(
             mask,
-            center_perturb,
-            stddev_perturb,
+            obj_value=2,
+            center_perturb=center_perturb,
+            stddev_perturb=stddev_perturb,
             partial=only_first_slice,
-            with_fake_guides=for_train,
+            with_fake_guides=with_fake,
             fake_rate=args.fake_rate)[..., None]
         return guide_image.astype(np.float32)
 
@@ -378,9 +380,8 @@ def data_augmentation(features, labels, args, mode, only_first_slice=False):
                     features["images"] = image_ops.random_noise(features["images"], args.noise_scale)
                     logging.info("Add random noise, scale = {}".format(args.noise_scale))
 
-        if args.use_spatial_guide:
-            with_fake = args.use_fake_guide if mode == ModeKeys.TRAIN else False
-            guide = tf.py_func(_wrap_get_gd_image_multi_objs, [labels, with_fake], tf.float32)
+        if args.use_spatial_guide and not args.use_fewer_guide:
+            guide = tf.py_func(_wrap_get_gd_image_multi_objs, [labels], tf.float32)
             features["images"] = tf.concat((features["images"], guide), axis=-1)
 
         if args.resize_for_batch:
@@ -461,8 +462,29 @@ def _flat_map_fn(x, y, args):
     return Dataset.zip((images, labels, names, pads)).map(map_fn)
 
 
+def _before_flat_fn(features, labels, args):
+
+    def _wrap_get_gd_image_multi_objs(mask):
+        guide_image = array_kits.get_gd_image_multi_objs(
+            mask,
+            obj_value=2,
+            center_perturb=0.,
+            stddev_perturb=0.,
+            partial=True,
+            with_fake_guides=False)[..., None]
+        return guide_image.astype(np.float32)
+
+    if args.mode == ModeKeys.EVAL:
+        if args.use_spatial_guide and args.use_fewer_guide:
+            guide = tf.py_func(_wrap_get_gd_image_multi_objs, [labels], tf.float32)
+            features["images"] = tf.concat((features["images"], guide), axis=-1)
+
+    return features, labels
+
+
 def get_multi_records_dataset_for_eval(file_names, args):
     parse_fn = partial(parse_3d_example_proto, args=args)
+    before_flat_fn = partial(_before_flat_fn, args=args)
     flat_fn = partial(_flat_map_fn, args=args)
     augment_fn = partial(data_augmentation, args=args, mode=ModeKeys.EVAL)
 
@@ -471,6 +493,7 @@ def get_multi_records_dataset_for_eval(file_names, args):
         dataset = dataset.concatenate(tf.data.TFRecordDataset(file_name))
 
     dataset = (dataset.map(parse_fn, num_parallel_calls=args.batch_size)
+               .map(before_flat_fn, num_parallel_calls=args.batch_size)
                .flat_map(flat_fn)
                .map(augment_fn, num_parallel_calls=args.batch_size)
                .batch(args.batch_size)
@@ -568,6 +591,7 @@ def _flat_map_fn_multi_channels(x, y, args):
 
 def get_multi_channels_dataset_for_eval(file_names, args):
     parse_fn = partial(parse_3d_example_proto, args=args)
+    before_flat_fn = partial(_before_flat_fn, args=args)
     flat_fn = partial(_flat_map_fn_multi_channels, args=args)
     augment_fn = partial(data_augmentation, args=args, mode=ModeKeys.EVAL)
 
@@ -576,6 +600,7 @@ def get_multi_channels_dataset_for_eval(file_names, args):
         dataset = dataset.concatenate(tf.data.TFRecordDataset(file_name))
 
     dataset = (dataset.map(parse_fn, num_parallel_calls=args.batch_size)
+               .map(before_flat_fn, num_parallel_calls=args.batch_size)
                .flat_map(flat_fn)
                .map(augment_fn, num_parallel_calls=args.batch_size)
                .batch(args.batch_size)

@@ -2,6 +2,7 @@
 
 TASK=$1
 GPU_ID=$2
+shift 2
 
 PROJECT_DIR=$(dirname $(dirname $(realpath $0)))
 BASE_NAME=$(basename $0)
@@ -28,5 +29,20 @@ if [ "$TASK" == "train" ]; then
         --eval_steps 5000 \
         --batch_size 8 \
         --weight_init "xavier" \
-        --weight_decay_rate 0
+        --weight_decay_rate 0 \
+        $@
+elif [ "$TASK" == "eval" ]; then
+    PYTHONPATH=${PROJECT_DIR} CUDA_VISIBLE_DEVICES=${GPU_ID} python ./main.py \
+        --mode eval \
+        --tag ${BASE_NAME%".sh"} \
+        --model UNet \
+        --classes Liver Tumor \
+        --dataset_for_eval LiTS_Eval_Tumor.json \
+        --im_height 256 \
+        --im_width 256 \
+        --resize_for_batch \
+        --primary_metric "Tumor/Dice" \
+        --secondary_metric "Liver/Dice" \
+        --weight_init "xavier" \
+        $@
 fi

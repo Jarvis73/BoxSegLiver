@@ -19,9 +19,9 @@ from collections import Iterable
 
 from utils import array_kits
 # noinspection PyUnresolvedReferences
-from utils.nii_kits import nii_reader
+from utils.nii_kits import nii_reader, nii_writer
 # noinspection PyUnresolvedReferences
-from utils.mhd_kits import mhd_reader
+from utils.mhd_kits import mhd_reader, mhd_writer
 
 
 FORMATS = [
@@ -47,6 +47,7 @@ class ImageReader(object):
         self._type = image_type
         self._extend_channel = extend_channel
         self._reader = mhd_reader
+        self._writer = mhd_writer
         self._decode = None
         self._meta = None
         self._filename = None
@@ -73,6 +74,7 @@ class ImageReader(object):
         assert new_format in FORMATS, "Not supported image format: {}".format(new_format)
         self._format = new_format
         self._reader = eval(new_format + "_reader")
+        self._writer = eval(new_format + "_writer")
 
     def data(self, idx=None):
         if self._decode is None:
@@ -96,7 +98,7 @@ class ImageReader(object):
 
     def read(self, file_name, idx=None):
         self._filename = file_name
-        self._check_format(str(file_name).split(".")[-1])
+        self._check_format(str(file_name).split(".")[1])
         self._meta, self._decode = self._reader(file_name)
         self._decode = self._decode.astype(self._type, copy=False)
         if self._extend_channel:
@@ -105,20 +107,44 @@ class ImageReader(object):
 
     def header(self, file_name):
         self._filename = file_name
-        self._check_format(str(file_name).split(".")[-1])
+        self._check_format(str(file_name).split(".")[1])
         self._meta, _ = self._reader(file_name, only_meta=True)
-        return self.Spacing(self._meta, self.format)
+        return self.Header(self._meta, self.format)
 
-    class Spacing(object):
+    def save(self, save_path, img_array, meta=None, fmt="mhd"):
+        if self._meta is None and meta is None:
+            raise ValueError("Missing meta information")
+        if meta is None and self._meta is not None:
+            meta = self._meta
+        self._check_format(fmt)
+
+        if fmt == "nii" and meta is not None:
+            img_array = img_array.transpose((2, 1, 0))
+            qform = meta.get_qform()
+            if qform[0, 3] < 0:
+                img_array = np.flipud(img_array)
+            if qform[1, 3] <= 0:
+                img_array = np.fliplr(img_array)
+        self._writer(save_path, img_array, meta_info=meta)
+
+    class Header(object):
         def __init__(self, header, fmt):
             self.header = header
             self.format = fmt
 
+        @property
         def spacing(self):
             if self.format == "mhd":
                 return tuple(self.header["ElementSpacing"])
             elif self.format == "nii":
                 return self.header["srow_x"][0], self.header["srow_y"][1], self.header["srow_z"][2]
+
+        @property
+        def shape(self):
+            if self.format == "mhd":
+                return tuple(self.header["NDims"])
+            elif self.format == "nii":
+                return self.header.get_data_shape()[::-1]
 
 
 class SubVolumeReader(ImageReader):

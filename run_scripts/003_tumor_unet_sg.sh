@@ -2,6 +2,7 @@
 
 TASK=$1
 GPU_ID=$2
+shift 2
 
 PROJECT_DIR=$(dirname $(dirname $(realpath $0)))
 BASE_NAME=$(basename $0)
@@ -30,7 +31,8 @@ if [ "$TASK" == "train" ]; then
         --batch_size 8 \
         --weight_init "xavier" \
         --weight_decay_rate 0 \
-        --use_spatial_guide
+        --use_spatial_guide \
+        $@
 elif [ "$TASK" == "eval" ]; then
     PYTHONPATH=${PROJECT_DIR} CUDA_VISIBLE_DEVICES=${GPU_ID} python ./main.py \
         --mode eval \
@@ -44,7 +46,7 @@ elif [ "$TASK" == "eval" ]; then
         --resize_for_batch \
         --primary_metric "Tumor/Dice" \
         --secondary_metric "Liver/Dice" \
-        --batch_size 8 \
         --weight_init "xavier" \
-        --use_spatial_guide
+        --use_spatial_guide \
+        $@
 fi

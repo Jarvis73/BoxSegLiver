@@ -115,7 +115,8 @@ def main(argv):
         estimator.evaluate(evaluator,
                            input_pipeline.input_fn,
                            checkpoint_path=args.ckpt_path,
-                           latest_filename=("checkpoint_best" if not args.eval_final else None))
+                           latest_filename=("checkpoint_best" if not args.eval_final else None),
+                           cases=args.eval_num)
 
 
 if __name__ == "__main__":

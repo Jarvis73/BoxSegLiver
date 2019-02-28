@@ -34,6 +34,9 @@ def add_arguments(parser):
                        type=str,
                        default="",
                        required=False, help="Directory to save model parameters, graph and etc")
+    group.add_argument("--save_predict",
+                       action="store_true",
+                       required=False, help="Save prediction to file")
 
 
 def check_args(args, parser):
