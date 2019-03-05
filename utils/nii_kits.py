@@ -34,7 +34,7 @@ def nii_reader(nii_path, only_meta=False):
 
         Returns
         -------
-        meta_info: dict
+        meta_info: dict or Header
             a dictionary contains all the information in nii file
         raw_image: ndarray
             raw data of this image. If `only_meta` is True, this return will be None.

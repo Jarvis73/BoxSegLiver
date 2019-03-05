@@ -19,6 +19,8 @@ import functools
 import numpy as np
 import scipy.ndimage as ndi
 
+WARNING_ONCE = False
+
 
 def bbox_from_mask(mask, mask_values, min_shape=None, padding=None):
     """
@@ -78,8 +80,12 @@ def bbox_from_mask(mask, mask_values, min_shape=None, padding=None):
             min_shape = [0] * mask.ndim
         min_shape = np.array(min_shape)
         pad = np.clip((min_shape - (coords[1::2] - coords[::2] + 1)) / 2, 0, 65535)
+    elif isinstance(padding, int):
+        pad = np.array([padding] * mask.ndim, dtype=np.int32)
+    elif isinstance(padding, (tuple, list, np.ndarray)):
+        pad = np.asarray(padding, dtype=np.int32) // 2
     else:
-        pad = padding / 2
+        raise TypeError("`padding` must be an iterable object, got {}".format(type(padding)))
     bbox = np.concatenate((np.maximum(0, coords[::2] - np.floor(pad[::-1]).astype(np.int32)),
                            np.minimum(np.array(mask.shape)[::-1] - 1,
                                       coords[1::2] + np.ceil(pad[::-1]).astype(np.int32))))
@@ -325,7 +331,7 @@ def create_gaussian_distribution(shape, center, stddev):
     coords = np.stack(np.meshgrid(*coords, indexing="ij"), axis=-1)
     normalizer = 2 * (stddev * stddev)
     d = np.exp(-np.sum((coords - center[::-1]) ** 2 / normalizer[::-1], axis=-1))
-    return np.clip(d, 0, 1)
+    return np.clip(d, 0, 1).astype(np.float32)
 
 
 def get_gd_image_single_obj(labels, center_perturb=0.2, stddev_perturb=0.4, blank_prob=0, partial=False):
@@ -381,7 +387,7 @@ def get_gd_image_single_obj(labels, center_perturb=0.2, stddev_perturb=0.4, blan
     cur_gd = create_gaussian_distribution(obj_lab.shape, center_p, std_p)
 
     if partial:
-        gd = np.zeros_like(labels)
+        gd = np.zeros_like(labels, dtype=np.float32)
         gd[idx] = cur_gd
         return gd, center_p, std_p
     else:
@@ -390,14 +396,17 @@ def get_gd_image_single_obj(labels, center_perturb=0.2, stddev_perturb=0.4, blan
 
 def get_gd_image_multi_objs(labels,
                             obj_value=1,
-                            center_perturb=0.2,
-                            stddev_perturb=0.4,
+                            center_perturb=0.,
+                            stddev_perturb=0.,
                             blank_prob=0,
                             connectivity=1,
                             partial=False,
                             with_fake_guides=False,
                             fake_rate=1.0,
-                            max_fakes=4):
+                            max_fakes=4,
+                            fake_range_value=0,
+                            ret_bbox=False,
+                            **kwargs):
     """
     Get gaussian distribution image with some perturbation. Only connected points assigned 1
     are considered to be the same object.
@@ -428,6 +437,12 @@ def get_gd_image_multi_objs(labels,
         Number of fake objects / number of real objects
     max_fakes: int
         Max number of fake objects
+    fake_range_value: int
+        A integer where fake centers chosen from
+    ret_bbox: bool
+        Whether or not return bboxes of the objects
+    kwargs: dict
+        Parameters passed to bbox_from_mask()
 
     Returns
     -------
@@ -435,20 +450,21 @@ def get_gd_image_multi_objs(labels,
         Gaussian distribution image
 
     """
-    labels = np.asarray(labels, dtype=np.uint8)
+    global WARNING_ONCE
+
+    labels = np.asarray(labels, dtype=np.uint32)
     ndim = labels.ndim
 
     if not np.any(labels):
         # return a blank gd image
         return np.zeros(labels.shape)
 
-    uniques = np.unique(labels)
     obj_labels = merge_labels(labels, [0, obj_value])
     # Label image and find all objects
     disc = ndi.generate_binary_structure(ndim, connectivity=connectivity)
     labeled_image, num_obj = ndi.label(obj_labels, structure=disc)
     obj_images = [labeled_image == n + 1 for n in range(num_obj)]
-
+    
     # Compute moments for each object
     gds, stds = [], []
     for obj_image in obj_images:
@@ -460,20 +476,29 @@ def get_gd_image_multi_objs(labels,
     if with_fake_guides:
         number_of_fakes = int(fake_rate * num_obj)
         if number_of_fakes > 0:
-            search_region = list(zip(*np.where(labels == (1 if len(uniques) == 3 else 0))))
+            search_region = list(zip(*np.where(labels == fake_range_value)))
             max_val = len(search_region)
-
-            min_std, max_std = np.min(stds) / 2, np.max(stds)
-            for _ in range(min(number_of_fakes, max_fakes)):
-                center = search_region[np.random.randint(0, max_val)]
-                stddev = (random.random() * (max_std - min_std) + min_std,
-                          random.random() * (max_std - min_std) + min_std)
-                fks.append(create_gaussian_distribution(labels.shape, center[::-1], stddev))
+            if max_val > 0:
+                min_std, max_std = np.min(stds) / 2, np.max(stds)
+                for _ in range(min(number_of_fakes, max_fakes)):
+                    center = search_region[np.random.randint(0, max_val)]
+                    stddev = (random.random() * (max_std - min_std) + min_std,
+                              random.random() * (max_std - min_std) + min_std)
+                    fks.append(create_gaussian_distribution(labels.shape, center[::-1], stddev))
+            elif not WARNING_ONCE:
+                print("Warning: No fake range, labels bincount: {}".format(np.bincount(labels.flat)))
+                WARNING_ONCE = True
 
     if not gds and not fks:
         return np.zeros(labels.shape)
     # reduce is faster than np.sum when input is a python list
     merged_gd = functools.reduce(lambda x, y: np.maximum(x, y), gds + fks)
+
+    if ret_bbox:
+        bboxes = []
+        for obj_image in obj_images:
+            bboxes.append(bbox_from_mask(obj_image, 1, **kwargs))
+        return merged_gd, bboxes
 
     return merged_gd
 

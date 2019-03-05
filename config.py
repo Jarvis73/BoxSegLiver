@@ -18,6 +18,10 @@ from pathlib import Path
 from tensorflow.python.estimator.model_fn import ModeKeys
 
 
+class CustomKeys(object):
+    LEARNING_RATE = "learning_rate"
+
+
 def add_arguments(parser):
     group = parser.add_argument_group(title="Global Arguments")
     group.add_argument("--mode",

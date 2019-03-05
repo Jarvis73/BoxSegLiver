@@ -105,7 +105,7 @@ def get_total_loss(add_regularization_losses=True, graph=None, name="total_loss"
     return tf.add_n(losses, name=name)
 
 
-def _compute_weights(w_type, one_hot_labels, name=None, form="element_wise", **kwargs):
+def _compute_weights(w_type, one_hot_labels, name=None, **kwargs):
     w_type = w_type.lower()
     # num_cls = one_hot_labels.shape[-1]
     bs = one_hot_labels.shape[0]
@@ -113,25 +113,24 @@ def _compute_weights(w_type, one_hot_labels, name=None, form="element_wise", **k
 
     with tf.name_scope(name, "_compute_weights"):
         if w_type == "none":
-            return 1.0
+            return tf.constant(1.0, dtype=tf.float32)
         elif w_type == "numerical":
             if "numeric_w" not in kwargs:
                 raise KeyError("w_type `numerical` need keyword argument `numeric_w`")
             numeric_w = kwargs["numeric_w"]
             w = tf.constant([numeric_w for _ in range(bs)], dtype=tf.float32)
+            w = tf.reduce_sum(w[:, None, None, :] * one_hot_labels, axis=-1)  # [bs, h, w]
         elif w_type == "proportion":
             num_labels = tf.reduce_sum(one_hot_labels, axis=range(1, ndim - 1))
             if "proportion_decay" in kwargs:
                 num_labels += kwargs["proportion_decay"]
             proportions = 1.0 / num_labels
             w = proportions / tf.reduce_sum(proportions)
+            w = tf.reduce_sum(w[:, None, None, :] * one_hot_labels, axis=-1)  # [bs, h, w]
+        elif w_type == "examples":
+            w = kwargs["examples_w"][:, None, None]
         else:
             raise ValueError("Not supported weight type: " + w_type)
-
-        if form == "element_wise":
-            w = tf.reduce_sum(w[:, None, None, :] * one_hot_labels, axis=-1)  # [bs, h, w]
-        else:
-            raise ValueError("Not supported weight form: {}".format(form))
 
         return w
 
@@ -144,8 +143,11 @@ def weighted_sparse_softmax_cross_entropy(logits, labels, w_type, name=None, **k
     with tf.name_scope("LabelProcess"):
         num_classes = logits.shape[-1]
         one_hot_labels = tf.one_hot(labels, num_classes)
-    with tf.name_scope(name, "WsceLoss"):
+    with tf.name_scope(name, "WsceLoss"):   # weighted softmax cross entropy --> Wsce
         weights = _compute_weights(w_type, one_hot_labels, **kwargs)
+        if "livers" in kwargs:
+            loss_mask = kwargs.pop("livers")
+            weights = tf.to_float(loss_mask) * weights
         return tf.losses.sparse_softmax_cross_entropy(labels, logits, weights)
 
 

@@ -51,6 +51,7 @@ class ImageReader(object):
         self._decode = None
         self._meta = None
         self._filename = None
+        self._indices = []
 
     @property
     def shape(self):
@@ -68,6 +69,20 @@ class ImageReader(object):
     def format(self, new_format):
         self._check_format(new_format)
 
+    @property
+    def indices(self):
+        return self._indices
+
+    @indices.setter
+    def indices(self, inds):
+        max_ind = self._decode.shape[0] - 1
+        self._indices.clear()
+        for ind in inds:
+            if 0 <= ind <= max_ind:
+                self._indices.append(ind)
+            else:
+                raise ValueError("Out of range: {} -> [0, {}]".format(ind, max_ind))
+
     def _check_format(self, new_format):
         if new_format == self._format:
             return
@@ -80,12 +95,15 @@ class ImageReader(object):
         if self._decode is None:
             return bytes()
         else:
-            return self.image(idx).tobytes()
+            image = self.image(idx)
+            if image is None:
+                raise ValueError("No data: file_name ({})".format(self._filename))
+            return image.tobytes()
 
     def image(self, idx=None):
         if idx is None:
             return self._decode
-        if isinstance(idx, int):
+        if isinstance(idx, (int, np.int32, np.int64)):
             return self._decode[idx]
         elif isinstance(idx, (list, tuple)):
             slices = []
@@ -103,6 +121,7 @@ class ImageReader(object):
         self._decode = self._decode.astype(self._type, copy=False)
         if self._extend_channel:
             self._decode = self._decode[..., None]
+        self._indices = list(range(self._decode.shape[0]))
         return self.image(idx)
 
     def header(self, file_name):
@@ -180,6 +199,7 @@ class SubVolumeReader(ImageReader):
 
         self._decode = self._decode[array_kits.bbox_to_slices(self._bbox) +
                                     ((slice(None, None),) if self._extend_channel else ())]
+        self._indices = list(range(self._decode.shape[0]))
 
     def read(self, file_name, idx=None):
         self._filename = file_name
@@ -189,6 +209,7 @@ class SubVolumeReader(ImageReader):
 
         if self._extend_channel:
             self._decode = self._decode[..., None]
+        self._indices = list(range(self._decode.shape[0]))
         return self.image(idx)
 
 
@@ -301,7 +322,7 @@ def image_to_examples(image_reader,
         for extra_list in extra_int_split.values():
             assert num_slices == len(extra_list), "Length not equal: {} vs {}".format(num_slices, len(extra_list))
 
-        for idx in range(image_reader.shape[0]):
+        for idx in image_reader.indices:
             if triplet:
                 indices = (idx - 1, idx, idx + 1)
                 shape = image_reader.shape[1:-1] + (3,)

@@ -36,6 +36,7 @@ import data_kits.build_data as data_ops
 from custom_evaluator_base import EvaluateBase
 from utils.summary_kits import summary_scalar
 from utils.array_kits import get_gd_image_multi_objs
+from config import CustomKeys
 
 
 class IteratorStringHandleHook(session_run_hook.SessionRunHook):
@@ -151,6 +152,11 @@ class BestCheckpointSaverHook(session_run_hook.SessionRunHook):
                 self._timer.update_last_triggered_step(global_step)
                 if self._evaluate(run_context.session, global_step):
                     run_context.request_stop()
+
+    def end(self, session):
+        last_step = session.run(self._global_step_tensor)
+        if last_step != self._timer.last_triggered_step():
+            self._evaluate(session, last_step)
 
     def _evaluate(self, session, step):
         results = self._evaluator.evaluate_with_session(session)
@@ -306,3 +312,50 @@ class FeedGuideHook(session_run_hook.SessionRunHook):
         img_array = np.pad(img_array, pad_with, mode="constant", constant_values=0)
 
         self.img_reader.save(save_path, img_array, fmt=cur_case.suffix[1:])
+
+
+class LogLearningRateHook(session_run_hook.SessionRunHook):
+    def __init__(self,
+                 tag,
+                 every_n_steps=100,
+                 every_n_secs=None,
+                 output_dir=None,
+                 summary_writer=None):
+        self._timer = basic_session_run_hooks.SecondOrStepTimer(every_steps=every_n_steps,
+                                                                every_secs=every_n_secs)
+        self._summary_writer = summary_writer
+        self._output_dir = output_dir
+        self._summary_tag = "{}/learning rate".format(tag)
+        self._steps_per_run = 1
+
+    def _set_steps_per_run(self, steps_per_run):
+        self._steps_per_run = steps_per_run
+
+    def begin(self):
+        if self._summary_writer is None and self._output_dir:
+            self._summary_writer = SummaryWriterCache.get(self._output_dir)
+        self._global_step_tensor = training_util._get_or_create_global_step_read()
+        if self._global_step_tensor is None:
+            raise RuntimeError(
+                "Global step should be created to use StepCounterHook.")
+
+    def after_create_session(self, session, coord):
+        self._lr_tensor = ops.get_collection(CustomKeys.LEARNING_RATE)[0]
+
+    def before_run(self, run_context):
+        return session_run_hook.SessionRunArgs([self._lr_tensor, self._global_step_tensor])
+
+    def after_run(self, run_context, run_values):
+        lr, stale_global_step = run_values.results
+        if self._timer.should_trigger_for_step(
+                stale_global_step + self._steps_per_run):
+            # get the real value after train op.
+            global_step = run_context.session.run(self._global_step_tensor)
+            if self._timer.should_trigger_for_step(global_step):
+                self._timer.update_last_triggered_step(global_step)
+                self._log_and_record(lr, global_step)
+
+    def _log_and_record(self, lr, step):
+        if self._summary_writer is not None:
+            summary_scalar(self._summary_writer, step, [self._summary_tag], [lr])
+        logging.info(self._summary_tag + ": {:.6f}".format(lr))

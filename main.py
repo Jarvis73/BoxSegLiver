@@ -28,6 +28,7 @@ import custom_evaluator
 from utils.logger import create_logger
 from custom_estimator import CustomEstimator
 from custom_evaluator import EvaluateVolume
+from custom_hooks import LogLearningRateHook
 
 ModeKeys = tf.estimator.ModeKeys
 TF_RANDOM_SEED = 13579
@@ -72,13 +73,14 @@ def main(argv):
     logging.info(args)
 
     if args.mode == ModeKeys.TRAIN:
+        log_step_count_steps = 500
         run_config = tf.estimator.RunConfig(
             tf_random_seed=TF_RANDOM_SEED,
             save_summary_steps=200,
             save_checkpoints_steps=5000,
             session_config=_get_session_config(),
             keep_checkpoint_max=1,
-            log_step_count_steps=500,
+            log_step_count_steps=log_step_count_steps,
         )
 
         params = {"args": args}
@@ -94,6 +96,9 @@ def main(argv):
         steps, max_steps = ((args.num_of_steps, None)
                             if args.num_of_steps > 0 else (None, args.num_of_total_steps))
         estimator.train(input_pipeline.input_fn,
+                        hooks=[LogLearningRateHook(tag=args.tag,
+                                                   every_n_steps=log_step_count_steps,
+                                                   output_dir=args.model_dir)],
                         steps=steps,
                         max_steps=max_steps,
                         save_best_ckpt=args.save_best)

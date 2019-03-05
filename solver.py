@@ -16,6 +16,8 @@
 
 import tensorflow as tf
 
+from config import CustomKeys
+
 
 def add_arguments(parser):
     group = parser.add_argument_group(title="Training Arguments")
@@ -47,7 +49,7 @@ def add_arguments(parser):
                        required=False, help="For \"step\" policy. Learning rate decay rate (default: %(default)f)")
     group.add_argument("--lr_power",
                        type=float,
-                       default=0.5,
+                       default=0.9,
                        required=False, help="For \"poly\" policy. Polynomial power (default: %(default)f)")
     group.add_argument("--lr_end",
                        type=float,
@@ -148,17 +150,18 @@ class Solver(object):
             raise ValueError('Not supported learning policy.')
 
         # Employ small learning rate at the first few steps for warm start.
-        if slow_start_step <= 0:
-            return learning_rate
-        return tf.where(self.global_step < slow_start_step, slow_start_learning_rate,
-                        learning_rate)
+        if slow_start_step > 0:
+            learning_rate = tf.where(self.global_step < slow_start_step, slow_start_learning_rate,
+                                     learning_rate)
+        tf.add_to_collection(CustomKeys.LEARNING_RATE, learning_rate)
+        return learning_rate
 
     def _get_model_optimizer(self, learning_rate):
         if self.optimizer == "adam":
             optimizer_params = {"beta1": 0.9, "beta2": 0.99}
             optimizer = tf.train.AdamOptimizer(learning_rate, **optimizer_params)
         elif self.optimizer == "momentum":
-            optimizer_params = {"momentum": 0.99}
+            optimizer_params = {"momentum": 0.9}
             optimizer = tf.train.MomentumOptimizer(learning_rate, **optimizer_params)
         else:
             raise ValueError("Not supported optimizer: " + self.optimizer)

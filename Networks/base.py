@@ -37,6 +37,9 @@ class BaseNet(object):
         self._is_training = self.mode == ModeKeys.TRAIN
         self._feed_dict = {}
 
+        self.ret_prob = False
+        self.ret_pred = False
+
         # Summary collections
         self.DEFAULT = tf.GraphKeys.SUMMARIES
 
@@ -151,6 +154,8 @@ class BaseNet(object):
         elif self.args.loss_weight_type == "proportion":
             if self.args.loss_proportion_decay > 0:
                 return {"proportion_decay": self.args.loss_proportion_decay}
+        if self.args.only_tumor:
+            return {"livers": self._inputs["livers"]}
         return {}
 
     def __call__(self, inputs, mode, *args, **kwargs):
@@ -162,16 +167,8 @@ class BaseNet(object):
         #     self._is_training = tf.placeholder(tf.bool, shape=(), name="IsTraining")
         #     self._feed_dict[self._is_training] = True
 
-        default_w_regu, default_b_regu = self._get_regularizer()
-        default_w_init, default_b_init = self._get_initializer()
-
-        with slim.arg_scope([slim.conv2d, slim.conv2d_transpose],
-                            weights_regularizer=default_w_regu,
-                            weights_initializer=default_w_init,
-                            biases_regularizer=default_b_regu,
-                            biases_initializer=default_b_init):
-            with slim.arg_scope(self._net_arg_scope()):
-                self._build_network(*args, **kwargs)
+        with slim.arg_scope(self._net_arg_scope()):
+            self._build_network(*args, **kwargs)
 
         if self.mode == ModeKeys.TRAIN:
             loss = self._build_loss()

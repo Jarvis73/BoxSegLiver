@@ -19,6 +19,7 @@ import tensorflow.contrib.slim as slim
 
 import loss_metrics as losses
 from Networks import base
+from config import CustomKeys
 
 ModeKeys = tf.estimator.ModeKeys
 metrics = losses
@@ -43,11 +44,18 @@ class UNet(base.BaseNet):
         self.channel = args.im_channel
 
     def _net_arg_scope(self, *args, **kwargs):
+        default_w_regu, default_b_regu = self._get_regularizer()
+        default_w_init, _ = self._get_initializer()
         normalizer, params = self._get_normalization()
-        with slim.arg_scope([slim.conv2d],
-                            normalizer_fn=normalizer,
-                            normalizer_params=params) as scope:
-            return scope
+
+        with slim.arg_scope([slim.conv2d, slim.conv2d_transpose],
+                            weights_regularizer=default_w_regu,
+                            weights_initializer=default_w_init,
+                            biases_regularizer=default_b_regu):
+            with slim.arg_scope([slim.conv2d],
+                                normalizer_fn=normalizer,
+                                normalizer_params=params) as scope:
+                return scope
 
     def _build_network(self, *args, **kwargs):
         out_channels = kwargs.get("init_channels", 64)
@@ -99,15 +107,15 @@ class UNet(base.BaseNet):
                 self._layers["logits"] = logits
 
             # Probability & Prediction
-            ret_prob = kwargs.get("ret_prob", False)
-            ret_pred = kwargs.get("ret_pred", False)
-            if ret_prob or ret_pred:
+            self.ret_prob = kwargs.get("ret_prob", False)
+            self.ret_pred = kwargs.get("ret_pred", False)
+            if self.ret_prob or self.ret_pred:
                 probability = slim.softmax(logits)
                 split = tf.split(probability, self.num_classes, axis=-1)
-                if ret_prob:
+                if self.ret_prob:
                     for i in range(1, self.num_classes):
                         self._layers[self.classes[i] + "Prob"] = split[i]
-                if ret_pred:
+                if self.ret_pred:
                     zeros = tf.zeros_like(split[0], dtype=tf.uint8)
                     ones = tf.ones_like(zeros, dtype=tf.uint8)
                     for i in range(1, self.num_classes):
@@ -128,6 +136,10 @@ class UNet(base.BaseNet):
             return total_loss
 
     def _build_metrics(self):
+        if not self.ret_pred:
+            tf.logging.warning("Model not return prediction, no metric will be created! "
+                               "If needed, set ret_pred=true in <model>.yml")
+            return
         if self.mode in [ModeKeys.TRAIN, ModeKeys.EVAL]:
             with tf.name_scope("LabelProcess/"):
                 graph = tf.get_default_graph()
@@ -156,7 +168,9 @@ class UNet(base.BaseNet):
         if self.mode == ModeKeys.TRAIN:
             # Make sure all the elements are positive
             images = []
-            if self.args.im_channel == 2:
+            if self.args.im_channel == 1:
+                images.append(self._inputs["images"])
+            elif self.args.im_channel == 2:
                 image1 = self._inputs["images"][..., 0:1]
                 images.append(image1 - tf.reduce_min(image1))
                 image2 = self._inputs["images"][..., 1:2]
@@ -177,6 +191,11 @@ class UNet(base.BaseNet):
             labels = tf.expand_dims(self._inputs["labels"], axis=-1)
             with tf.name_scope("LabelProcess/"):
                 labels_uint8 = tf.cast(labels * 255 / len(self.args.classes), tf.uint8)
+                if self.args.only_tumor:
+                    livers_uint8 = tf.cast(tf.expand_dims(self._inputs["livers"], axis=-1)
+                                           * 255 / len(self.args.classes), tf.uint8)
+                    tf.summary.image("{}/Liver".format(self.args.tag), livers_uint8,
+                                     max_outputs=1, collections=[self.DEFAULT])
             tf.summary.image("{}/{}".format(self.args.tag, labels.op.name), labels_uint8,
                              max_outputs=1, collections=[self.DEFAULT])
 
@@ -191,4 +210,5 @@ class UNet(base.BaseNet):
             for tensor in metrics.get_metrics():
                 tf.summary.scalar("{}/{}".format(self.args.tag, tensor.op.name), tensor,
                                   collections=[self.DEFAULT])
+
         return

@@ -274,8 +274,9 @@ def convert_to_liver_bbox_triplet(dataset,
                                   align=1,
                                   padding=0,
                                   min_bbox_shape=None,
-                                  prefix="bbox-triplet"):
-    file_names = get_lits_list(dataset, keep_only_liver)
+                                  prefix="bbox-triplet",
+                                  only_tumor=False):
+    file_names = get_lits_list(dataset, keep_only_liver if not only_tumor else False)
     num_images = len(file_names)
 
     k_folds = read_or_create_k_folds(Path(__file__).parent.parent / "data/LiTS/k_folds.txt",
@@ -284,6 +285,9 @@ def convert_to_liver_bbox_triplet(dataset,
 
     image_reader = SubVolumeReader(np.int16, extend_channel=True)
     label_reader = SubVolumeReader(np.uint8, extend_channel=False)  # use uint8 to save space
+
+    if only_tumor:
+        tumor_slices = []
 
     # Convert each split
     counter = 1
@@ -305,6 +309,15 @@ def convert_to_liver_bbox_triplet(dataset,
                 image_reader.read(image_file)
                 image_reader.bbox = bbox.tolist()
 
+                if only_tumor:
+                    # Extract tumor slices
+                    tumor_value = np.max(label_reader.image())
+                    indices = np.where(np.max(label_reader.image(), axis=(1, 2)) == tumor_value)[0]
+                    image_reader.indices = indices
+                    label_reader.indices = indices
+                    print("  #Tumor slices: {:d}".format(len(indices)), end="", flush=True)
+                    tumor_slices.extend(indices)
+
                 # we have extended extra dimension for image
                 if image_reader.shape[:-1] != label_reader.shape:
                     raise RuntimeError("Shape mismatched between image and label: {} vs {}".format(
@@ -314,3 +327,6 @@ def convert_to_liver_bbox_triplet(dataset,
                     writer_2d.write(example.SerializeToString())
                 counter += 1
             print()
+
+    if only_tumor:
+        print("Total #tumor slices: {}".format(len(tumor_slices)))

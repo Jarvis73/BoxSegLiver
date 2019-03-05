@@ -26,6 +26,7 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("qt5Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 
 import input_pipeline
 
@@ -44,12 +45,15 @@ def add_arguments(parser):
                        type=str,
                        choices=["train", "eval", "infer"],
                        required=True, help="Model mode for train/val/test")
+    group.add_argument("--use_fewer_guide",
+                       action="store_true",
+                       required=False, help="Use fewer guide for evaluation")
 
 
 class TestInputPipeline(unittest.TestCase):
     def setUp(self):
-        record1 = Path(__file__).parent / "data/LiTS/records/sample-bbox-2D-1-of-5.tfrecord"
-        record2 = Path(__file__).parent / "data/LiTS/records/sample-bbox-2D-2-of-5.tfrecord"
+        record1 = Path(__file__).parent / "data/LiTS/records/sample-tumor-bbox-triplet-2D-1-of-5.tfrecord"
+        record2 = Path(__file__).parent / "data/LiTS/records/sample-tumor-bbox-triplet-2D-2-of-5.tfrecord"
         record1_3d = Path(__file__).parent / "data/LiTS/records/sample-bbox-3D-3-of-5.tfrecord"
         record2_3d = Path(__file__).parent / "data/LiTS/records/sample-bbox-3D-2-of-5.tfrecord"
         self.records = [str(record1), str(record2)]
@@ -67,33 +71,71 @@ class TestInputPipeline(unittest.TestCase):
         ])
         self.sess = tf.Session()
 
+    def test_get_multi_records_dataset_for_eval(self):
+        sys.argv.extend([
+            "--mode", "eval",
+        ])
+        self.args = self.parser.parse_args()
+        print(self.args)
+
+        dataset = input_pipeline.get_multi_records_dataset_for_eval(self.records_3d, self.args)
+        inputs = dataset.make_one_shot_iterator().get_next("Inputs")
+
+        cnt = 0
+        while True:
+            features, labels = self.sess.run(inputs)
+            print(features["images"].shape)
+            print(features["bboxes"], flush=True)
+            # print(features["name"])
+            # print(features["id"])
+            print(labels.shape, features["pads"])
+            # print(features["images"].max(), features["images"].min())
+            # print(labels.max(), labels.min())
+            plt.subplot(121)
+            plt.imshow(features["images"][0, ..., 0], cmap="gray")
+            plt.subplot(122)
+            plt.imshow(labels[0], cmap="gray")
+            plt.show()
+            cnt += 1
+            if cnt > 20:
+                break
+
     def test_get_multi_records_dataset_for_train(self):
+        sys.argv.extend([
+            "--mode", "train",
+            "--only_tumor",
+            "--filter_size", "20"
+        ])
         self.args = self.parser.parse_args()
         print(self.args)
 
         dataset = input_pipeline.get_multi_records_dataset_for_train(self.records, self.args)
         inputs = dataset.make_one_shot_iterator().get_next("Inputs")
-        features, labels = self.sess.run(inputs)
-        print(features["images"].shape)
-        print(features["name"])
-        print(features["id"])
-        print(labels.shape)
-        print(features["images"].max(), features["images"].min())
-        print(labels.max(), labels.min())
-        plt.subplot(221)
-        plt.imshow(features["images"][0, ..., 0], cmap="gray")
-        plt.subplot(222)
-        plt.imshow(features["images"][1, ..., 0], cmap="gray")
-        plt.subplot(223)
-        plt.imshow(labels[0], cmap="gray")
-        plt.subplot(224)
-        plt.imshow(labels[1], cmap="gray")
-        plt.show()
+        while True:
+            features, labels = self.sess.run(inputs)
+            print(features["images"].shape)
+            print(features["livers"].shape)
+            # print(features["name"])
+            # print(features["id"])
+            print(labels.shape)
+            # print(features["images"].max(), features["images"].min())
+            # print(labels.max(), labels.min())
+            plt.subplot(231)
+            plt.imshow(features["images"][0, ..., 0], cmap="gray")
+            plt.subplot(232)
+            plt.imshow(features["images"][0, ..., 1], cmap="gray")
+            plt.subplot(233)
+            plt.imshow(features["images"][0, ..., 2], cmap="gray")
+            plt.subplot(234)
+            plt.imshow(features["livers"][0], cmap="gray")
+            plt.subplot(235)
+            plt.imshow(labels[0], cmap="gray")
+            plt.show()
 
     def test_spatial_guide(self):
         sys.argv.extend([
             "--use_spatial_guide",
-            "--mode", "train"
+            "--mode", "train",
         ])
         self.args = self.parser.parse_args()
         print(self.args)
@@ -115,38 +157,6 @@ class TestInputPipeline(unittest.TestCase):
             plt.subplot(222)
             plt.imshow(features["images"][0, ..., 1], cmap="gray")
             plt.subplot(223)
-            plt.imshow(labels[0], cmap="gray")
-            plt.show()
-
-    def test_get_multi_channels_dataset_for_train(self):
-        sys.argv.extend([
-            "--mode", "train",
-            "--noise", "--zoom", "--flip",
-            "--zoom_scale", "1.2",
-            "--use_spatial_guide",
-        ])
-        self.args = self.parser.parse_args()
-        print(self.args)
-
-        dataset = input_pipeline.get_multi_channels_dataset_for_train(self.records, self.args)
-        inputs = dataset.make_one_shot_iterator().get_next("Inputs")
-        while True:
-            features, labels = self.sess.run(inputs)
-            print(features["images"].shape)
-            # print(features["name"])
-            # print(features["id"])
-            print(labels.shape)
-            # print(features["images"].max(), features["images"].min())
-            # print(labels.max(), labels.min())
-            plt.subplot(231)
-            plt.imshow(features["images"][0, ..., 0], cmap="gray")
-            plt.subplot(232)
-            plt.imshow(features["images"][0, ..., 1], cmap="gray")
-            plt.subplot(233)
-            plt.imshow(features["images"][0, ..., 2], cmap="gray")
-            plt.subplot(234)
-            plt.imshow(features["images"][0, ..., 3], cmap="gray")
-            plt.subplot(235)
             plt.imshow(labels[0], cmap="gray")
             plt.show()
 

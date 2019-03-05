@@ -120,10 +120,16 @@ class EvaluateVolume(EvaluateBase):
             if key in self._metric_values:
                 self._metric_values[key].append(value)
 
+    def clear_metrics(self):
+        for key in self._metric_values:
+            self._metric_values[key].clear()
+
     def _evaluate(self, predicts, cases=None, verbose=False, save=False):
         # process a 3D image slice by slice or patch by patch
         logits3d = defaultdict(list)
         labels3d = defaultdict(list)
+        livers3d = list()
+        self.clear_metrics()
 
         pad = -1
         bbox = None
@@ -146,8 +152,11 @@ class EvaluateVolume(EvaluateBase):
                 for c, cls in enumerate(self.classes):
                     logits3d[cls].append(np.squeeze(pred[cls + "Pred"], axis=-1))
                     labels3d[cls].append(pred["Labels_{}".format(c)])
+                    if self.params["args"].only_tumor:
+                        livers3d.append(pred["Livers"])
             else:
-                result = self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox, save)
+                result = self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox, save,
+                                             livers3d=livers3d)
                 self._timer.toc()
                 if verbose:
                     log_str = "Evaluate-{} {}".format(self._timer.calls, Path(cur_case).stem)
@@ -157,6 +166,11 @@ class EvaluateVolume(EvaluateBase):
                 for cls in self.classes:
                     logits3d[cls].clear()
                     labels3d[cls].clear()
+                    livers3d.clear()
+                    logits3d[cls].append(np.squeeze(pred[cls + "Pred"], axis=-1))
+                    labels3d[cls].append(pred["Labels_{}".format(c)])
+                    if self.params["args"].only_tumor:
+                        livers3d.append(pred["Livers"])
 
                 if cases is not None and self._timer.calls >= cases:
                     break
@@ -170,7 +184,8 @@ class EvaluateVolume(EvaluateBase):
 
         if cases is None:
             # Final case
-            result = self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox, save)
+            result = self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox, save,
+                                         livers3d=livers3d)
             self._timer.toc()
             if verbose:
                 log_str = "Evaluate-{} {}".format(self._timer.calls, Path(cur_case).stem)
@@ -220,7 +235,8 @@ class EvaluateVolume(EvaluateBase):
             return self._evaluate(predicts, cases=cases, verbose=True,
                                   save=self.params["args"].save_predict)
 
-    def _evaluate_case(self, logits3d, labels3d, cur_case, pad, bbox=None, save=False):
+    def _evaluate_case(self, logits3d, labels3d, cur_case, pad, bbox=None, save=False,
+                       **kwargs):
         # Process a complete volume
         logits3d = {cls: np.concatenate(values)[:-pad] if pad != 0 else np.concatenate(values)
                     for cls, values in logits3d.items()}
@@ -233,7 +249,6 @@ class EvaluateVolume(EvaluateBase):
             cur_shape = logits3d[self.classes[0]].shape
             ori_shape[0] = cur_shape[0]
             scales = np.array(ori_shape) / np.array(cur_shape)
-
             for c, cls in enumerate(self.classes):
                 logits3d[cls] = ndi.zoom(logits3d[cls], scales, order=0)
 
@@ -245,6 +260,12 @@ class EvaluateVolume(EvaluateBase):
         # Find largest component --> for liver
         if self.largest and "Liver" in logits3d:
             logits3d["Liver"] = arr_ops.get_largest_component(logits3d["Liver"], rank=3)
+
+        if self.params["args"].only_tumor and "livers3d" in kwargs:
+            livers3d = (np.concatenate(kwargs["livers3d"])[:-pad]
+                        if pad != 0 else np.concatenate(kwargs["livers3d"]))
+            if "Tumor" in logits3d:
+                logits3d["Tumor"] *= livers3d.astype(logits3d["Tumor"].dtype)
 
         # Find volume voxel spacing from data source
         header = self.img_reader.header(cur_case)
@@ -267,7 +288,8 @@ class EvaluateVolume(EvaluateBase):
                 save_path.mkdir(exist_ok=True)
             save_path = save_path / case_name
 
-            img_array = logits3d["Liver"] + logits3d["Tumor"] if "Tumor" in logits3d else logits3d["Liver"]
+            img_array = (logits3d["Liver"] + logits3d["Tumor"]
+                         if "Tumor" in logits3d and "Tumor" in logits3d else logits3d["Liver"])
             pad_with = tuple(zip(bbox[2::-1], np.array(header.shape) - bbox[:2:-1] - 1))
             img_array = np.pad(img_array, pad_with, mode="constant", constant_values=0)
 

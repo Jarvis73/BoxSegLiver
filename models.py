@@ -19,12 +19,14 @@ import tensorflow as tf
 from pathlib import Path
 
 from Networks.UNet import UNet
+from Networks.DeepLabV3Plus import DeepLabV3Plus
 
 ModeKeys = tf.estimator.ModeKeys
 
 # Available models
 MODEL_ZOO = [
-    UNet
+    UNet,
+    DeepLabV3Plus
 ]
 
 
@@ -80,6 +82,8 @@ def model_fn(features, labels, mode, params):
     elif "labels" in features:
         labels = tf.identity(features["labels"], name="Labels")
     inputs = {"images": images, "labels": labels}
+    if params["args"].only_tumor:
+        inputs["livers"] = features["livers"]
 
     train_op = None
     predictions = None
@@ -130,6 +134,8 @@ def model_fn(features, labels, mode, params):
 
     if mode == ModeKeys.TRAIN:
         predictions["GlobalStep"] = tf.train.get_global_step(tf.get_default_graph())
+    if params["args"].only_tumor:
+        predictions["Livers"] = features["livers"]
 
     #############################################################################
     kwargs = {"loss": loss,
