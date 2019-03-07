@@ -19,6 +19,7 @@ import tensorflow as tf
 from pathlib import Path
 
 from Networks.UNet import UNet
+from Networks.AtrousUNet import AtrousUNet
 from Networks.DeepLabV3Plus import DeepLabV3Plus
 
 ModeKeys = tf.estimator.ModeKeys
@@ -26,6 +27,7 @@ ModeKeys = tf.estimator.ModeKeys
 # Available models
 MODEL_ZOO = [
     UNet,
+    AtrousUNet,
     DeepLabV3Plus
 ]
 

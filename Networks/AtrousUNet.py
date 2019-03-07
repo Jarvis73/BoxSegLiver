@@ -30,11 +30,11 @@ def _check_size_type(size):
     return size
 
 
-class UNet(base.BaseNet):
+class AtrousUNet(base.BaseNet):
     def __init__(self, args, name=None):
         """ Don't create ops/tensors in __init__() """
-        super(UNet, self).__init__(args)
-        self.name = name or "UNet"
+        super(AtrousUNet, self).__init__(args)
+        self.name = name or "AtrousUNet"
         self.classes.extend(self.args.classes)
 
         self.bs = args.batch_size
@@ -87,11 +87,14 @@ class UNet(base.BaseNet):
                 out_channels *= 2
 
             # Encode-Decode-Bridge
-            tensor_out = slim.repeat(tensor_out, 2, slim.conv2d, out_channels, 3, scope="ED-Bridge")
+            with tf.variable_scope("ED-Bridge"):
+                tensor_out = slim.repeat(tensor_out, 3, slim.conv2d, out_channels, 3)
+                out_channels *= 2
+                tensor_out = slim.repeat(tensor_out, 3, slim.conv2d, out_channels, 3, rate=2)
 
             # decoder
             for i in reversed(range(num_down_samples)):
-                out_channels /= 2
+                out_channels //= 2
                 with tf.variable_scope("Decode{:d}".format(i + 1)):
                     tensor_out = slim.conv2d_transpose(tensor_out,
                                                        tensor_out.get_shape()[-1] // 2, 2, 2)

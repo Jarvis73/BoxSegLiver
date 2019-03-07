@@ -5,7 +5,7 @@ add_image_level_feature: true
 fine_tune_batch_norm: true
 aspp_with_separable_conv: true
 aspp_with_batch_norm: true
-network: "xception_41"
+network: "xception_42"
 decoder_use_separable_conv: true
 upsample_logits: true
 ret_prob: false

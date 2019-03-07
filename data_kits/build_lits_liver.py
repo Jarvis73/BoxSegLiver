@@ -70,10 +70,13 @@ from data_kits.build_data import ImageReader
 from data_kits.build_data import SubVolumeReader
 from data_kits.build_data import image_to_examples
 from data_kits.preprocess import random_split_k_fold
-from utils.array_kits import find_empty_slices
-from utils.array_kits import extract_region
+from utils import array_kits
+from utils import misc
+from utils import nii_kits
 
 LiTS_Dir = Path(__file__).parent.parent / "data" / "LiTS"
+
+IGNORE_TAG = ["liver", "outlier"]
 
 
 def get_lits_list(dataset, keep_only_liver=True):
@@ -95,7 +98,8 @@ def get_lits_list(dataset, keep_only_liver=True):
     dataset = LiTS_Dir / "{}.txt".format(dataset)
     for line in dataset.open():
         parts = line.strip("\n").split(" ")
-        if not keep_only_liver and len(parts) > 1 and parts[1] == "liver":
+        if not keep_only_liver and len(parts) > 1 and parts[1] in IGNORE_TAG:
+            print("Ignore", parts[0], parts[1])
             continue
         image_files.append(parts[0])
 
@@ -193,7 +197,7 @@ def convert_to_liver(dataset, keep_only_liver, k_split=5, seed=None):
                         raise RuntimeError("Shape mismatched between image and label: {} vs {}".format(
                             image_reader.shape, label_reader.shape))
                     # Find empty slices(we skip them in training)
-                    extra_info = {"empty_split": find_empty_slices(label_reader.image())}
+                    extra_info = {"empty_split": array_kits.find_empty_slices(label_reader.image())}
                     # Convert 2D slices to example
                     for example in image_to_examples(image_reader, label_reader, split=True,
                                                      extra_int_info=extra_info):
@@ -245,7 +249,7 @@ def convert_to_liver_bounding_box(dataset,
                     seg_file = image_file.parent / image_file.name.replace("volume", "segmentation")
 
                     label_reader.read(seg_file)
-                    bbox = extract_region(label_reader.image(), align, padding, min_bbox_shape)
+                    bbox = array_kits.extract_region(label_reader.image(), align, padding, min_bbox_shape)
                     label_reader.bbox = bbox.tolist()
                     image_reader.read(image_file)
                     image_reader.bbox = bbox.tolist()
@@ -286,9 +290,7 @@ def convert_to_liver_bbox_triplet(dataset,
     image_reader = SubVolumeReader(np.int16, extend_channel=True)
     label_reader = SubVolumeReader(np.uint8, extend_channel=False)  # use uint8 to save space
 
-    if only_tumor:
-        tumor_slices = []
-
+    tumor_slices = []
     # Convert each split
     counter = 1
     for i, fold in enumerate(k_folds):
@@ -304,7 +306,7 @@ def convert_to_liver_bbox_triplet(dataset,
                 seg_file = image_file.parent / image_file.name.replace("volume", "segmentation")
 
                 label_reader.read(seg_file)
-                bbox = extract_region(label_reader.image(), align, padding, min_bbox_shape)
+                bbox = array_kits.extract_region(label_reader.image(), align, padding, min_bbox_shape)
                 label_reader.bbox = bbox.tolist()
                 image_reader.read(image_file)
                 image_reader.bbox = bbox.tolist()
@@ -330,3 +332,31 @@ def convert_to_liver_bbox_triplet(dataset,
 
     if only_tumor:
         print("Total #tumor slices: {}".format(len(tumor_slices)))
+
+
+def dump_fp_bbox_from_prediction(label_dirs, pred_dir):
+    pred_dir = Path(pred_dir)
+    save_path = pred_dir.parent / "fp_bbox.pkl"
+    # with save_path.open("rb") as f:
+    cnt = 0
+    for pred_path in pred_dir.glob("prediction-*.nii.gz"):
+        print(pred_path.name)
+        lab_file = pred_path.stem.replace("prediction", "segmentation")
+        lab_path = misc.find_file(label_dirs, lab_file)
+        result = array_kits.merge_labels(nii_kits.nii_reader(pred_path)[1], [0, 2])
+        reference = array_kits.merge_labels(nii_kits.nii_reader(lab_path)[1], [0, 2])
+        fps = array_kits.find_false_positives(result, reference)
+        for x in fps:
+            print(x, [x[3] - x[0], x[4] - x[1], x[5] - x[2]])
+        print()
+        if cnt >= 10:
+            break
+        cnt += 1
+
+
+if __name__ == "__main__":
+    dump_fp_bbox_from_prediction(
+        label_dirs=[r"D:\DataSet\LiTS\Training_Batch_1",
+                    r"D:\DataSet\LiTS\Training_Batch_2"],
+        pred_dir=Path(__file__).parent.parent / "model_dir/004_triplet/prediction"
+    )

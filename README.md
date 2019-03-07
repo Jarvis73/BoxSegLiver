@@ -68,12 +68,12 @@ python main.py --help
 - [x] Metrics
 - [x] Loss functions
 - [x] Evaluate
-- [x] Predict
-- [ ] Visualization
+- [ ] Predict
+- [x] Visualization
 
-- [ ] UNet
-- [ ] ResUnet
-- [ ] Atrous Conv Nets
+- [x] UNet
+- [x] AtrousUNet
+- [ ] DiscrimUNet
 
 - [ ] Pre-trained backbone
 - [x] Spatial guide network
@@ -82,5 +82,5 @@ python main.py --help
 
 ## Notice
 
-* Modify Xception: First conv stride = 1
+* Modify Xception: First conv stride = 1, First conv out_channel = 64, Xception_41 number of channels
 

@@ -14,28 +14,17 @@
 #
 # =================================================================================
 
-from pathlib import Path
+import pickle
 import numpy as np
+from pathlib import Path
+import scipy.ndimage as ndi
+import skimage.measure as measure
+
 from utils import nii_kits
 from utils import array_kits
-import skimage.measure as measure
+from utils.misc import find_file
 from visualization.View_Kits import ComparePrediction
 from visualization.Tool_Kits import get_pred_score
-import pickle
-import scipy.ndimage as ndi
-
-
-def find_file(data_dirs, case_path):
-    found = False
-    file_path = None
-    for dir_ in data_dirs:
-        file_path = dir_ / case_path
-        if file_path.exists():
-            found = True
-            break
-    if not found:
-        raise FileNotFoundError(case_path)
-    return file_path
 
 
 class SegViewerAdapter(object):

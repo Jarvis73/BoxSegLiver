@@ -37,3 +37,5 @@ def compute_liver_tumor_hist(image, mask, liver_lab=1, tumor_lab=2, title="", sh
         save_path.parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(str(save_path))
     plt.close()
+
+

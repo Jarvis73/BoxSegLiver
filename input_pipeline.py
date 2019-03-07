@@ -103,6 +103,9 @@ def add_arguments(parser):
     group.add_argument("--use_spatial_guide",
                        action="store_true",
                        required=False, help="Use spatial guide")
+    group.add_argument("--random_spatial_guide",
+                       action="store_true",
+                       required=False, help="Randomly show spatial guide or not")
     group.add_argument("--use_fake_guide",
                        action="store_true",
                        required=False, help="Use fake spatial guide for better generalization")
@@ -381,7 +384,7 @@ def data_augmentation(features, labels, args, mode, only_first_slice=False):
 
     with tf.name_scope(PREPROCESS):
         if mode == ModeKeys.TRAIN:
-            with tf.name_scope("Augmentation"):
+            with tf.name_scope("Augmentation/"):
                 if args.flip:
                     features["images"], labels = image_ops.random_flip_left_right(
                         features["images"], labels)
@@ -398,19 +401,30 @@ def data_augmentation(features, labels, args, mode, only_first_slice=False):
 
         if args.use_spatial_guide and not args.use_fewer_guide:
             guide = tf.py_func(_wrap_get_gd_image_multi_objs, [labels], tf.float32)
+            if args.use_fake_guide:
+                logging.info("Add fake spatial guide")
+            if mode == ModeKeys.TRAIN and args.random_spatial_guide:
+                with tf.name_scope("Augmentation/"):
+                    mask = image_ops.random_zero_or_one(tf.shape(guide), guide.dtype)
+                    guide = guide * mask
+                    logging.info("Add random spatial guide")
             features["images"] = tf.concat((features["images"], guide), axis=-1)
 
         if args.resize_for_batch:
             image = tf.image.resize_bilinear(tf.expand_dims(features["images"], axis=0),
                                              [args.im_height, args.im_width])
             features["images"] = tf.squeeze(image, axis=0)
+            if args.only_tumor:  # Keep liver for loss mask
+                features["livers"] = tf.clip_by_value(labels, 0, 1)
+                features["livers"] = tf.image.resize_nearest_neighbor(tf.expand_dims(
+                    tf.expand_dims(features["livers"], axis=0), axis=-1),
+                    [args.im_height, args.im_width])
+                features["livers"] = tf.squeeze(features["livers"], axis=(0, -1))
+                labels = tf.clip_by_value(labels - 1, 0, 1)
             if mode == ModeKeys.TRAIN:
                 labels = tf.image.resize_nearest_neighbor(tf.expand_dims(tf.expand_dims(labels, axis=0), axis=-1),
                                                           [args.im_height, args.im_width])
                 labels = tf.squeeze(labels, axis=(0, -1))
-            if args.only_tumor:  # Keep liver for loss mask
-                features["livers"] = tf.clip_by_value(labels, 0, 1)
-                labels = tf.clip_by_value(labels - 1, 0, 1)
 
     return features, labels
 
@@ -495,7 +509,7 @@ def _before_flat_fn(features, labels, args):
     if args.mode == ModeKeys.EVAL:
         if args.use_spatial_guide and args.use_fewer_guide:
             guide = tf.py_func(_wrap_get_gd_image_multi_objs, [labels], tf.float32)
-            features["images"] = tf.concat((features["images"], guide), axis=-1)
+            features["guides"] = guide
 
     return features, labels
 
@@ -509,6 +523,8 @@ def get_multi_records_dataset_for_eval(file_names, args):
     dataset = tf.data.TFRecordDataset(file_names[0])
     for file_name in file_names[1:]:
         dataset = dataset.concatenate(tf.data.TFRecordDataset(file_name))
+    if args.eval_skip_num:
+        dataset = dataset.skip(args.eval_skip_num)
 
     dataset = (dataset.map(parse_fn, num_parallel_calls=args.batch_size)
                .map(before_flat_fn, num_parallel_calls=args.batch_size)
@@ -584,7 +600,11 @@ def _flat_map_fn_multi_channels(x, y, args):
         shape = tf.concat(([1], tf.shape(x["images"])[1:]), axis=0)
         zero_float = tf.zeros(shape, dtype=x["images"].dtype)
         new_images = tf.concat((zero_float, x["images"], zero_float), axis=0)
-        image_multi_channels = tf.concat((new_images[:-2], x["images"], new_images[2:]), axis=-1)
+        if "guides" in x:
+            concat_list = (new_images[:-2], x["images"], new_images[2:], x["guides"])
+        else:
+            concat_list = (new_images[:-2], x["images"], new_images[2:])
+        image_multi_channels = tf.concat(concat_list, axis=-1)
 
     images = Dataset.from_tensor_slices(image_multi_channels)
     labels = Dataset.from_tensor_slices(y)
@@ -618,9 +638,12 @@ def get_multi_channels_dataset_for_eval(file_names, args):
     for file_name in file_names[1:]:
         dataset = dataset.concatenate(tf.data.TFRecordDataset(file_name))
 
-    dataset = (dataset.map(parse_fn, num_parallel_calls=args.batch_size)
-               .map(before_flat_fn, num_parallel_calls=args.batch_size)
-               .flat_map(flat_fn)
+    dataset = dataset.map(parse_fn, num_parallel_calls=args.batch_size)
+
+    if args.use_fewer_guide:
+        dataset = dataset.map(before_flat_fn, num_parallel_calls=args.batch_size)
+
+    dataset = (dataset.flat_map(flat_fn)
                .map(augment_fn, num_parallel_calls=args.batch_size)
                .batch(args.batch_size)
                .prefetch(buffer_size=args.batch_size))

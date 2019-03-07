@@ -59,6 +59,10 @@ def add_arguments(parser):
     group.add_argument("--eval_num",
                        type=int,
                        required=False, help="Number of cases for evaluation")
+    group.add_argument("--eval_skip_num",
+                       type=int,
+                       default=0,
+                       required=False, help="Skip some cases for evaluating determined case")
 
 
 def get_eval_params(eval_steps=2500,
@@ -242,6 +246,9 @@ class EvaluateVolume(EvaluateBase):
                     for cls, values in logits3d.items()}
         labels3d = {cls: np.concatenate(values)[:-pad] if pad != 0 else np.concatenate(values)
                     for cls, values in labels3d.items()}
+        if self.params["args"].only_tumor and "livers3d" in kwargs:
+            livers3d = (np.concatenate(kwargs["livers3d"])[:-pad]
+                        if pad != 0 else np.concatenate(kwargs["livers3d"]))
 
         if bbox is not None:
             # Resize logits3d to the shape of labels3d
@@ -251,6 +258,8 @@ class EvaluateVolume(EvaluateBase):
             scales = np.array(ori_shape) / np.array(cur_shape)
             for c, cls in enumerate(self.classes):
                 logits3d[cls] = ndi.zoom(logits3d[cls], scales, order=0)
+            if self.params["args"].only_tumor and "livers3d" in kwargs:
+                livers3d = ndi.zoom(livers3d, scales, order=0)
 
         # Add tumor to liver volume
         if self.merge_tumor_to_liver and "Tumor" in logits3d and "Liver" in logits3d:
@@ -261,10 +270,7 @@ class EvaluateVolume(EvaluateBase):
         if self.largest and "Liver" in logits3d:
             logits3d["Liver"] = arr_ops.get_largest_component(logits3d["Liver"], rank=3)
 
-        if self.params["args"].only_tumor and "livers3d" in kwargs:
-            livers3d = (np.concatenate(kwargs["livers3d"])[:-pad]
-                        if pad != 0 else np.concatenate(kwargs["livers3d"]))
-            if "Tumor" in logits3d:
+        if self.params["args"].only_tumor and "livers3d" in kwargs and "Tumor" in logits3d:
                 logits3d["Tumor"] *= livers3d.astype(logits3d["Tumor"].dtype)
 
         # Find volume voxel spacing from data source

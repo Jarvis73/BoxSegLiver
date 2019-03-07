@@ -16,6 +16,7 @@
 
 import numpy as np
 import tensorflow as tf
+from utils import array_kits
 from medpy import metric as mtr     # pip install medpy
 
 METRICS = "metrics"
@@ -342,3 +343,55 @@ def metric_3d(logits3d, labels3d, required=None, **kwargs):
             metrics_3d["RVD"] = mtr.ravd(logits3d, labels3d)
 
     return metrics_3d
+
+
+def tumor_detection_metrics(result, reference, iou_thresh=0.5, connectivity=1,
+                            verbose=False, logger=None, name=""):
+    """ Compute true positive, false positive, true negative
+
+    Parameters
+    ----------
+    result: ndarray
+        3D, range in {0, 1}
+    reference:  ndarray
+        3D, range in {0, 1}
+    iou_thresh: float
+        threshold for determining if two objects are correlated
+    connectivity: int
+        passes to `generate_binary_structure`
+    verbose: show output or not
+    logger: Logger
+    name: str
+        name of case
+    """
+    _, _, n_res, n_ref, mapping = array_kits.distinct_binary_object_correspondences(
+        result, reference, iou_thresh, connectivity
+    )
+
+    tp = len(mapping)
+    fp = n_res - tp
+    if n_res != 0:
+        precision = tp / n_res
+    else:
+        precision = np.inf
+    if n_ref != 0:
+        recall = tp / n_ref
+    else:
+        recall = np.inf
+
+    ret = {"tp": tp,
+           "fp": fp,
+           "pos": n_ref,
+           "precision": precision,
+           "recall": recall}
+
+    if verbose:
+        info = ("{:s} TPs: {:3d} FPs: {:3d} Pos: {:3d} Precision: {:.3f} Recall: {:.3f}"
+                .format(name, tp, fp, n_ref, tp / (tp + fp), recall))
+        if logger is not None:
+            logger.info(info)
+        else:
+            print(info)
+
+    return ret
+

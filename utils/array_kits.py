@@ -18,8 +18,38 @@ import random
 import functools
 import numpy as np
 import scipy.ndimage as ndi
+from medpy import metric as mtr
 
 WARNING_ONCE = False
+
+
+def moments(image, mask=None, rev_mask=False, ret_var=False):
+    """
+    :param image: compute moments of an n-dim image
+    :param mask: only analyze pixels located in the mask, default analyze the whole image
+    :param rev_mask: exchange 0 and 1 in mask array
+    :param ret_var: return variance or not
+    :return: moments of the image
+    """
+    import numpy.ma as ma
+
+    if mask is not None:
+        if mask.dtype != np.bool:
+            mask = mask.astype(np.bool)
+        if rev_mask:
+            mask = ~mask
+        module = ma
+        image = ma.array(image, mask=mask)
+    else:
+        module = np
+
+    mean = module.mean(image)
+
+    if ret_var:
+        var = module.var(image)
+        return mean, var
+
+    return mean
 
 
 def bbox_from_mask(mask, mask_values, min_shape=None, padding=None):
@@ -518,3 +548,176 @@ def aug_window_width_level(image, ww, wl, rand=False, norm_scale=1.0, normalize=
     else:
         image = (np.clip(image, wl - wd2 + t1, wl + wd2 + t2) - (wl - wd2 + t1)) * (norm_scale / (ww + t2 - t1))
         return image
+
+
+class Jset(set):
+    def __init__(self, seq1=(), seq2=()):
+        assert len(seq1) == len(seq2)
+        self.seq = set(seq1)
+        self.dct = {}
+        for k, v in zip(seq1, seq2):
+            self.dct[k] = v
+        super(Jset, self).__init__(self.seq)
+
+    def __sub__(self, value):
+        dct = self.dct.copy()
+
+        for v in value:
+            if v in dct:
+                dct.pop(v)
+        return Jset(*zip(*dct.items()))
+
+    def pop(self):
+        if len(self.seq) == 0:
+            raise KeyError
+        key, _ = max(self.dct.items(), key=lambda x: x[1])
+        self.seq -= {key}
+        self.dct.pop(key)
+        return key
+
+    def __str__(self):
+        if len(self.seq) == 0:
+            return "{}"
+        res = "{"
+        for i in self.seq:
+            res += str(i) + ", "
+        res = res[:-2] + "}"
+
+        return res
+
+    def __repr__(self):
+        res = "Jset({"
+        for i in self.seq:
+            res += str(i) + ", "
+        res = res[:-2] + "})"
+
+        return res
+
+
+def distinct_binary_object_correspondences(result,
+                                           reference,
+                                           iou_thresh=0.5,
+                                           connectivity=1):
+    """ Compute true positive, false positive, true negative
+
+    Parameters
+    ----------
+    result: ndarray
+        3D, range in {0, 1}
+    reference:  ndarray
+        3D, range in {0, 1}
+    iou_thresh: float
+        threshold for determining if two objects are correlated
+    connectivity: int
+        passes to `generate_binary_structure`
+
+    Returns
+    -------
+    labeled_res: labeled result
+    labeled_ref: labeled reference
+    n_res: number of result objects
+    n_ref: number of reference objects
+    mapping: true object <--> detected true positive object
+    """
+    result = np.atleast_1d(result.astype(np.bool))
+    reference = np.atleast_1d(reference.astype(np.bool))
+
+    assert result.shape == reference.shape
+    struct = ndi.morphology.generate_binary_structure(result.ndim, connectivity)
+
+    # label distinct binary objects
+    labeled_res, n_res = ndi.label(result, struct)
+    labeled_ref, n_ref = ndi.label(reference, struct)
+
+    slicers = ndi.find_objects(labeled_ref)
+
+    mapping = {}
+    used_labels = set()
+    one_to_many = []
+    for ref_obj_id, slicer in enumerate(slicers):
+        ref_obj_id += 1
+        # get ref object mask (in slicer window)
+        obj_mask = ref_obj_id == labeled_ref[slicer]
+        # analyze objects in the ref object mask
+        res_obj_ids, counts = np.unique(labeled_res[slicer][obj_mask], return_counts=True)
+        # remove background
+        keep = res_obj_ids != 0
+        res_obj_ids = res_obj_ids[keep]
+        counts = counts[keep]
+        if len(res_obj_ids) == 1:
+            # `ref_obj` only mapped to one `res_obj`
+            # if `res_obj` not already used, add to final list of object-to-object
+            # mappings and mark `res_obj` as used
+            res_obj_id = res_obj_ids[0]
+            if res_obj_id not in used_labels:
+                # two objects are matched, then check iou_thresh
+                ref_obj_mask = ref_obj_id == labeled_ref
+                res_obj_mask = res_obj_id == labeled_res
+                iou = mtr.dc(ref_obj_mask, res_obj_mask)
+                if iou >= iou_thresh:
+                    mapping[ref_obj_id] = [res_obj_id, iou]
+                    used_labels.add(res_obj_id)
+        elif len(res_obj_ids) > 1:
+            # `ref_obj` mapped to many `res_obj`s
+            # store relationship for later processing
+            # sort res_obj_ids by ascending order of counts,
+            # so pop() will get the index with the maximum area in current window
+            one_to_many.append((ref_obj_id, Jset(res_obj_ids, counts)))
+
+    # process one-to-many mappings, always choosing the one with the least labeled_ref
+    # correspondences first
+    while True:
+        # remove already used res_obj_ids
+        one_to_many = [(ref_obj_id, res_obj_ids - used_labels)
+                       for ref_obj_id, res_obj_ids in one_to_many]
+        # remove empty sets
+        one_to_many = filter(lambda x: x[1], one_to_many)
+        # sorted by set length
+        one_to_many = sorted(one_to_many, key=lambda x: len(x[1]))
+
+        if len(one_to_many) == 0:
+            break
+
+        ref_obj_id = one_to_many[0][0]
+        ref_obj_mask = ref_obj_id == labeled_ref
+
+        while True:
+            try:
+                res_obj_id = one_to_many[0][1].pop()
+                res_obj_mask = res_obj_id == labeled_res
+                iou = mtr.dc(ref_obj_mask, res_obj_mask)
+                if iou >= iou_thresh:
+                    # add the one-to-one mapping
+                    mapping[one_to_many[0][0]] = [res_obj_id, iou]
+                    used_labels.add(res_obj_id)
+                    break
+            except KeyError:
+                break
+        one_to_many = one_to_many[1:]
+
+    return labeled_res, labeled_ref, n_res, n_ref, mapping
+
+
+def find_false_positives(result, reference, connectivity=1):
+    result = np.atleast_1d(result.astype(np.bool))
+    reference = np.atleast_1d(reference.astype(np.bool))
+
+    assert result.shape == reference.shape
+    struct = ndi.morphology.generate_binary_structure(result.ndim, connectivity)
+
+    # label distinct binary objects
+    labeled_res, n_res = ndi.label(result, struct)
+    labeled_ref, n_ref = ndi.label(reference, struct)
+
+    slices = ndi.find_objects(labeled_res)
+
+    fp_lists = []
+    for res_obj_id, slice_ in enumerate(slices):
+        res_obj_id += 1
+        res_obj_mask = labeled_res[slice_] == res_obj_id
+        ref_obj_mask = labeled_ref[slice_].astype(np.bool)  # We don't distinguish different objects in reference
+        iou = mtr.dc(res_obj_mask, ref_obj_mask)
+        if iou < 0.1:
+            fp_lists.append([x.start for x in slice_] + [x.stop for x in slice_])
+
+    return fp_lists

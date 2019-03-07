@@ -27,8 +27,8 @@ def add_arguments(parser):
                        required=False, help="Base learning rate for model training (default: %(default)f)")
     group.add_argument("--learning_policy",
                        type=str,
-                       default="step",
-                       choices=["step", "poly"],
+                       default="period_step",
+                       choices=["custom_step", "period_step", "poly"],
                        required=False, help="Learning rate policy for training (default: %(default)s)")
     group.add_argument("--num_of_steps",
                        type=int,
@@ -38,15 +38,27 @@ def add_arguments(parser):
                        type=int,
                        default=1000,
                        required=False, help="Number of total steps for training")
+    group.add_argument("--lr_decay_boundaries",
+                       type=int,
+                       nargs="*",
+                       required=False, help="For \"custom_step\" policy. Use the specified learning rate at the "
+                                            "given boundaries.")
+    group.add_argument("--lr_custom_values",
+                       type=float,
+                       nargs="+",
+                       required=False, help="For \"custom_step\" policy. Use the specified learning rate at the "
+                                            "given boundaries. "
+                                            "Make sure len(lr_custom_values) - len(lr_decay_boundaries) = 1")
     group.add_argument("--lr_decay_step",
                        type=int,
                        default=1e5,
-                       required=False, help="For \"step\" policy. Decay the base learning rate at a fixed "
+                       required=False, help="For \"period_step\" policy. Decay the base learning rate at a fixed "
                                             "step (default: %(default)d)")
     group.add_argument("--lr_decay_rate",
                        type=float,
                        default=0.1,
-                       required=False, help="For \"step\" policy. Learning rate decay rate (default: %(default)f)")
+                       required=False, help="For \"period_step\" policy. Learning rate decay rate "
+                                            "(default: %(default)f)")
     group.add_argument("--lr_power",
                        type=float,
                        default=0.9,
@@ -94,6 +106,8 @@ class Solver(object):
         self.num_of_total_steps = self.args.num_of_total_steps
         self.learning_power = self.args.lr_power
         self.end_learning_rate = self.args.lr_end
+        self.learning_rate_decay_boundaries = self.args.lr_decay_boundaries
+        self.learning_rate_custom_values = self.args.lr_custom_values
 
         self.optimizer = self.args.optimizer.lower()
 
@@ -107,7 +121,7 @@ class Solver(object):
 
         Computes the model's learning rate for different learning policy.
 
-        Right now, only "step" and "poly" are supported.
+        Right now, only "custom_step", "period_step" and "poly" are supported.
 
         (1) The learning policy for "step" is computed as follows:
         current_learning_rate = base_learning_rate *
@@ -132,13 +146,19 @@ class Solver(object):
         ------
         ValueError: If learning policy is not recognized.
         """
-        if self.learning_policy == 'step':
+        if self.learning_policy == 'period_step':
             learning_rate = tf.train.exponential_decay(
                 self.base_learning_rate,
                 self.global_step,
                 self.learning_rate_decay_step,
                 self.learning_rate_decay_rate,
                 staircase=True)
+        elif self.learning_policy == "custom_step":
+            learning_rate = tf.train.piecewise_constant(
+                x=self.global_step,
+                boundaries=self.learning_rate_decay_boundaries,
+                values=self.learning_rate_custom_values
+            )
         elif self.learning_policy == 'poly':
             learning_rate = tf.train.polynomial_decay(
                 self.base_learning_rate,

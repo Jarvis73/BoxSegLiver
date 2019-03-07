@@ -58,6 +58,7 @@ class TestInputPipeline(unittest.TestCase):
         record2_3d = Path(__file__).parent / "data/LiTS/records/sample-bbox-3D-2-of-5.tfrecord"
         self.records = [str(record1), str(record2)]
         self.records_3d = [str(record1_3d), str(record2_3d)]
+        self.records_3d = [str(Path(__file__).parent / "data/LiTS/records/trainval-bbox-3D-1-of-5.tfrecord")]
 
         self.parser = argparse.ArgumentParser()
         add_arguments(self.parser)
@@ -162,7 +163,8 @@ class TestInputPipeline(unittest.TestCase):
 
     def test_get_multi_channels_dataset_for_eval(self):
         sys.argv.extend([
-            "--mode", "train",
+            "--mode", "eval",
+            "--triplet",
             "--use_spatial_guide",
         ])
         self.args = self.parser.parse_args()
@@ -170,6 +172,7 @@ class TestInputPipeline(unittest.TestCase):
 
         dataset = input_pipeline.get_multi_channels_dataset_for_eval(self.records_3d, self.args)
         inputs = dataset.make_one_shot_iterator().get_next("Inputs")
+        cnt = 0
         while True:
             features, labels = self.sess.run(inputs)
             print(features["images"].shape)
@@ -178,15 +181,17 @@ class TestInputPipeline(unittest.TestCase):
             print(labels.shape)
             # print(features["images"].max(), features["images"].min())
             # print(labels.max(), labels.min())
-            for i in range(labels.shape[0]):
-                plt.subplot(231)
-                plt.imshow(features["images"][i, ..., 0], cmap="gray")
-                plt.subplot(232)
-                plt.imshow(features["images"][i, ..., 1], cmap="gray")
-                plt.subplot(233)
-                plt.imshow(features["images"][i, ..., 2], cmap="gray")
-                plt.subplot(234)
-                plt.imshow(features["images"][i, ..., 3], cmap="gray")
-                plt.subplot(235)
-                plt.imshow(labels[i], cmap="gray")
-                plt.show()
+            plt.subplot(231)
+            plt.imshow(features["images"][0, ..., 0], cmap="gray")
+            plt.subplot(232)
+            plt.imshow(features["images"][0, ..., 1], cmap="gray")
+            plt.subplot(233)
+            plt.imshow(features["images"][0, ..., 2], cmap="gray")
+            plt.subplot(234)
+            plt.imshow(features["images"][0, ..., 3], cmap="gray")
+            plt.subplot(235)
+            plt.imshow(labels[0], cmap="gray")
+            plt.show()
+            cnt += 1
+            if cnt > 2:
+                break

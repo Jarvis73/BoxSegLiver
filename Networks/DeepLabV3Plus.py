@@ -26,7 +26,8 @@ ModeKeys = tf.estimator.ModeKeys
 metrics = losses
 
 networks_map = {
-    "xception_41": Xception.xception_41
+    "xception_41": Xception.xception_41,
+    "xception_42": Xception.xception_42,
 }
 
 networks_to_feature_maps = {
@@ -34,10 +35,15 @@ networks_to_feature_maps = {
         4: ["entry_flow/block2/unit_1/xception_module/"
             "separable_conv2_pointwise"],
     },
+    "xception_42": {
+        4: ["entry_flow/block2/unit_1/xception_module/"
+            "separable_conv2_pointwise"],
+    },
 }
 
 name_scope = {
-    "xception_41": "xception_41"
+    "xception_41": "xception_41",
+    "xception_42": "xception_42"
 }
 
 

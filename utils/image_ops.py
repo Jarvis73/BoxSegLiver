@@ -236,3 +236,24 @@ def random_flip_left_right(image, label=None, seed=None):
         combined = tf.concat((image, label_new), axis=-1)
         combined_flipped = tf.image.random_flip_left_right(combined, seed)
         return combined_flipped[..., :-1], tf.cast(combined_flipped[..., -1], dtype=label.dtype)
+
+
+def random_zero_or_one(shape, dtype, seed=None):
+    """
+    Randomly return a zero/one tensor.
+
+    Parameters
+    ----------
+    shape: TensorShape
+    dtype:
+    seed: A Python integer. Used to create a random seed. See
+        `tf.set_random_seed`
+        for behavior.
+
+    Returns
+    -------
+    A tensor with shape as `shape`
+    """
+    rd_val = tf.random_uniform((), 0, 1, dtype=dtype, seed=seed)
+    rd_rnd = tf.round(rd_val)
+    return tf.fill(shape, rd_rnd)
