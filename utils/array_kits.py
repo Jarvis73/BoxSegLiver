@@ -698,7 +698,7 @@ def distinct_binary_object_correspondences(result,
     return labeled_res, labeled_ref, n_res, n_ref, mapping
 
 
-def find_false_positives(result, reference, connectivity=1):
+def find_tp_and_fp(result, reference, connectivity=1):
     result = np.atleast_1d(result.astype(np.bool))
     reference = np.atleast_1d(reference.astype(np.bool))
 
@@ -712,6 +712,7 @@ def find_false_positives(result, reference, connectivity=1):
     slices = ndi.find_objects(labeled_res)
 
     fp_lists = []
+    tp_lists = []
     for res_obj_id, slice_ in enumerate(slices):
         res_obj_id += 1
         res_obj_mask = labeled_res[slice_] == res_obj_id
@@ -720,4 +721,8 @@ def find_false_positives(result, reference, connectivity=1):
         if iou < 0.1:
             fp_lists.append([x.start for x in slice_] + [x.stop for x in slice_])
 
-    return fp_lists
+    slices = ndi.find_objects(labeled_ref)
+    for slice_ in slices:
+        tp_lists.append([x.start for x in slice_] + [x.stop for x in slice_])
+
+    return fp_lists, tp_lists

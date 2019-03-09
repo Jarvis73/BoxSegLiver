@@ -19,13 +19,17 @@ from data_kits import build_lits_liver
 
 def main():
     # build_lits_liver.convert_to_liver("trainval", keep_only_liver=True, seed=1234)
-    build_lits_liver.convert_to_liver_bounding_box("trainval", keep_only_liver=False, seed=1234,
-                                                   align=8, padding=(25, 25, 2))
-    # build_lits_liver.convert_to_liver_bbox_triplet("trainval", keep_only_liver=False, seed=1234,
+    # build_lits_liver.convert_to_liver_bounding_box("trainval", keep_only_liver=False, seed=1234,
     #                                                align=8, padding=(25, 25, 2))
-    # build_lits_liver.convert_to_liver_bbox_triplet("trainval", keep_only_liver=False, seed=1234,
-    #                                                align=8, padding=(25, 25, 2), only_tumor=True,
-    #                                                prefix="tumor-bbox-triplet")
+    # build_lits_liver.convert_to_liver_bbox_group("trainval", keep_only_liver=False, seed=1234,
+    #                                              align=8, padding=(25, 25, 2),
+    #                                              prefix="bbox-triplet", group="triplet")
+    # build_lits_liver.convert_to_liver_bbox_group("trainval", keep_only_liver=False, seed=1234,
+    #                                              align=8, padding=(25, 25, 2), only_tumor=True,
+    #                                              prefix="tumor-bbox-triplet", group="triplet")
+    build_lits_liver.convert_to_liver_bbox_group("trainval", keep_only_liver=False, seed=1234,
+                                                 align=8, padding=(25, 25, 2),
+                                                 prefix="bbox-quintuplet", group="quintuplet")
 
 
 if __name__ == "__main__":

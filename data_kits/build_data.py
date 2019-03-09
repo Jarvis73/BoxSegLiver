@@ -285,7 +285,7 @@ def image_to_examples(image_reader,
                       split=False,
                       extra_str_info=None,
                       extra_int_info=None,
-                      triplet=False):
+                      group="triplet"):
     """
     Convert N-D image and label to N-D/(N-1)-D tfexamples.
 
@@ -303,13 +303,17 @@ def image_to_examples(image_reader,
         extra information added to tfexample. Dict keys will be the tf-feature keys,
         and values must be a list whose length is equal with image_reader.shape[0]
     extra_int_info: dict
-    triplet: bool
+    group: str
+        none or triplet or quintuplet
 
     Returns
     -------
     A list of TF-Example
 
     """
+    if group not in ["none", "triplet", "quintuplet"]:
+        raise ValueError("group must be one of [none, triplet, quintuplet], got {}".format(group))
+
     if image_reader.name is None:
         raise RuntimeError("ImageReader need call `read()` first.")
     extra_str_split, extra_str_origin = _check_extra_info_type(extra_str_info)
@@ -323,9 +327,12 @@ def image_to_examples(image_reader,
             assert num_slices == len(extra_list), "Length not equal: {} vs {}".format(num_slices, len(extra_list))
 
         for idx in image_reader.indices:
-            if triplet:
+            if group == "triplet":
                 indices = (idx - 1, idx, idx + 1)
                 shape = image_reader.shape[1:-1] + (3,)
+            elif group == "quintuplet":
+                indices = (idx - 2, idx - 1, idx, idx + 1, idx + 2)
+                shape = image_reader.shape[1:-1] + (5,)
             else:
                 indices = idx
                 shape = image_reader.shape[1:]

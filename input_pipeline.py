@@ -510,6 +510,8 @@ def _before_flat_fn(features, labels, args):
         if args.use_spatial_guide and args.use_fewer_guide:
             guide = tf.py_func(_wrap_get_gd_image_multi_objs, [labels], tf.float32)
             features["guides"] = guide
+            if not args.triplet:
+                features["images"] = tf.concat((features["images"], features.pop("guides")), axis=-1)
 
     return features, labels
 

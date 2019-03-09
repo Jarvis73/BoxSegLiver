@@ -31,6 +31,11 @@ def add_arguments(parser):
     group.add_argument("--bias_decay",
                        action="store_true",
                        required=False, help="Use bias decay or not")
+    group.add_argument("--loss_type",
+                       type=str,
+                       default="xentropy",
+                       choices=["xentropy", "dice"],
+                       required=False, help="Loss type (default %(default)s)")
     group.add_argument("--loss_weight_type",
                        type=str,
                        default="none",
@@ -150,6 +155,60 @@ def weighted_sparse_softmax_cross_entropy(logits, labels, w_type, name=None, **k
             loss_mask = kwargs.pop("livers")
             weights = tf.to_float(loss_mask) * weights
         return tf.losses.sparse_softmax_cross_entropy(labels, logits, weights)
+
+
+def sparse_dice_loss(_sentinel=None, labels=None, logits=None,
+                     with_bg=False, eps=1e-8, name=None,
+                     loss_collection=tf.GraphKeys.LOSSES):
+    """ Implementation of multi-class dice loss(without background), also
+    called Generalized Dice Loss(GDL).
+
+    Parameters
+    ----------
+    _sentinel: None
+        not used
+    labels: Tensor
+        sparse labels with shape [bs, h, w]
+    logits: Tensor
+        probability of each pixel after softmax layer
+    with_bg: bool
+        with background or not
+    eps: float
+        used to avoid dividing by zero
+    name: str
+        layer name used in computation graph
+    loss_collection: str
+        collection to which the loss will be added.
+
+    Returns
+    -------
+    Dice loss, between [0, 1]
+    """
+    with tf.variable_scope(name, "DiceLoss"):
+        n_classes = logits.shape.as_list()[-1]
+        c_logits = tf.cast(logits, tf.float32)
+        h_labels = tf.one_hot(labels, n_classes, dtype=tf.float32)
+
+        if not with_bg:
+            n_classes -= 1
+            c_logits = c_logits[..., 1:]
+            h_labels = h_labels[..., 1:]
+
+        tf_sum = tf.reduce_sum
+        intersection = tf_sum(h_labels * c_logits, [1, 2, 3])
+        union = tf_sum(h_labels + c_logits, [1, 2, 3])
+        mean_dice_loss = tf.reduce_mean((2.0 * intersection) / (union + eps))
+        del tf_sum
+
+        dice_loss = 1. - mean_dice_loss
+
+    tf.losses.add_loss(dice_loss, loss_collection)
+    return dice_loss
+
+
+def weighted_dice_loss(logits, labels, w_type, name=None, **kwargs):
+    with tf.name_scope(name, "WsdLoss"):    # weighted softmax dice --> Wsd
+        return sparse_dice_loss(labels=labels, logits=logits)
 
 
 ################################################################################################

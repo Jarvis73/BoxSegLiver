@@ -130,9 +130,19 @@ class UNet(base.BaseNet):
         return
 
     def _build_loss(self):
-        losses.weighted_sparse_softmax_cross_entropy(
-            self._layers["logits"], self._inputs["labels"],
-            self.args.loss_weight_type, name="Losses/", **self._get_weights_params())
+        params = {
+            "logits": self._layers["logits"],
+            "labels": self._inputs["labels"],
+            "w_type": self.args.loss_weight_type,
+        }
+        w_param = self._get_weights_params()
+
+        if self.args.loss_type == "xentropy":
+            losses.weighted_sparse_softmax_cross_entropy(**params, **w_param)
+        elif self.args.loss_type == "dice":
+            losses.weighted_dice_loss(**params, **w_param)
+        else:
+            raise ValueError("Not supported loss_type: {}".format(self.args.loss_type))
 
         with tf.name_scope("Losses/"):
             total_loss = tf.losses.get_total_loss()

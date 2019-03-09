@@ -271,15 +271,16 @@ def convert_to_liver_bounding_box(dataset,
                 print()
 
 
-def convert_to_liver_bbox_triplet(dataset,
-                                  keep_only_liver,
-                                  k_split=5,
-                                  seed=None,
-                                  align=1,
-                                  padding=0,
-                                  min_bbox_shape=None,
-                                  prefix="bbox-triplet",
-                                  only_tumor=False):
+def convert_to_liver_bbox_group(dataset,
+                                keep_only_liver,
+                                k_split=5,
+                                seed=None,
+                                align=1,
+                                padding=0,
+                                min_bbox_shape=None,
+                                prefix="bbox-none",
+                                group="none",
+                                only_tumor=False):
     file_names = get_lits_list(dataset, keep_only_liver if not only_tumor else False)
     num_images = len(file_names)
 
@@ -293,9 +294,11 @@ def convert_to_liver_bbox_triplet(dataset,
     tumor_slices = []
     # Convert each split
     counter = 1
+    print("Group: {}".format(group))
     for i, fold in enumerate(k_folds):
         # Split to 2D slices for training
         output_filename_2d = LiTS_records / "{}-{}-2D-{}-of-{}.tfrecord".format(dataset, prefix, i + 1, k_split)
+        print("Write to {}".format(str(output_filename_2d)))
         with tf.io.TFRecordWriter(str(output_filename_2d)) as writer_2d:
             for j, image_name in enumerate(fold):
                 print("\r>> Converting fold {}, {}/{}, {}/{}"
@@ -325,7 +328,7 @@ def convert_to_liver_bbox_triplet(dataset,
                     raise RuntimeError("Shape mismatched between image and label: {} vs {}".format(
                         image_reader.shape, label_reader.shape))
                 # Convert 2D slices to example
-                for example in image_to_examples(image_reader, label_reader, split=True, triplet=True):
+                for example in image_to_examples(image_reader, label_reader, split=True, group=group):
                     writer_2d.write(example.SerializeToString())
                 counter += 1
             print()
@@ -345,7 +348,7 @@ def dump_fp_bbox_from_prediction(label_dirs, pred_dir):
         lab_path = misc.find_file(label_dirs, lab_file)
         result = array_kits.merge_labels(nii_kits.nii_reader(pred_path)[1], [0, 2])
         reference = array_kits.merge_labels(nii_kits.nii_reader(lab_path)[1], [0, 2])
-        fps = array_kits.find_false_positives(result, reference)
+        fps, tps = array_kits.find_tp_and_fp(result, reference)
         for x in fps:
             print(x, [x[3] - x[0], x[4] - x[1], x[5] - x[2]])
         print()
