@@ -58,7 +58,7 @@ def _get_session_config():
 
 def _custom_tf_logger(args):
     # Set custom logger
-    log_dir = Path(__file__).parent / "logs"
+    log_dir = Path(args.model_dir) / "logs"
     if not log_dir.exists():
         log_dir.mkdir(exist_ok=True)
 

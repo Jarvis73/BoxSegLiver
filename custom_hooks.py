@@ -312,6 +312,7 @@ class FeedGuideHook(session_run_hook.SessionRunHook):
         img_array = np.pad(img_array, pad_with, mode="constant", constant_values=0)
 
         self.img_reader.save(save_path, img_array, fmt=cur_case.suffix[1:])
+        self.guides.clear()
 
 
 class LogLearningRateHook(session_run_hook.SessionRunHook):

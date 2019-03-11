@@ -56,6 +56,11 @@ def add_arguments(parser):
     group.add_argument("--use_fewer_guide",
                        action="store_true",
                        required=False, help="Use fewer guide for evaluation")
+    group.add_argument("--guide",
+                       type=str,
+                       default="first",
+                       choices=["first", "middle"],
+                       required=False, help="Generate guide from which slice")
     group.add_argument("--eval_num",
                        type=int,
                        required=False, help="Number of cases for evaluation")
@@ -269,9 +274,12 @@ class EvaluateVolume(EvaluateBase):
         # Find largest component --> for liver
         if self.largest and "Liver" in logits3d:
             logits3d["Liver"] = arr_ops.get_largest_component(logits3d["Liver"], rank=3)
+            if self.merge_tumor_to_liver and "Tumor" in logits3d:
+                # Remove false positives outside liver region
+                logits3d["Tumor"] *= logits3d["Liver"].astype(logits3d["Tumor"].dtype)
 
         if self.params["args"].only_tumor and "livers3d" in kwargs and "Tumor" in logits3d:
-                logits3d["Tumor"] *= livers3d.astype(logits3d["Tumor"].dtype)
+            logits3d["Tumor"] *= livers3d.astype(logits3d["Tumor"].dtype)
 
         # Find volume voxel spacing from data source
         header = self.img_reader.header(cur_case)
@@ -294,8 +302,14 @@ class EvaluateVolume(EvaluateBase):
                 save_path.mkdir(exist_ok=True)
             save_path = save_path / case_name
 
-            img_array = (logits3d["Liver"] + logits3d["Tumor"]
-                         if "Tumor" in logits3d and "Tumor" in logits3d else logits3d["Liver"])
+            if "Liver" in logits3d and "Tumor" in logits3d:
+                img_array = logits3d["Liver"] + logits3d["Tumor"]
+            elif "Liver" in logits3d:
+                img_array = logits3d["Liver"]
+            elif "Tumor" in logits3d:
+                img_array = logits3d["Tumor"]
+            else:
+                raise ValueError("Not supported save object!")
             pad_with = tuple(zip(bbox[2::-1], np.array(header.shape) - bbox[:2:-1] - 1))
             img_array = np.pad(img_array, pad_with, mode="constant", constant_values=0)
 

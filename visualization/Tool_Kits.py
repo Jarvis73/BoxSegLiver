@@ -33,10 +33,14 @@ def get_pred_score(log_file, sort_by=None):
 
     """
     data = Path(log_file).read_text()
-    pat = re.compile("Evaluate-\d+\s(.*?)\s.*?/Dice:\s(\d+\.\d{3})\s.*?/Dice:\s(\d+\.\d{3})")
-
-    res = pat.findall(data)
-    res = [(x, (float(y), float(z))) for x, y, z in res]
+    if "only" not in str(log_file):
+        pat = re.compile("Evaluate-\d+\s(.*?)\s.*?/Dice:\s(\d+\.\d{3})\s.*?/Dice:\s(\d+\.\d{3})")
+        res = pat.findall(data)
+        res = [(x, (float(y), float(z))) for x, y, z in res]
+    else:
+        pat = re.compile("Evaluate-\d+\s(.*?)\s.*?/Dice:\s(\d+\.\d{3})")
+        res = pat.findall(data)
+        res = [(x, (0., float(y))) for x, y in res]
 
     if sort_by is None:
         return res

@@ -47,6 +47,7 @@ class SegViewerAdapter(object):
         self.label = 2
         self.table = []
         self.meta = None
+        self.min_idx = 0
 
     def update_case(self, case_path, **kwargs):
         self.gt = self.mask = self.mask_ = None
@@ -72,6 +73,8 @@ class SegViewerAdapter(object):
         if self.liver_range is not None:
             bb = self.liver_range[ori_file.name.split(".")[0]][0]
             ranges = slice(bb[2], bb[5] + 1)
+            self.shape = self.gt.shape
+            self.min_idx = bb[2]
             self.gt = self.gt[ranges]
             self.pred_ = self.pred_[ranges]
             self.mask_ = self.mask_[ranges]
@@ -94,7 +97,15 @@ class SegViewerAdapter(object):
     def get_num_slices(self, ges=1):
         if self.gt is None:
             return 0
-        return self.gt.shape[ges - 1]
+        return self.shape[ges - 1]
+
+    def get_min_idx(self):
+        return self.min_idx
+
+    def real_ind(self, ind, ges=1):
+        if self.gt is None:
+            return ind
+        return (ind - self.min_idx) % self.gt.shape[ges - 1] + self.min_idx
 
     @staticmethod
     def plot_label(image, mask, color, contour, mask_lab, alpha):
@@ -135,18 +146,22 @@ class SegViewerAdapter(object):
         return image, mask
 
     def get_slice1(self, ind, color=(255, 255, 255), alpha=0.3, **kwargs):
-        return self.plot_label(*self.resized_image(self.gt, self.mask, kwargs.get("ges", 1), ind),
+        ges = kwargs.get("ges", 1)
+        ind = (ind - self.min_idx) % self.gt.shape[ges - 1]
+        return self.plot_label(*self.resized_image(self.gt, self.mask, ges, ind),
                                color,
                                kwargs.get("contour", True),
                                kwargs.get("mask_lab", False),
                                alpha)
 
     def get_slice2(self, ind, color=(255, 255, 255), alpha=0.3, **kwargs):
+        ges = kwargs.get("ges", 1)
+        ind = (ind - self.min_idx) % self.gt.shape[ges - 1]
         contour = kwargs.get("contour", True)
         mask_lab = kwargs.get("mask_lab", False)
 
-        return self.plot_label(*self.resized_image(self.gt, self.pred, kwargs.get("ges", 1), ind),
-                                color, contour, mask_lab, alpha)
+        return self.plot_label(*self.resized_image(self.gt, self.pred, ges, ind),
+                               color, contour, mask_lab, alpha)
 
     def get_file_list(self):
         if self.liver_range is None and self.bbox_file.exists():
@@ -181,8 +196,8 @@ class SegViewerAdapter(object):
     def update_choice(self, **kwargs):
         self.liver = kwargs.get("liver", self.liver)
         self.label = kwargs.get("label", self.label)
-        self.mask = array_kits.merge_labels(self.mask_,
-                                            [0, [1, 2]] if self.liver else [0, self.label]).astype(np.int8) * 2
+        # self.mask = array_kits.merge_labels(self.mask_,
+        #                                     [0, [1, 2]] if self.liver else [0, self.label]).astype(np.int8) * 2
         self.pred = array_kits.merge_labels(self.pred_,
                                             [0, [1, 2]] if self.liver else [0, self.label]).astype(np.int8) * 2
 
@@ -193,7 +208,7 @@ class SegViewerAdapter(object):
 
 def main():
     adapter = SegViewerAdapter(
-        Path(__file__).parent / "model_dir/004_triplet/prediction",
+        Path(__file__).parent / "model_dir/001_tumor_unet_only_sg_rd_wd/prediction",
         ["D:/DataSet/LiTS/Training_Batch_1", "D:/DataSet/LiTS/Training_Batch_2"],
         Path("D:/DataSet/LiTS/liver_bbox_nii.pkl")
     )

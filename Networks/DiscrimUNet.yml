@@ -1,0 +1,5 @@
+init_channels: 64
+num_down_samples: 4
+ret_prob: false
+ret_pred: true
+pooling_size: 8

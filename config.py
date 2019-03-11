@@ -16,6 +16,7 @@
 import argparse
 from pathlib import Path
 from tensorflow.python.estimator.model_fn import ModeKeys
+from tensorflow.python.platform import tf_logging as logging
 
 
 class CustomKeys(object):
@@ -87,6 +88,10 @@ def check_args(args, parser):
     if args.use_spatial_guide and args.im_channel <= 1:
         raise ValueError("When using spatial guide, im_channel should be 2, got {}"
                          .format(args.im_channel))
+
+    if args.use_fewer_guide:
+        args.batch_size = 1
+        logging.info("Using fewer guides will force batch_size = 1.")
 
 
 def fill_default_args(args):

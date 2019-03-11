@@ -503,7 +503,8 @@ def _before_flat_fn(features, labels, args):
             center_perturb=0.,
             stddev_perturb=0.,
             partial=True,
-            with_fake_guides=False)[..., None]
+            with_fake_guides=False,
+            partial_slice=args.guide)[..., None]
         return guide_image.astype(np.float32)
 
     if args.mode == ModeKeys.EVAL:

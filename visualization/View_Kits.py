@@ -273,6 +273,7 @@ class ComparePrediction(HasTraits):
         self.figure1.canvas.setFocus()
 
     def button_release_event(self, event):
+        _ = event
         self.accelerate = 1
 
     def key_press_event(self, event):
@@ -312,7 +313,7 @@ class ComparePrediction(HasTraits):
                 self.refresh()
 
     def reset_index(self):
-        self.cur_ind = 0
+        self.cur_ind = self.adap.get_min_idx()
         self.total_ind = self.adap.get_num_slices(self.gesture) - 1
 
     def image_show(self, ind):
@@ -329,7 +330,7 @@ class ComparePrediction(HasTraits):
                                  mask_lab=self.mask,
                                  ges=self.gesture))
         self.connect()
-        self.cur_ind = ind
+        self.cur_ind = self.adap.real_ind(ind)
         self.update_figure()
 
     def update_figure(self):
@@ -416,11 +417,11 @@ class ComparePrediction(HasTraits):
 
     def _lastButton_fired(self):
         if self.total_ind > 0:
-            self.image_show((self.cur_ind - self.accelerate) % (self.total_ind + 1))
+            self.image_show(self.cur_ind - self.accelerate)
 
     def _nextButton_fired(self):
         if self.total_ind > 0:
-            self.image_show((self.cur_ind + self.accelerate) % (self.total_ind + 1))
+            self.image_show(self.cur_ind + self.accelerate)
 
     def _showButton_fired(self):
         if self.cur_case and self.cur_show != self.cur_case:

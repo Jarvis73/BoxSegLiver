@@ -30,14 +30,16 @@ def _check_size_type(size):
     return size
 
 
-class UNet(base.BaseNet):
+class DiscrimUNet(base.BaseNet):
+    """ Only for tumor segmentation (without liver) """
     def __init__(self, args, name=None):
         """ Don't create ops/tensors in __init__() """
-        super(UNet, self).__init__(args)
-        self.name = name or "UNet"
+        super(DiscrimUNet, self).__init__(args)
+        self.name = name or "DiscrimUNet"
         self.classes.extend(self.args.classes)
 
         self.bs = args.batch_size
+        self.roi_bs = args.roi_batch_size
         self.height = args.im_height
         self.width = args.im_width
         self.channel = args.im_channel
@@ -65,8 +67,9 @@ class UNet(base.BaseNet):
         self.width = _check_size_type(self.width)
         self._inputs["images"].set_shape([self.bs, self.height, self.width, self.channel])
         self._inputs["labels"].set_shape([self.bs, None, None])
-        if self.args.only_tumor:
-            self._inputs["livers"].set_shape([self.bs, self.height, self.width])
+        self._inputs["livers"].set_shape([self.bs, self.height, self.width])
+        self._inputs["rois"].set_shape([self.roi_bs, 5])
+        self._inputs["roi_labels"].set_shape([self.roi_bs])
 
         tensor_out = self._inputs["images"]
         down_sample = kwargs.get("input_down_sample", False)
@@ -75,7 +78,7 @@ class UNet(base.BaseNet):
             rate = kwargs.get("input_down_sample_rate", 2)
             tensor_out = tf.image.resize_bilinear(tensor_out, [h // rate, w // rate])
 
-        with tf.variable_scope(self.name, "UNet"):
+        with tf.variable_scope(self.name, "DiscrimUNet"):
             encoder_layers = {}
 
             # encoder
@@ -87,13 +90,13 @@ class UNet(base.BaseNet):
                 out_channels *= 2
 
             # Encode-Decode-Bridge
-            tensor_out = slim.repeat(tensor_out, 2, slim.conv2d, out_channels, 3, scope="ED-Bridge")
+            high_level_tensor_out = slim.repeat(tensor_out, 2, slim.conv2d, out_channels, 3, scope="ED-Bridge")
 
-            # decoder
+            # Branch 1: decoder for segmentation
             for i in reversed(range(num_down_samples)):
                 out_channels /= 2
                 with tf.variable_scope("Decode{:d}".format(i + 1)):
-                    tensor_out = slim.conv2d_transpose(tensor_out,
+                    tensor_out = slim.conv2d_transpose(high_level_tensor_out,
                                                        tensor_out.get_shape()[-1] // 2, 2, 2)
                     tensor_out = tf.concat((encoder_layers["Encode{:d}".format(i + 1)], tensor_out), axis=-1)
                     tensor_out = slim.repeat(tensor_out, 2, slim.conv2d, out_channels, 3)
@@ -107,28 +110,51 @@ class UNet(base.BaseNet):
                     logits = tf.image.resize_bilinear(logits, [h, w])
                 self._layers["logits"] = logits
 
-            # Probability & Prediction
-            self.ret_prob = kwargs.get("ret_prob", False)
-            self.ret_pred = kwargs.get("ret_pred", False)
-            if self.ret_prob or self.ret_pred:
+            # Branch 2: discriminator for classification
+            with tf.name_scope("BboxLayer"):
+                # bool_split = tf.squeeze(tf.cast(self._layers[obj], tf.bool), axis=-1)
+                # labeled = image_ops.connected_components(bool_split)
+                pooling_size = kwargs.get("pooling_size", 8)
+                pre_pooling_size = pooling_size * 2
+                rois = tf.image.crop_and_resize(image=high_level_tensor_out,
+                                                bboxes=self._inputs["rois"][:, 1:],
+                                                box_ind=self._inputs["rois"][:, 0],
+                                                crop_size=[pre_pooling_size, pre_pooling_size])
+                rois = slim.max_pool2d(rois, 2)
+                rois_flat = slim.flatten(rois)
+                fc = slim.fully_connected(rois_flat, 1024)
+                fc = slim.dropout(fc, keep_prob=0.5, is_training=self.is_training)
+                fc = slim.fully_connected(fc, 1024)
+                fc = slim.dropout(fc, keep_prob=0.5, is_training=self.is_training)
+                cls_score = slim.fully_connected(fc, 2, activation_fn=None)
+                self._layers["Classify"] = cls_score
+
+            with tf.name_scope("Prediction"):
+                # Segmentation
                 self.probability = slim.softmax(logits)
                 split = tf.split(self.probability, self.num_classes, axis=-1)
                 if self.ret_prob:
                     for i in range(1, self.num_classes):
                         self._layers[self.classes[i] + "Prob"] = split[i]
-                if self.ret_pred:
-                    zeros = tf.zeros_like(split[0], dtype=tf.uint8)
-                    ones = tf.ones_like(zeros, dtype=tf.uint8)
-                    for i in range(1, self.num_classes):
-                        obj = self.classes[i] + "Pred"
-                        self._layers[obj] = tf.where(split[i] > 0.5, ones, zeros, name=obj)
-                        if self.args.only_tumor and self.classes[i] == "Tumor":
-                            self._layers[obj] = self._layers[obj] * tf.cast(
-                                tf.expand_dims(self._inputs["livers"], axis=-1), tf.uint8)
-                        self._image_summaries[obj] = self._layers[obj]
+
+                zeros = tf.zeros_like(split[0], dtype=tf.uint8)
+                ones = tf.ones_like(zeros, dtype=tf.uint8)
+                for i in range(1, self.num_classes):
+                    obj = self.classes[i] + "Pred"
+                    self._layers[obj] = tf.where(split[i] > 0.5, ones, zeros, name=obj)
+                    if self.args.only_tumor and self.classes[i] == "Tumor":
+                        self._layers[obj] = self._layers[obj] * tf.cast(
+                            tf.expand_dims(self._inputs["livers"], axis=-1), tf.uint8)
+                    self._image_summaries[obj] = self._layers[obj]
+
+                # Classification
+                cls_prob = slim.softmax(cls_score)
+                self._layers["ClassifyPred"] = tf.cast(tf.argmax(cls_prob, axis=1),
+                                                       self._inputs["roi_labels"].dtype)
         return
 
     def _build_loss(self):
+        # Segmentation loss
         w_param = self._get_weights_params()
         if self.args.loss_type == "xentropy":
             losses.weighted_sparse_softmax_cross_entropy(logits=self._layers["logits"],
@@ -140,6 +166,14 @@ class UNet(base.BaseNet):
                                       w_type=self.args.loss_weight_type, **w_param)
         else:
             raise ValueError("Not supported loss_type: {}".format(self.args.loss_type))
+
+        # Classification loss
+        cls_params = {
+            "logits": self._layers["Classify"],
+            "labels": self._inputs["roi_labels"],
+            "scope": "ClsLoss"
+        }
+        tf.losses.sparse_softmax_cross_entropy(**cls_params)
 
         with tf.name_scope("Losses/"):
             total_loss = tf.losses.get_total_loss()
@@ -174,6 +208,12 @@ class UNet(base.BaseNet):
                     for met in self.args.metrics_train:
                         metric_func = eval("metrics.metric_" + met.lower())
                         metric_func(logits, labels, name=obj + met)
+
+                # Classification
+                is_correct = tf.to_float(tf.equal(self._layers["ClassifyPred"],
+                                                  self._inputs["roi_labels"]))
+                accuracy = tf.reduce_mean(is_correct, name="Accuracy")
+                tf.add_to_collection(metrics.METRICS, accuracy)
 
     def _build_summaries(self):
         if self.mode == ModeKeys.TRAIN:

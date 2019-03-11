@@ -339,7 +339,7 @@ def convert_to_liver_bbox_group(dataset,
 
 def dump_fp_bbox_from_prediction(label_dirs, pred_dir):
     pred_dir = Path(pred_dir)
-    save_path = pred_dir.parent / "fp_bbox.pkl"
+    save_path = pred_dir.parent / "fp_tp_bbox.pkl"
     # with save_path.open("rb") as f:
     cnt = 0
     for pred_path in pred_dir.glob("prediction-*.nii.gz"):
@@ -352,8 +352,6 @@ def dump_fp_bbox_from_prediction(label_dirs, pred_dir):
         for x in fps:
             print(x, [x[3] - x[0], x[4] - x[1], x[5] - x[2]])
         print()
-        if cnt >= 10:
-            break
         cnt += 1
 
 
