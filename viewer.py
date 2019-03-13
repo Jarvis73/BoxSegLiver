@@ -47,11 +47,11 @@ class SegViewerAdapter(object):
         self.label = 2
         self.table = []
         self.meta = None
-        self.min_idx = 0
 
     def update_case(self, case_path, **kwargs):
         self.gt = self.mask = self.mask_ = None
         self.pred = self.pred_ = None
+        case_path = "prediction-{}.nii.gz".format(int(case_path.split("-")[1]))
 
         if Path(case_path).name.endswith(".nii.gz"):
             ori_file = find_file(self.data_dirs, case_path.replace("prediction", "volume")
@@ -61,7 +61,7 @@ class SegViewerAdapter(object):
             pred_file = find_file([self.pred_dir], case_path)
             reader = nii_kits.nii_reader
         else:
-            raise ValueError("Wrong prediction name")
+            raise ValueError("Wrong prediction name: {}".format(case_path))
 
         if self.liver_range is None and self.bbox_file.exists():
             with self.bbox_file.open("rb") as f:
@@ -71,10 +71,9 @@ class SegViewerAdapter(object):
         self.pred_ = reader(pred_file)[1].astype(np.int8)
         self.mask_ = reader(lab_file)[1].astype(np.int8)
         if self.liver_range is not None:
-            bb = self.liver_range[ori_file.name.split(".")[0]][0]
-            ranges = slice(bb[2], bb[5] + 1)
+            self.bb = self.liver_range[ori_file.name.split(".")[0]][0]
+            ranges = slice(self.bb[2], self.bb[5] + 1)
             self.shape = self.gt.shape
-            self.min_idx = bb[2]
             self.gt = self.gt[ranges]
             self.pred_ = self.pred_[ranges]
             self.mask_ = self.mask_[ranges]
@@ -99,13 +98,16 @@ class SegViewerAdapter(object):
             return 0
         return self.shape[ges - 1]
 
-    def get_min_idx(self):
-        return self.min_idx
+    def get_min_idx(self, ges=1):
+        return self.bb[3 - ges]
+
+    def get_max_idx(self, ges=1):
+        return self.bb[6 - ges]
 
     def real_ind(self, ind, ges=1):
         if self.gt is None:
             return ind
-        return (ind - self.min_idx) % self.gt.shape[ges - 1] + self.min_idx
+        return (ind - self.get_min_idx(ges)) % self.gt.shape[ges - 1] + self.get_min_idx(ges)
 
     @staticmethod
     def plot_label(image, mask, color, contour, mask_lab, alpha):
@@ -147,7 +149,7 @@ class SegViewerAdapter(object):
 
     def get_slice1(self, ind, color=(255, 255, 255), alpha=0.3, **kwargs):
         ges = kwargs.get("ges", 1)
-        ind = (ind - self.min_idx) % self.gt.shape[ges - 1]
+        ind = (ind - self.get_min_idx(ges)) % self.gt.shape[ges - 1]
         return self.plot_label(*self.resized_image(self.gt, self.mask, ges, ind),
                                color,
                                kwargs.get("contour", True),
@@ -156,7 +158,7 @@ class SegViewerAdapter(object):
 
     def get_slice2(self, ind, color=(255, 255, 255), alpha=0.3, **kwargs):
         ges = kwargs.get("ges", 1)
-        ind = (ind - self.min_idx) % self.gt.shape[ges - 1]
+        ind = (ind - self.get_min_idx(ges)) % self.gt.shape[ges - 1]
         contour = kwargs.get("contour", True)
         mask_lab = kwargs.get("mask_lab", False)
 
@@ -171,12 +173,14 @@ class SegViewerAdapter(object):
         if not self.table:
             for path in self.pred_dir.glob("*.nii.gz"):
                 hdr, _ = nii_kits.nii_reader(str(path), only_meta=True)
+                names = path.stem.split(".")[0].split("-")
+                name = "Pred-{:03d}".format(int(names[1]))
                 if self.liver_range is not None:
                     rng = self.liver_range[path.name.replace("prediction", "volume").split(".")[0]][0]
-                    self.table.append((path.name, "{}/{}".format(rng[5] - rng[2] + 1,
+                    self.table.append((name, "{}/{}".format(rng[5] - rng[2] + 1,
                                                                  hdr.get_data_shape()[-1])))
                 else:
-                    self.table.append((path.name, "{}".format(hdr.get_data_shape()[-1])))
+                    self.table.append((name, "{}".format(hdr.get_data_shape()[-1])))
 
         return self.table
 
@@ -185,7 +189,7 @@ class SegViewerAdapter(object):
 
         new_table = []
         for name, slices in self.table:
-            score = pairs.get(name.split(".")[0].replace("prediction", "volume"), (0.0, 0.0))
+            score = pairs.get("volume-{}".format(int(name.split("-")[1])), (0.0, 0.0))
             new_table.append((name, slices, *score))
 
         return new_table
@@ -196,8 +200,8 @@ class SegViewerAdapter(object):
     def update_choice(self, **kwargs):
         self.liver = kwargs.get("liver", self.liver)
         self.label = kwargs.get("label", self.label)
-        # self.mask = array_kits.merge_labels(self.mask_,
-        #                                     [0, [1, 2]] if self.liver else [0, self.label]).astype(np.int8) * 2
+        self.mask = array_kits.merge_labels(self.mask_,
+                                            [0, [1, 2]] if self.liver else [0, 2]).astype(np.int8) * 2
         self.pred = array_kits.merge_labels(self.pred_,
                                             [0, [1, 2]] if self.liver else [0, self.label]).astype(np.int8) * 2
 
@@ -208,7 +212,7 @@ class SegViewerAdapter(object):
 
 def main():
     adapter = SegViewerAdapter(
-        Path(__file__).parent / "model_dir/001_tumor_unet_only_sg_rd_wd/prediction",
+        Path(__file__).parent / "model_dir/007_atrous_unet/prediction",
         ["D:/DataSet/LiTS/Training_Batch_1", "D:/DataSet/LiTS/Training_Batch_2"],
         Path("D:/DataSet/LiTS/liver_bbox_nii.pkl")
     )

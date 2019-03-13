@@ -1,0 +1,131 @@
+Training_Batch_1/volume-0.nii
+Training_Batch_1/volume-1.nii
+Training_Batch_1/volume-10.nii
+Training_Batch_1/volume-11.nii
+Training_Batch_1/volume-12.nii
+Training_Batch_1/volume-13.nii
+Training_Batch_1/volume-14.nii
+Training_Batch_1/volume-15.nii outlier
+Training_Batch_1/volume-16.nii
+Training_Batch_1/volume-17.nii
+Training_Batch_1/volume-18.nii
+Training_Batch_1/volume-19.nii
+Training_Batch_1/volume-2.nii
+Training_Batch_1/volume-20.nii
+Training_Batch_1/volume-21.nii
+Training_Batch_1/volume-22.nii
+Training_Batch_1/volume-23.nii
+Training_Batch_1/volume-24.nii
+Training_Batch_1/volume-25.nii
+Training_Batch_1/volume-26.nii
+Training_Batch_1/volume-27.nii
+Training_Batch_1/volume-3.nii
+Training_Batch_1/volume-4.nii
+Training_Batch_1/volume-5.nii
+Training_Batch_1/volume-6.nii
+Training_Batch_1/volume-7.nii
+Training_Batch_1/volume-8.nii
+Training_Batch_1/volume-9.nii
+Training_Batch_2/volume-100.nii
+Training_Batch_2/volume-101.nii
+Training_Batch_2/volume-102.nii
+Training_Batch_2/volume-103.nii
+Training_Batch_2/volume-104.nii
+Training_Batch_2/volume-105.nii liver
+Training_Batch_2/volume-106.nii liver
+Training_Batch_2/volume-107.nii
+Training_Batch_2/volume-108.nii
+Training_Batch_2/volume-109.nii
+Training_Batch_2/volume-110.nii
+Training_Batch_2/volume-111.nii
+Training_Batch_2/volume-112.nii
+Training_Batch_2/volume-113.nii
+Training_Batch_2/volume-114.nii liver
+Training_Batch_2/volume-115.nii liver
+Training_Batch_2/volume-116.nii
+Training_Batch_2/volume-117.nii
+Training_Batch_2/volume-118.nii
+Training_Batch_2/volume-119.nii liver
+Training_Batch_2/volume-120.nii
+Training_Batch_2/volume-121.nii
+Training_Batch_2/volume-122.nii
+Training_Batch_2/volume-123.nii
+Training_Batch_2/volume-124.nii
+Training_Batch_2/volume-125.nii
+Training_Batch_2/volume-126.nii
+Training_Batch_2/volume-127.nii
+Training_Batch_2/volume-128.nii
+Training_Batch_2/volume-129.nii
+Training_Batch_2/volume-130.nii
+Training_Batch_2/volume-28.nii
+Training_Batch_2/volume-29.nii
+Training_Batch_2/volume-30.nii
+Training_Batch_2/volume-31.nii
+Training_Batch_2/volume-32.nii liver
+Training_Batch_2/volume-33.nii
+Training_Batch_2/volume-34.nii liver
+Training_Batch_2/volume-35.nii
+Training_Batch_2/volume-36.nii
+Training_Batch_2/volume-37.nii
+Training_Batch_2/volume-38.nii liver
+Training_Batch_2/volume-39.nii
+Training_Batch_2/volume-40.nii
+Training_Batch_2/volume-41.nii liver
+Training_Batch_2/volume-42.nii
+Training_Batch_2/volume-43.nii
+Training_Batch_2/volume-44.nii
+Training_Batch_2/volume-45.nii outlier
+Training_Batch_2/volume-46.nii
+Training_Batch_2/volume-47.nii liver
+Training_Batch_2/volume-48.nii
+Training_Batch_2/volume-49.nii
+Training_Batch_2/volume-50.nii
+Training_Batch_2/volume-51.nii
+Training_Batch_2/volume-52.nii
+Training_Batch_2/volume-53.nii
+Training_Batch_2/volume-54.nii
+Training_Batch_2/volume-55.nii outlier
+Training_Batch_2/volume-56.nii
+Training_Batch_2/volume-57.nii
+Training_Batch_2/volume-58.nii
+Training_Batch_2/volume-59.nii
+Training_Batch_2/volume-60.nii
+Training_Batch_2/volume-61.nii
+Training_Batch_2/volume-62.nii
+Training_Batch_2/volume-63.nii outlier
+Training_Batch_2/volume-64.nii
+Training_Batch_2/volume-65.nii
+Training_Batch_2/volume-66.nii
+Training_Batch_2/volume-67.nii
+Training_Batch_2/volume-68.nii
+Training_Batch_2/volume-69.nii
+Training_Batch_2/volume-70.nii
+Training_Batch_2/volume-71.nii
+Training_Batch_2/volume-72.nii
+Training_Batch_2/volume-73.nii
+Training_Batch_2/volume-74.nii
+Training_Batch_2/volume-75.nii
+Training_Batch_2/volume-76.nii
+Training_Batch_2/volume-77.nii
+Training_Batch_2/volume-78.nii
+Training_Batch_2/volume-79.nii
+Training_Batch_2/volume-80.nii
+Training_Batch_2/volume-81.nii
+Training_Batch_2/volume-82.nii
+Training_Batch_2/volume-83.nii
+Training_Batch_2/volume-84.nii
+Training_Batch_2/volume-85.nii
+Training_Batch_2/volume-86.nii
+Training_Batch_2/volume-87.nii liver
+Training_Batch_2/volume-88.nii
+Training_Batch_2/volume-89.nii liver
+Training_Batch_2/volume-90.nii
+Training_Batch_2/volume-91.nii liver
+Training_Batch_2/volume-92.nii
+Training_Batch_2/volume-93.nii
+Training_Batch_2/volume-94.nii
+Training_Batch_2/volume-95.nii
+Training_Batch_2/volume-96.nii
+Training_Batch_2/volume-97.nii
+Training_Batch_2/volume-98.nii
+Training_Batch_2/volume-99.nii

@@ -71,6 +71,9 @@ def add_arguments(parser):
     group.add_argument("--triplet",
                        action="store_true",
                        required=False, help="Use triplet as inputs")
+    group.add_argument("--quintuplet",
+                       action="store_true",
+                       required=False, help="Use quintuplet as inputs")
     group.add_argument("--resize_for_batch",
                        action="store_true",
                        required=False, help="Resize image to the same shape for batching")
@@ -609,10 +612,20 @@ def _flat_map_fn_multi_channels(x, y, args):
             concat_list = (new_images[:-2], x["images"], new_images[2:])
         image_multi_channels = tf.concat(concat_list, axis=-1)
 
-    images = Dataset.from_tensor_slices(image_multi_channels)
-    labels = Dataset.from_tensor_slices(y)
-    names = Dataset.from_tensors(x["names"]).repeat(repeat_times)
-    pads = Dataset.from_tensors(x["pads"]).repeat(repeat_times)
+    if args.guide == "first":
+        images = Dataset.from_tensor_slices(image_multi_channels)
+        labels = Dataset.from_tensor_slices(y)
+        names = Dataset.from_tensors(x["names"]).repeat(repeat_times)
+        pads = Dataset.from_tensors(x["pads"]).repeat(repeat_times)
+    else:   # "middle"
+        images = Dataset.from_tensor_slices(tf.concat((image_multi_channels,
+                                                       tf.reverse(image_multi_channels, [0])), axis=0))
+        labels = Dataset.from_tensor_slices(tf.concat((y, tf.reverse(y, [0])), axis=0))
+        names = Dataset.from_tensors(x["names"]).repeat(repeat_times)
+        names_rev = Dataset.from_tensors(tf.string_join([x["names"],
+                                                         tf.constant(".rev", tf.string)])).repeat(repeat_times)
+        names = names.concatenate(names_rev)
+        pads = Dataset.from_tensors(x["pads"]).repeat(repeat_times * 2)
 
     def map_fn(image, label, name, pad, *ex_args):
         features = {"images": image,
@@ -625,7 +638,7 @@ def _flat_map_fn_multi_channels(x, y, args):
             return features, label
 
     if args.resize_for_batch:
-        bboxes = Dataset.from_tensors(x["bboxes"]).repeat(repeat_times)
+        bboxes = Dataset.from_tensors(x["bboxes"]).repeat(repeat_times * (1 if args.guide == "first" else 2))
         return Dataset.zip((images, labels, names, pads, bboxes)).map(map_fn)
 
     return Dataset.zip((images, labels, names, pads)).map(map_fn)

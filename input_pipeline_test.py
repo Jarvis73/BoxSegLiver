@@ -48,6 +48,11 @@ def add_arguments(parser):
     group.add_argument("--use_fewer_guide",
                        action="store_true",
                        required=False, help="Use fewer guide for evaluation")
+    group.add_argument("--guide",
+                       type=str,
+                       default="first",
+                       choices=["first", "middle"],
+                       required=False, help="Generate guide from which slice")
 
 
 class TestInputPipeline(unittest.TestCase):
@@ -165,7 +170,8 @@ class TestInputPipeline(unittest.TestCase):
         sys.argv.extend([
             "--mode", "eval",
             "--triplet",
-            "--use_spatial_guide",
+            "--use_spatial_guide", "--use_fewer_guide",
+            "--guide", "middle"
         ])
         self.args = self.parser.parse_args()
         print(self.args)
@@ -173,25 +179,31 @@ class TestInputPipeline(unittest.TestCase):
         dataset = input_pipeline.get_multi_channels_dataset_for_eval(self.records_3d, self.args)
         inputs = dataset.make_one_shot_iterator().get_next("Inputs")
         cnt = 0
+        cnt2 = -1
         while True:
             features, labels = self.sess.run(inputs)
             print(features["images"].shape)
-            # print(features["name"])
+            print(features["names"][0])
             # print(features["id"])
             print(labels.shape)
             # print(features["images"].max(), features["images"].min())
             # print(labels.max(), labels.min())
-            plt.subplot(231)
-            plt.imshow(features["images"][0, ..., 0], cmap="gray")
-            plt.subplot(232)
-            plt.imshow(features["images"][0, ..., 1], cmap="gray")
-            plt.subplot(233)
-            plt.imshow(features["images"][0, ..., 2], cmap="gray")
-            plt.subplot(234)
-            plt.imshow(features["images"][0, ..., 3], cmap="gray")
-            plt.subplot(235)
-            plt.imshow(labels[0], cmap="gray")
-            plt.show()
-            cnt += 1
-            if cnt > 2:
+            if cnt2 < 0:
+                cnt2 = features["bboxes"][0][2] + 1
+            for i in range(8):
+                plt.subplot(231)
+                plt.imshow(features["images"][i, ..., 0], cmap="gray")
+                plt.subplot(232)
+                plt.imshow(features["images"][i, ..., 1], cmap="gray")
+                plt.title("{}".format(cnt2))
+                plt.subplot(233)
+                plt.imshow(features["images"][i, ..., 2], cmap="gray")
+                plt.subplot(234)
+                plt.imshow(features["images"][i, ..., 3], cmap="gray")
+                plt.subplot(235)
+                plt.imshow(labels[i], cmap="gray")
+                plt.show()
+                cnt2 += 1
+            if cnt > 16:
                 break
+            cnt += 1

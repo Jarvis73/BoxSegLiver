@@ -60,7 +60,7 @@ def _custom_tf_logger(args):
     # Set custom logger
     log_dir = Path(args.model_dir) / "logs"
     if not log_dir.exists():
-        log_dir.mkdir(exist_ok=True)
+        log_dir.mkdir(parents=True, exist_ok=True)
 
     log_file = log_dir / "{}_{}".format(args.mode, args.tag)
     logging._logger = create_logger(log_file=log_file, with_time=True,

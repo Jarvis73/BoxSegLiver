@@ -109,7 +109,12 @@ venv.bak/
 .idea/
 
 # project settings
-data/*/
+data/LiTS/*
+!data/LiTS/trainval.txt
+!data/LiTS/k_folds.txt
 logs/
 *deprecated*
 model_dir/
+run_scripts/*
+!run_scripts/004_triplet.sh
+!run_scripts/005_triplet_sg_wd.sh

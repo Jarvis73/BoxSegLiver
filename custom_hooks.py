@@ -275,16 +275,19 @@ class FeedGuideHook(session_run_hook.SessionRunHook):
             return run_context.request_stop()
         else:
             new_case = self.features_val["names"][0].decode("utf-8")
-            if new_case != self.cur_case:
+            if self.cur_case != new_case:
+                # Finish a case
                 self._save_guide()
+                # Update states with next case
                 self.cur_case = new_case
                 self.bbox = self.features_val["bboxes"][0]
-
-        self.features_val["images"][0, ..., -1] = np.maximum(
-            self.features_val["images"][0, ..., -1],
-            get_gd_image_multi_objs(predictions["TumorPred"][0, ..., 0],
-                                    center_perturb=0., stddev_perturb=0.))
-        self.guides.append(self.features_val["images"][0, ..., -1])
+            else:
+                # Update guide with last prediction
+                self.features_val["images"][0, ..., -1] = np.maximum(
+                    self.features_val["images"][0, ..., -1],
+                    get_gd_image_multi_objs(predictions["TumorPred"][0, ..., 0],
+                                            center_perturb=0., stddev_perturb=0.))
+            self.guides.append(self.features_val["images"][0, ..., -1])
 
     def _save_guide(self):
         from utils import array_kits as arr_ops
@@ -299,14 +302,18 @@ class FeedGuideHook(session_run_hook.SessionRunHook):
         img_array = ndi.zoom(img_array, scales, order=1)
         img_array = (img_array * 255).astype(np.int16)
 
-        header = self.img_reader.header(self.cur_case)
+        header = self.img_reader.header(self.cur_case.replace(".rev", ""))
 
-        cur_case = Path(self.cur_case)
+        cur_case = Path(self.cur_case.replace(".rev", ""))
         case_name = cur_case.name.replace("volume", "guide") + ".gz"
         save_path = Path(self.model_dir) / "spatial_guide"
         if not save_path.exists():
-            save_path.mkdir(exist_ok=True)
-        save_path = save_path / case_name
+            save_path.mkdir(parents=True, exist_ok=True)
+        if self.cur_case.endswith(".rev"):
+            save_path = save_path / case_name.replace("guide", "rev-guide")
+            img_array = np.flip(img_array, axis=0)
+        else:
+            save_path = save_path / case_name
 
         pad_with = tuple(zip(self.bbox[2::-1], np.array(header.shape) - self.bbox[:2:-1] - 1))
         img_array = np.pad(img_array, pad_with, mode="constant", constant_values=0)

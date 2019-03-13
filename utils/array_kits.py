@@ -364,7 +364,8 @@ def create_gaussian_distribution(shape, center, stddev):
     return np.clip(d, 0, 1).astype(np.float32)
 
 
-def get_gd_image_single_obj(labels, center_perturb=0.2, stddev_perturb=0.4, blank_prob=0, partial=False):
+def get_gd_image_single_obj(labels, center_perturb=0.2, stddev_perturb=0.4, blank_prob=0,
+                            partial=False, partial_slice="first"):
     """
     Get gaussian distribution image with some perturbation. All points assigned 1 are considered
     to be the same object.
@@ -383,6 +384,8 @@ def get_gd_image_single_obj(labels, center_perturb=0.2, stddev_perturb=0.4, blan
         Probability of returning a blank image(which means no gaussian distribution guide)
     partial: bool
         For test mode. If true only first slice has spatial guide for each tumor
+    partial_slice: str
+        Which slice to annotate spatial guide when partial is True. ["first", "middle"] are supported.
 
     Returns
     -------
@@ -390,6 +393,9 @@ def get_gd_image_single_obj(labels, center_perturb=0.2, stddev_perturb=0.4, blan
         Gaussian distribution image
 
     """
+    if partial_slice not in ["first", "middle"]:
+        raise ValueError("Only support `first` and `middle`, got {}".format(partial_slice))
+
     labels = np.asarray(labels, dtype=np.float32)
     ndim = labels.ndim
     if partial and ndim != 3:
@@ -401,7 +407,12 @@ def get_gd_image_single_obj(labels, center_perturb=0.2, stddev_perturb=0.4, blan
 
     idx = 0
     if partial:
-        idx = np.where(np.count_nonzero(labels, axis=(1, 2)) > 0)[0][0]
+        indices = np.where(np.count_nonzero(labels, axis=(1, 2)) > 0)[0]
+        if partial_slice == "first":
+            idx = indices[0]
+        else:   # partial_slice == "middle"
+            # The case of labels == 0 is excluded, and here len(indices) >= 1 is satisfied.
+            idx = indices[(len(indices) - 1) // 2]
         obj_lab = labels[idx]
         obj_ndim = ndim - 1
     else:
@@ -436,6 +447,7 @@ def get_gd_image_multi_objs(labels,
                             max_fakes=4,
                             fake_range_value=0,
                             ret_bbox=False,
+                            partial_slice="first",
                             **kwargs):
     """
     Get gaussian distribution image with some perturbation. Only connected points assigned 1
@@ -471,6 +483,8 @@ def get_gd_image_multi_objs(labels,
         A integer where fake centers chosen from
     ret_bbox: bool
         Whether or not return bboxes of the objects
+    partial_slice: str
+        Which slice to annotate spatial guide when partial is True. ["first", "middle"] are supported.
     kwargs: dict
         Parameters passed to bbox_from_mask()
 
@@ -498,7 +512,8 @@ def get_gd_image_multi_objs(labels,
     # Compute moments for each object
     gds, stds = [], []
     for obj_image in obj_images:
-        gd, _, std = get_gd_image_single_obj(obj_image, center_perturb, stddev_perturb, blank_prob, partial)
+        gd, _, std = get_gd_image_single_obj(obj_image, center_perturb, stddev_perturb, blank_prob,
+                                             partial, partial_slice)
         gds.append(gd)
         stds.append(std)
 

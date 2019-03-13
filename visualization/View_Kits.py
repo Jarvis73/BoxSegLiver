@@ -313,7 +313,7 @@ class ComparePrediction(HasTraits):
                 self.refresh()
 
     def reset_index(self):
-        self.cur_ind = self.adap.get_min_idx()
+        self.cur_ind = self.adap.get_min_idx(self.gesture)
         self.total_ind = self.adap.get_num_slices(self.gesture) - 1
 
     def image_show(self, ind):
