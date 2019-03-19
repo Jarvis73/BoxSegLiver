@@ -202,6 +202,8 @@ class BestCheckpointSaverHook(session_run_hook.SessionRunHook):
         for key, val in self._better_result.items():
             if isinstance(val, np.int64):
                 val = int(val)
+            else:
+                val = float(val)
             res[key] = val
 
         return res

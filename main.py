@@ -27,7 +27,7 @@ import input_pipeline
 import custom_evaluator
 from utils.logger import create_logger
 from custom_estimator import CustomEstimator
-from custom_evaluator import EvaluateVolume
+from custom_evaluator import EvaluateVolume, EvaluateSlice
 from custom_hooks import LogLearningRateHook
 
 ModeKeys = tf.estimator.ModeKeys
@@ -87,7 +87,8 @@ def main(argv):
         params.update(models.get_model_params(args))
         params.update(solver.get_solver_params(args))
         if not args.train_without_eval:
-            params.update(custom_evaluator.get_eval_params(eval_steps=args.eval_steps,
+            params.update(custom_evaluator.get_eval_params(evaluator="Volume" if args.eval_3d else "Slice",
+                                                           eval_steps=args.eval_steps,
                                                            primary_metric=args.primary_metric,
                                                            secondary_metric=args.secondary_metric))
 
@@ -114,8 +115,7 @@ def main(argv):
 
         estimator = CustomEstimator(models.model_fn, args.model_dir, run_config, params)
 
-        predict_keys = None
-        evaluator = EvaluateVolume(estimator, predict_keys)
+        evaluator = EvaluateVolume(estimator)
 
         estimator.evaluate(evaluator,
                            input_pipeline.input_fn,

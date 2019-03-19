@@ -30,9 +30,12 @@ class BaseNet(object):
         self._mode = ModeKeys.TRAIN
         self._args = args
         self._inputs = {}
+        # self._layers saves some useful network layer outputs.
+        # Keys that ends with `Pred` will be collected in model_fn for generating prediction dict
         self._layers = {}
         self._image_summaries = {}
         self.classes = ["Background"]
+        self.metrics_dict = {}
 
         self._is_training = self.mode == ModeKeys.TRAIN
         self._feed_dict = {}
@@ -154,8 +157,6 @@ class BaseNet(object):
         elif self.args.loss_weight_type == "proportion":
             if self.args.loss_proportion_decay > 0:
                 return {"proportion_decay": self.args.loss_proportion_decay}
-        if self.args.only_tumor:
-            return {"livers": self._inputs["livers"]}
         return {}
 
     def __call__(self, inputs, mode, *args, **kwargs):
@@ -173,8 +174,8 @@ class BaseNet(object):
         if self.mode == ModeKeys.TRAIN:
             loss = self._build_loss()
             self._build_metrics()
-
-            # Call _build_summaries() after _build_loss() to summarize losses and _build_metrics() to summarize metrics
+            # Call _build_summaries() after _build_loss() to summarize losses and
+            # _build_metrics() to summarize metrics
             self._build_summaries()
 
             return loss

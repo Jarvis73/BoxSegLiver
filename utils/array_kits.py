@@ -221,6 +221,10 @@ def extract_region(mask, align=1, padding=0, min_bbox_shape=None):
     Returns
     -------
     post_bbox: final bounding box
+
+    Notes
+    -----
+    With large align value, returned bbox may exceed the image shape.
     """
     pattern = "Length of `{:s}` should be match with dimension of the image."
 
@@ -240,16 +244,29 @@ def extract_region(mask, align=1, padding=0, min_bbox_shape=None):
     if min_bbox_shape is None:
         min_bbox_shape = (1, ) * ndim
     pre_bbox = bbox_from_mask(mask, mask_values=1, min_shape=min_bbox_shape[::-1])
+
+    img_shape = np.array(mask.shape)
+    # padding
+    pre_bbox[:ndim] = np.maximum(0, pre_bbox[:ndim] - padding)
+    pre_bbox[ndim:] = np.minimum(pre_bbox[ndim:] + padding, img_shape[::-1] - 1)
+
+    # compute center
     ctr = (pre_bbox[:ndim] + pre_bbox[ndim:]) / 2
-    liver_shape = pre_bbox[ndim:] - pre_bbox[:ndim] + 1     # (x, y) / (x, y, z)
+    region_shape = pre_bbox[ndim:] - pre_bbox[:ndim] + 1     # (x, y) / (x, y, z)
 
-    needed_shape = np.ceil(liver_shape / align).astype(np.int32) * align
+    # align from point1
+    needed_shape = np.ceil(region_shape / align).astype(np.int32) * align
     point1 = np.maximum(0, np.int32(ctr - (needed_shape - 1) / 2))
-    point2 = np.minimum(np.array(mask.shape)[::-1] - 1, point1 + needed_shape - 1)
-    point1 = np.maximum(0, point1 - padding)
-    point2 = np.minimum(np.array(mask.shape)[::-1] - 1, point2 + padding)
-    post_bbox = np.concatenate((point1, point2), axis=0)
+    point2 = np.minimum(img_shape[::-1] - 1, point1 + needed_shape - 1)
 
+    # align from point2
+    if not np.all((point2 - point1 + 1) % align == 0):
+        point1 = point2 + 1 - needed_shape
+        if np.any(point1 < 0):
+            print("\nWarning: bbox aligns with {} failed! point1 {} point2 {}\n"
+                  .format(align, point1, point2))
+
+    post_bbox = np.concatenate((point1, point2), axis=0)
     return post_bbox
 
 
@@ -711,6 +728,27 @@ def distinct_binary_object_correspondences(result,
         one_to_many = one_to_many[1:]
 
     return labeled_res, labeled_ref, n_res, n_ref, mapping
+
+
+def find_tp(reference, split=False, connectivity=1):
+    reference = np.atleast_1d(reference.astype(np.bool))
+    struct = ndi.morphology.generate_binary_structure(reference.ndim, connectivity)
+
+    # label distinct binary objects
+    labeled_ref, n_ref = ndi.label(reference, struct)
+    if not split:
+        slices = ndi.find_objects(labeled_ref)
+        tp_lists = []
+        for slice_ in slices:
+            tp_lists.append([x.start for x in slice_] + [x.stop for x in slice_])
+    else:
+        split_slices = [ndi.find_objects(s) for s in labeled_ref]
+        tp_lists = []
+        for slices in split_slices:
+            tp_lists.append([[x.start for x in slice_] + [x.stop for x in slice_]
+                             for slice_ in slices if slice_ is not None])
+
+    return tp_lists
 
 
 def find_tp_and_fp(result, reference, connectivity=1):

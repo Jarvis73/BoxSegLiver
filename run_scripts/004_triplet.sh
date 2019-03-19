@@ -15,23 +15,18 @@ if [ "$TASK" == "train" ]; then
         --classes Liver Tumor \
         --dataset_for_train LiTS_Train_Tumor_Triplet.json \
         --dataset_for_eval LiTS_Eval_Tumor.json \
-        --zoom --noise --flip \
-        --zoom_scale 1.2 \
-        --im_height 256 \
-        --im_width 256 \
-        --im_channel 3 \
+        --zoom --noise --flip --zoom_scale 1.2 \
+        --im_height 256 --im_width 256 --im_channel 3 \
         --resize_for_batch \
         --num_of_total_steps 400000 \
-        --lr_decay_step 400001 \
         --primary_metric "Tumor/Dice" \
         --secondary_metric "Liver/Dice" \
         --loss_weight_type numerical \
         --loss_numeric_w 0.2 0.4 4.4 \
-        --eval_steps 2500 \
-        --batch_size 8 \
-        --weight_init "xavier" \
         --weight_decay_rate 0 \
-        --triplet \
+        --learning_policy custom_step \
+        --lr_decay_boundaries 200000 300000 --lr_custom_values 0.003 0.0003 0.0001 \
+        --input_group 3 \
         $@
 elif [ "$TASK" == "eval" ]; then
     PYTHONPATH=${PROJECT_DIR} CUDA_VISIBLE_DEVICES=${GPU_ID} python ./main.py \
@@ -40,14 +35,11 @@ elif [ "$TASK" == "eval" ]; then
         --model UNet \
         --classes Liver Tumor \
         --dataset_for_eval LiTS_Eval_Tumor.json \
-        --im_height 256 \
-        --im_width 256 \
-        --im_channel 3 \
+        --im_height 256 --im_width 256 --im_channel 3 \
         --resize_for_batch \
         --primary_metric "Tumor/Dice" \
         --secondary_metric "Liver/Dice" \
         --batch_size 8 \
-        --weight_init "xavier" \
         --triplet \
         $@
 fi

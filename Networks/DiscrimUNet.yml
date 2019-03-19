@@ -3,3 +3,6 @@ num_down_samples: 4
 ret_prob: false
 ret_pred: true
 pooling_size: 8
+anchor_scales: [0, 1, 2, 3]
+anchor_ratios: [0.5, 1, 2]
+cls_layer_channels: 512

@@ -212,7 +212,7 @@ class SegViewerAdapter(object):
 
 def main():
     adapter = SegViewerAdapter(
-        Path(__file__).parent / "model_dir/007_atrous_unet/prediction",
+        Path(__file__).parent / "model_dir/004_triplet/prediction",
         ["D:/DataSet/LiTS/Training_Batch_1", "D:/DataSet/LiTS/Training_Batch_2"],
         Path("D:/DataSet/LiTS/liver_bbox_nii.pkl")
     )

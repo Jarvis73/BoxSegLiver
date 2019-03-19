@@ -65,3 +65,5 @@ def split_separable_conv2d(inputs,
             stddev=pointwise_weights_initializer_stddev),
         weights_regularizer=slim.l2_regularizer(weight_decay),
         scope=scope + '_pointwise')
+
+

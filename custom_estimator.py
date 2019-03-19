@@ -46,6 +46,8 @@ from custom_hooks import IteratorStringHandleHook
 from custom_hooks import BestCheckpointSaverHook
 from custom_hooks import FeedGuideHook
 
+EVAL_WHILE_TRAIN = "eval_while_train"
+
 
 def _load_global_step_from_checkpoint_dir(checkpoint_dir):
     try:
@@ -260,11 +262,15 @@ class CustomEstimator(object):
             random_seed.set_random_seed(self._config.tf_random_seed)
             self._create_and_assert_global_step(g)
             features, labels, input_hooks = self._get_features_and_labels_from_input_fn(
-                input_fn, model_fn_lib.ModeKeys.PREDICT)
+                input_fn, model_fn_lib.ModeKeys.EVAL)
 
             estimator_spec = self._call_model_fn(
                 features, labels, model_fn_lib.ModeKeys.PREDICT, self.config)
 
+            # Evaluating volume don't need metrics in model, we use XXXPred to generate 3D predict
+            if not predict_keys:
+                predict_keys = [x for x in estimator_spec.predictions
+                                if x not in self.params["model"].metrics_dict]
             predictions = self._extract_keys(estimator_spec.predictions, predict_keys)
             all_hooks = list(input_hooks)
             all_hooks.extend(hooks)
@@ -314,6 +320,10 @@ class CustomEstimator(object):
             estimator_spec = self._call_model_fn(
                 features_ph, labels_ph, model_fn_lib.ModeKeys.PREDICT, self.config)
 
+            # Evaluating volume don't need metrics in model, we use XXXPred to generate 3D predict
+            if not predict_keys:
+                predict_keys = [x for x in estimator_spec.predictions
+                                if x not in self.params["model"].metrics_dict]
             predictions = self._extract_keys(estimator_spec.predictions, predict_keys)
             feed_guide_hook.predictions = predictions
 
@@ -339,8 +349,8 @@ class CustomEstimator(object):
                         for i in range(self._extract_batch_length(preds_evaluated)):
                             yield {key: value[i] for key, value in six.iteritems(preds_evaluated)}
 
-    def predict_with_session(self, session, steps=None, yield_single_examples=False):
-        predictions = self._predict_keys
+    def predict_with_session(self, session, predict_keys=None, steps=None, yield_single_examples=False):
+        predictions = self._extract_keys(self._predict_keys, predict_keys)
         pred_feed_dict = self._params["model"].get_eval_feed_dict()
         if self._train_with_eval:
             pred_feed_dict = _add_key_value(pred_feed_dict, self.handler, self.dataset_handle_hook.eval_handle)
@@ -460,7 +470,7 @@ class CustomEstimator(object):
         return parse_input_fn_result(
             True,
             [self._call_input_fn(input_fn, model_fn_lib.ModeKeys.TRAIN),  # Keep order: [train, eval]
-             self._call_input_fn(input_fn, model_fn_lib.ModeKeys.EVAL)],
+             self._call_input_fn(input_fn, EVAL_WHILE_TRAIN)],
             handler)
 
     def _train_model(self, input_fn, hooks, saving_listeners, save_best_ckpt):
@@ -601,13 +611,13 @@ class CustomEstimator(object):
             secondary_metric = self._params.get("secondary_metric", None)
 
             # We must construct Evaluator inside a graph scope
-            evaluator = EvaluatorCls(self, self._params["args"].metrics_eval, **eval_kwargs)
+            evaluator = EvaluatorCls(self, **eval_kwargs)
 
             worker_hooks.append(
                 BestCheckpointSaverHook(
                     evaluator=evaluator,
                     checkpoint_dir=self._model_dir,
-                    compare_fn=partial(EvaluatorCls.compare,
+                    compare_fn=partial(evaluator.compare,
                                        primary_metric=primary_metric,
                                        secondary_metric=secondary_metric),
                     tag=self._params["args"].tag,

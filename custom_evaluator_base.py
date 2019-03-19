@@ -18,14 +18,12 @@
 class EvaluateBase(object):
     """ Base class for custom evaluator """
 
-    def __init__(self, model, predict_keys=None, **kwargs):
+    def __init__(self, model, **kwargs):
         """
         Parameters
         ----------
         model: CustomEstimator
             CustomEstimator instance
-        predict_keys: list of str
-            Passed to self.model.predict
         kwargs: dict
             * merge_tumor_to_liver: bool, if `Tumor` and `Liver` in predictions (default True)
             * largest: bool, get largest component for liver, if `Liver` in predictions (default True)
@@ -34,7 +32,7 @@ class EvaluateBase(object):
         self.model = model
         self.params = model.params
         self._metrics = model.params["args"].metrics_eval
-        self._predict_keys = predict_keys
+        self._predict_keys = self.model._predict_keys
 
     def evaluate_with_session(self, session):
         """
@@ -77,8 +75,8 @@ class EvaluateBase(object):
         """
         pass
 
-    @staticmethod
-    def compare(cur_result,
+    def compare(self,
+                cur_result,
                 ori_result,
                 primary_metric=None,
                 secondary_metric=None):

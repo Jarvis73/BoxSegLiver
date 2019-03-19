@@ -93,6 +93,12 @@ def check_args(args, parser):
         args.batch_size = 1
         logging.info("Using fewer guides will force batch_size = 1.")
 
+    # TODO(ZJW): For compatibility
+    if args.triplet:
+        if args.input_group == 1:
+            args.input_group = 3
+        args.triplet = False
+
 
 def fill_default_args(args):
     if not args.model_dir:

@@ -175,7 +175,7 @@ def random_zoom_in(image, label=None, max_scale=1.5, seed_scale=None, seed_shift
         return cropped_image, cropped_label
 
 
-def random_noise(image, scale, seed=None, name=None):
+def random_noise(image, scale, mask=None, seed=None, name=None):
     """
     Add a random noise tensor to image.
 
@@ -186,6 +186,8 @@ def random_noise(image, scale, seed=None, name=None):
     scale: Scalar
         noise scale.
         Notice that we use random_uniform to generate noise tensor.
+    mask: Tensor
+        noise mask
     seed: Scalar
         random seed
     name: str
@@ -199,10 +201,14 @@ def random_noise(image, scale, seed=None, name=None):
     with tf.name_scope(name, "random_noise", [image, scale]):
         shape = tf.shape(image)
         abs_scale = tf.abs(scale)
-        rd_tensor = tf.random_uniform(shape, -abs_scale, abs_scale, seed=seed)
-        noised = tf.add(image, rd_tensor, name="NoisedImage")
+        rd_tensor = tf.random_uniform(shape, -abs_scale, abs_scale, seed=seed,
+                                      dtype=image.dtype)
+        if mask is None:
+            new_image = tf.add(image, rd_tensor, name="NoisedImage")
+        else:
+            new_image = tf.add(image, rd_tensor * mask, name="NoisedImage")
 
-        return noised
+        return new_image
 
 
 def random_flip_left_right(image, label=None, seed=None):

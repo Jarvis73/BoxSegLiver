@@ -1,0 +1,8 @@
+{
+  "dataset": [
+    "LiTS/records/cls-0tp-1-of-5.tfrecord",
+    "LiTS/records/cls-0tp-2-of-5.tfrecord",
+    "LiTS/records/cls-0tp-4-of-5.tfrecord",
+    "LiTS/records/cls-0tp-5-of-5.tfrecord"
+  ]
+}

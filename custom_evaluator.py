@@ -35,7 +35,7 @@ def add_arguments(parser):
                        required=False, help="Save checkpoint with best results")
     group.add_argument("--eval_steps",
                        type=int,
-                       default=2500,
+                       default=5000,
                        required=False, help="Evaluate pre several steps (default: %(default)d)")
     group.add_argument("--primary_metric",
                        type=str,
@@ -68,15 +68,22 @@ def add_arguments(parser):
                        type=int,
                        default=0,
                        required=False, help="Skip some cases for evaluating determined case")
+    group.add_argument("--eval_3d",
+                       action="store_true",
+                       required=False, help="Evaluate when training in 2D slices or 3D volume."
+                                            "Default in 2D slices")
 
 
-def get_eval_params(eval_steps=2500,
+def get_eval_params(evaluator="Volume",
+                    eval_steps=2500,
                     largest=True,
                     merge_tumor_to_liver=True,
                     primary_metric=None,
                     secondary_metric=None):
+    if evaluator not in ["Volume", "Slice"]:
+        raise ValueError("Unsupported evaluator: {}. Must be [Volume, Slice]".format(evaluator))
     return {
-        "evaluator": EvaluateVolume,
+        "evaluator": eval("Evaluate" + evaluator),
         "eval_steps": eval_steps,
         "eval_kwargs": {"merge_tumor_to_liver": merge_tumor_to_liver, "largest": largest},
         "primary_metric": primary_metric,
@@ -85,27 +92,30 @@ def get_eval_params(eval_steps=2500,
 
 
 class EvaluateVolume(EvaluateBase):
-    """ Evaluate Estimator model by volume """
-    def __init__(self, model, predict_keys=None, **kwargs):
+    """ Evaluate Estimator model by volume
+
+    This class is for liver and tumor segmentation.
+    Inherit this class and rewrite self._evaluate_case() for custom dataset.
+    """
+    def __init__(self, model, **kwargs):
         """
         Parameters
         ----------
         model: CustomEstimator
             CustomEstimator instance
-        predict_keys: list of str or None
-            Passed to self.model.predict
         kwargs: dict
             * merge_tumor_to_liver: bool, if `Tumor` and `Liver` in predictions (default True)
             * largest: bool, get largest component for liver, if `Liver` in predictions (default True)
         """
         if not isinstance(model, CustomEstimator):
             raise TypeError("model need a custom_estimator.CustomEstimator instance")
-        super(EvaluateVolume, self).__init__(model, predict_keys, **kwargs)
+        super(EvaluateVolume, self).__init__(model, **kwargs)
 
         self.model = model
-        self._metric_values = {"{}/{}".format(cls, met): []
-                               for cls in self.classes
-                               for met in self._metrics}
+        # self._metric_values = {"{}/{}".format(cls, met): []
+        #                        for cls in self.classes
+        #                        for met in self._metrics}
+        self._metric_values = defaultdict(list)
         self.img_reader = data_ops.ImageReader()
 
         self.merge_tumor_to_liver = kwargs.get("merge_tumor_to_liver", True)
@@ -126,8 +136,8 @@ class EvaluateVolume(EvaluateBase):
 
     def append_metrics(self, pairs):
         for key, value in pairs.items():
-            if key in self._metric_values:
-                self._metric_values[key].append(value)
+            # if key in self._metric_values:
+            self._metric_values[key].append(value)
 
     def clear_metrics(self):
         for key in self._metric_values:
@@ -137,7 +147,7 @@ class EvaluateVolume(EvaluateBase):
         # process a 3D image slice by slice or patch by patch
         logits3d = defaultdict(list)
         labels3d = defaultdict(list)
-        livers3d = list()
+        bg_masks3d = list()
         self.clear_metrics()
 
         pad = -1
@@ -161,15 +171,16 @@ class EvaluateVolume(EvaluateBase):
                 for c, cls in enumerate(self.classes):
                     logits3d[cls].append(np.squeeze(pred[cls + "Pred"], axis=-1))
                     labels3d[cls].append(pred["Labels_{}".format(c)])
-                    if self.params["args"].only_tumor:
-                        livers3d.append(pred["Livers"])
+                    if "BgMasks" in pred:
+                        bg_masks3d.append(pred["BgMasks"])
             elif cur_case + ".rev" == new_case:
                 # Append reversed batch to another collections
                 for c, cls in enumerate(self.classes):
                     logits3d[cls + "_rev"].append(np.squeeze(pred[cls + "Pred"], axis=-1))
             else:
+                # result = self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox, save)
                 result = self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox, save,
-                                             livers3d=livers3d)
+                                             bg_masks3d=bg_masks3d)
                 self._timer.toc()
                 if verbose:
                     log_str = "Evaluate-{} {}".format(self._timer.calls, Path(cur_case).stem)
@@ -179,13 +190,13 @@ class EvaluateVolume(EvaluateBase):
                 for c, cls in enumerate(self.classes):
                     logits3d[cls].clear()
                     labels3d[cls].clear()
-                    livers3d.clear()
+                    bg_masks3d.clear()
                     logits3d[cls].append(np.squeeze(pred[cls + "Pred"], axis=-1))
                     labels3d[cls].append(pred["Labels_{}".format(c)])
                     if cls + "_rev" in logits3d:
                         logits3d[cls + "_rev"].clear()
-                    if self.params["args"].only_tumor:
-                        livers3d.append(pred["Livers"])
+                    if "BgMasks" in pred:
+                        bg_masks3d.append(pred["BgMasks"])
 
                 if cases is not None and self._timer.calls >= cases:
                     break
@@ -199,14 +210,15 @@ class EvaluateVolume(EvaluateBase):
 
         if cases is None:
             # Final case
+            # result = self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox, save)
             result = self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox, save,
-                                         livers3d=livers3d)
+                                         bg_masks=bg_masks3d)
             self._timer.toc()
             if verbose:
                 log_str = "Evaluate-{} {}".format(self._timer.calls, Path(cur_case).stem)
                 for key, value in result.items():
                     log_str += " {}: {:.3f}".format(key, value)
-                log_str += " {}".format(list(bbox))
+                # log_str += " {}".format(list(bbox))
                 tf.logging.info(log_str + " ({:.3f} secs/case)".format(self._timer.average_time))
         tf.logging.info("Evaluate all the dataset ({} cases) finished! ({:.3f} secs/case)"
                         .format(self._timer.calls, self._timer.average_time))
@@ -223,9 +235,11 @@ class EvaluateVolume(EvaluateBase):
         return results
 
     def evaluate_with_session(self, session=None, cases=None):
-        predicts = self.model.predict_with_session(session, yield_single_examples=False)
+        predicts = [x for x in self._predict_keys
+                    if x not in self.params["model"].metrics_dict]
+        predict_gen = self.model.predict_with_session(session, predicts, yield_single_examples=False)
         tf.logging.info("Begin evaluating ...")
-        return self._evaluate(predicts, cases=cases, verbose=False)
+        return self._evaluate(predict_gen, cases=cases, verbose=False)
 
     def evaluate(self,
                  input_fn,
@@ -233,26 +247,25 @@ class EvaluateVolume(EvaluateBase):
                  hooks=None,
                  checkpoint_path=None,
                  cases=None):
-        del predict_keys
-
         if not self.params["args"].use_fewer_guide:
-            predicts = self.model.predict(input_fn, self._predict_keys, hooks, checkpoint_path,
-                                          yield_single_examples=False)
+            predict_gen = self.model.predict(input_fn, predict_keys, hooks, checkpoint_path,
+                                             yield_single_examples=False)
             tf.logging.info("Begin evaluating ...")
-            return self._evaluate(predicts, cases=cases, verbose=True,
+            return self._evaluate(predict_gen, cases=cases, verbose=True,
                                   save=self.params["args"].save_predict)
         else:
             # Construct model with batch_size = 1
             # Disconnect input pipeline with model pipeline
             self.params["args"].batch_size = 1
-            predicts = self.model.predict_with_guide(input_fn, self._predict_keys, hooks,
-                                                     checkpoint_path, yield_single_examples=False)
+            predict_gen = self.model.predict_with_guide(input_fn, predict_keys, hooks,
+                                                        checkpoint_path, yield_single_examples=False)
             tf.logging.info("Begin evaluating ...")
-            return self._evaluate(predicts, cases=cases, verbose=True,
+            return self._evaluate(predict_gen, cases=cases, verbose=True,
                                   save=self.params["args"].save_predict)
 
     @staticmethod
     def _check_shapes_equal(volume_dict):
+        # Don't use! Just for debug
         ref = {}
         mismatch = {}
         shape = None
@@ -273,7 +286,6 @@ class EvaluateVolume(EvaluateBase):
         # Process a complete volume
         logits3d = {cls: np.concatenate(values) for cls, values in logits3d.items()}
         labels3d = {cls: np.concatenate(values) for cls, values in labels3d.items()}
-        # self._check_shapes_equal(logits3d)
 
         if pad != 0:
             logits3d = {cls: value[:-pad] if not cls.endswith("_rev") else value[pad:]
@@ -288,9 +300,9 @@ class EvaluateVolume(EvaluateBase):
                 logits3d[key] = np.maximum(logits3d[key], np.flip(logits3d[key + "_rev"], axis=0))
 
         livers3d = None
-        if self.params["args"].only_tumor and "livers3d" in kwargs:
-            livers3d = (np.concatenate(kwargs["livers3d"])[:-pad]
-                        if pad != 0 else np.concatenate(kwargs["livers3d"]))
+        if kwargs.get("bg_masks3d", []):
+            livers3d = (np.concatenate(kwargs["bg_masks3d"])[:-pad]
+                        if pad != 0 else np.concatenate(kwargs["bg_masks3d"]))
 
         if bbox is not None:
             # Resize logits3d to the shape of labels3d
@@ -300,8 +312,11 @@ class EvaluateVolume(EvaluateBase):
             scales = np.array(ori_shape) / np.array(cur_shape)
             for c, cls in enumerate(self.classes):
                 logits3d[cls] = ndi.zoom(logits3d[cls], scales, order=0)
-            if livers3d is not None:
-                livers3d = ndi.zoom(livers3d, scales, order=0)
+            # if livers3d is not None:
+            #     livers3d = ndi.zoom(livers3d, scales, order=0)
+            # for c, cls in enumerate(self.classes):
+            #     print(labels3d[cls].shape, scales)
+            #     labels3d[cls] = ndi.zoom(labels3d[cls], scales, order=0)
 
         # Add tumor to liver volume
         if self.merge_tumor_to_liver and "Tumor" in logits3d and "Liver" in logits3d:
@@ -356,39 +371,105 @@ class EvaluateVolume(EvaluateBase):
                             .format(str(save_path.relative_to(save_path.parent.parent.parent))))
         return cur_pairs
 
-    @staticmethod
-    def compare(cur_result,
-                ori_result,
-                primary_metric=None,
-                secondary_metric=None):
-        if not isinstance(cur_result, dict):
-            raise TypeError("`cur_result` should be dict, but got {}".format(type(cur_result)))
-        if not isinstance(ori_result, dict):
-            raise TypeError("`ori_result` should be dict, but got {}".format(type(ori_result)))
-        if set(cur_result) != set(ori_result):
-            raise ValueError("Dicts with different keys can not be compared. "
-                             "cur_result({}) vs ori_result({})"
-                             .format(list(cur_result.keys()), list(ori_result.keys())))
-        if primary_metric and primary_metric not in cur_result:
-            raise KeyError("`primary_metric` not in valid result key")
-        if secondary_metric and secondary_metric not in cur_result:
-            raise KeyError("`secondary_metric` not in valid result key")
-        if primary_metric == secondary_metric:
-            raise ValueError("`primary_metric` can not be equal to `secondary_metric`")
+    def compare(self, *args, **kwargs):
+        return _compare(*args, **kwargs)
 
-        keys = list(cur_result.keys())
-        if primary_metric:
-            keys.remove(primary_metric)
-            keys.insert(0, primary_metric)
-            if secondary_metric:
-                keys.remove(secondary_metric)
-                keys.insert(1, secondary_metric)
 
-        for key in keys:
-            if cur_result[key] > ori_result[key]:
-                return True
-            elif cur_result[key] == ori_result[key]:
-                continue
-            else:
-                return False
-        return False
+class EvaluateSlice(EvaluateBase):
+    """ Evaluate Estimator model by slice """
+
+    def __init__(self, model, **kwargs):
+        """
+        Parameters
+        ----------
+        model: CustomEstimator
+            CustomEstimator instance
+        kwargs: dict
+            * merge_tumor_to_liver: bool, if `Tumor` and `Liver` in predictions (default True)
+            * largest: bool, get largest component for liver, if `Liver` in predictions (default True)
+        """
+        if not isinstance(model, CustomEstimator):
+            raise TypeError("model need a custom_estimator.CustomEstimator instance")
+        super(EvaluateSlice, self).__init__(model, **kwargs)
+
+        self.model = model
+        # self._metric_values = {"{}/{}".format(cls, met): []
+        #                        for cls in self.classes
+        #                        for met in self._metrics}
+        # if self.params["args"].cls_branch and "ClsAcc" in self._predict_keys:
+        #     self._metric_values["ClsAcc"] = []
+        self._metric_values = defaultdict(list)
+
+    @property
+    def classes(self):
+        return self.params["model"].classes[1:]  # Remove background
+
+    @property
+    def metric_values(self):
+        return self._metric_values
+
+    def append_metrics(self, pairs):
+        for key, value in pairs.items():
+            # if key in self._metric_values:
+            self._metric_values[key].append(value)
+
+    def clear_metrics(self):
+        for key in self._metric_values:
+            self._metric_values[key].clear()
+
+    def evaluate_with_session(self, session=None, cases=None):
+        predicts = list(self.params["model"].metrics_dict.keys())
+        tf.logging.info("Begin evaluating 2D ...")
+        predict_gen = self.model.predict_with_session(session, predicts, yield_single_examples=False)
+
+        self.clear_metrics()
+        for pred in predict_gen:
+            self.append_metrics(pred)
+
+        results = {key: np.mean(values) for key, values in self._metric_values.items()}
+        display_str = ""
+        for key, value in results.items():
+            display_str += "{}: {:.3f} ".format(key, value)
+        tf.logging.info(display_str)
+
+        return results
+
+    def compare(self, *args, **kwargs):
+        return _compare(*args, **kwargs)
+
+
+def _compare(cur_result,
+             ori_result,
+             primary_metric=None,
+             secondary_metric=None):
+    if not isinstance(cur_result, dict):
+        raise TypeError("`cur_result` should be dict, but got {}".format(type(cur_result)))
+    if not isinstance(ori_result, dict):
+        raise TypeError("`ori_result` should be dict, but got {}".format(type(ori_result)))
+    if set(cur_result) != set(ori_result):
+        raise ValueError("Dicts with different keys can not be compared. "
+                         "cur_result({}) vs ori_result({})"
+                         .format(list(cur_result.keys()), list(ori_result.keys())))
+    if primary_metric and primary_metric not in cur_result:
+        raise KeyError("`primary_metric` not in valid result key: {}".format(primary_metric))
+    if secondary_metric and secondary_metric not in cur_result:
+        raise KeyError("`secondary_metric` not in valid result key: {}".format(secondary_metric))
+    if primary_metric == secondary_metric:
+        raise ValueError("`primary_metric` can not be equal to `secondary_metric`")
+
+    keys = list(cur_result.keys())
+    if primary_metric:
+        keys.remove(primary_metric)
+        keys.insert(0, primary_metric)
+        if secondary_metric:
+            keys.remove(secondary_metric)
+            keys.insert(1, secondary_metric)
+
+    for key in keys:
+        if cur_result[key] > ori_result[key]:
+            return True
+        elif cur_result[key] == ori_result[key]:
+            continue
+        else:
+            return False
+    return False

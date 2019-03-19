@@ -112,7 +112,10 @@ class ImageReader(object):
                     slices.append(np.zeros(self.shape[1:], dtype=self._decode.dtype))
                 else:
                     slices.append(self._decode[i])
-            return np.concatenate(slices, axis=-1)
+            if self._extend_channel:
+                return np.concatenate(slices, axis=-1)
+            else:
+                return np.stack(slices, axis=-1)
 
     def read(self, file_name, idx=None):
         self._filename = file_name
@@ -233,6 +236,26 @@ def _int64_list_feature(values):
     ))
 
 
+def _float_list_feature(values):
+    """
+    Return a TF-Feature of float_list.
+
+    Parameters
+    ----------
+    values: A scalar or list of values.
+
+    Returns
+    -------
+    A TF-Feature.
+    """
+    if not isinstance(values, Iterable):
+        values = [values]
+
+    return tf.train.Feature(float_list=tf.train.FloatList(
+        value=values
+    ))
+
+
 def _bytes_list_feature(values):
     """
     Return a TF-Feature of bytes
@@ -285,7 +308,10 @@ def image_to_examples(image_reader,
                       split=False,
                       extra_str_info=None,
                       extra_int_info=None,
-                      group="triplet"):
+                      group="triplet",
+                      group_label=False,
+                      mask_image=False,
+                      extra_float_info=None):
     """
     Convert N-D image and label to N-D/(N-1)-D tfexamples.
 
@@ -305,6 +331,9 @@ def image_to_examples(image_reader,
     extra_int_info: dict
     group: str
         none or triplet or quintuplet
+    group_label: bool
+    mask_image: bool
+    extra_float_info: dict
 
     Returns
     -------
@@ -318,12 +347,15 @@ def image_to_examples(image_reader,
         raise RuntimeError("ImageReader need call `read()` first.")
     extra_str_split, extra_str_origin = _check_extra_info_type(extra_str_info)
     extra_int_split, extra_int_origin = _check_extra_info_type(extra_int_info)
+    extra_float_split, extra_float_origin = _check_extra_info_type(extra_float_info)
 
     if split:
         num_slices = image_reader.shape[0]
         for extra_list in extra_str_split.values():
             assert num_slices == len(extra_list), "Length not equal: {} vs {}".format(num_slices, len(extra_list))
         for extra_list in extra_int_split.values():
+            assert num_slices == len(extra_list), "Length not equal: {} vs {}".format(num_slices, len(extra_list))
+        for extra_list in extra_float_split.values():
             assert num_slices == len(extra_list), "Length not equal: {} vs {}".format(num_slices, len(extra_list))
 
         for idx in image_reader.indices:
@@ -336,22 +368,30 @@ def image_to_examples(image_reader,
             else:
                 indices = idx
                 shape = image_reader.shape[1:]
-            slices = image_reader.data(indices)
+            if not mask_image:
+                slices = image_reader.data(indices)
+            else:
+                slices = (image_reader.image(indices) *
+                          np.clip(label_reader.image(indices), 0, 1)
+                          .astype(image_reader.image().dtype)).tobytes()
+
             feature_dict = {
                 "image/encoded": _bytes_list_feature(slices),
                 "image/name": _bytes_list_feature(image_reader.name),
                 "image/format": _bytes_list_feature(image_reader.format),
                 "image/shape": _int64_list_feature(shape),
-                "segmentation/encoded": _bytes_list_feature(label_reader.data(idx)),
+                "segmentation/encoded": _bytes_list_feature(label_reader.data(indices if group_label else idx)),
                 "segmentation/name": _bytes_list_feature(label_reader.name),
                 "segmentation/format": _bytes_list_feature(label_reader.format),
-                "segmentation/shape": _int64_list_feature(label_reader.shape[1:]),
+                "segmentation/shape": _int64_list_feature(shape if group_label else label_reader.shape[1:]),
                 "extra/number": _int64_list_feature(idx),
             }
             for key, val in extra_str_split.items():
                 feature_dict["extra/{}".format(key)] = _bytes_list_feature(val[idx])
             for key, val in extra_int_split.items():
                 feature_dict["extra/{}".format(key)] = _int64_list_feature(val[idx])
+            for key, val in extra_float_split.items():
+                feature_dict["extra/{}".format(key)] = _float_list_feature(val[idx])
 
             yield tf.train.Example(features=tf.train.Features(feature=feature_dict))
     else:
@@ -370,5 +410,30 @@ def image_to_examples(image_reader,
             feature_dict["extra/{}".format(key)] = _bytes_list_feature(val)
         for key, val in extra_int_origin.items():
             feature_dict["extra/{}".format(key)] = _int64_list_feature(val)
+        for key, val in extra_float_origin.items():
+            feature_dict["extra/{}".format(key)] = _float_list_feature(val)
+
+        yield tf.train.Example(features=tf.train.Features(feature=feature_dict))
+
+
+def bbox_to_examples(label_reader, bbox_array):
+    # bbox: shape [depth, 4] --> [y1, x1, y2, x2]
+    # where point (y1, x1) and (y2, z2) is in region
+    shape = label_reader.shape[1:]
+
+    def norm_bbox(bboxes):
+        bbox = bboxes.copy()
+        bbox += np.array([[-3, -3, 3, 3]])
+        bbox = np.clip(bbox, 0, 65535)
+        bbox[:, 2:4] = np.minimum(bbox[:, 2:4], np.array(shape)[None, :])
+        return bbox / (np.concatenate((shape, shape), axis=0) - 1)
+
+    for idx in label_reader.indices:
+        locs = norm_bbox(np.asarray(bbox_array[idx]).reshape(-1, 4))
+        feature_dict = {
+            "name": _bytes_list_feature(label_reader.name),
+            "data": _bytes_list_feature(locs.astype(np.float32).tobytes()),
+            "shape": _int64_list_feature(locs.shape)
+        }
 
         yield tf.train.Example(features=tf.train.Features(feature=feature_dict))

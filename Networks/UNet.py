@@ -65,8 +65,6 @@ class UNet(base.BaseNet):
         self.width = _check_size_type(self.width)
         self._inputs["images"].set_shape([self.bs, self.height, self.width, self.channel])
         self._inputs["labels"].set_shape([self.bs, None, None])
-        if self.args.only_tumor:
-            self._inputs["livers"].set_shape([self.bs, self.height, self.width])
 
         tensor_out = self._inputs["images"]
         down_sample = kwargs.get("input_down_sample", False)
@@ -122,9 +120,9 @@ class UNet(base.BaseNet):
                     for i in range(1, self.num_classes):
                         obj = self.classes[i] + "Pred"
                         self._layers[obj] = tf.where(split[i] > 0.5, ones, zeros, name=obj)
-                        if self.args.only_tumor and self.classes[i] == "Tumor":
-                            self._layers[obj] = self._layers[obj] * tf.cast(
-                                tf.expand_dims(self._inputs["livers"], axis=-1), tf.uint8)
+                        # if self.args.only_tumor and self.classes[i] == "Tumor":
+                        #     self._layers[obj] = self._layers[obj] * tf.cast(
+                        #         tf.expand_dims(self._inputs["livers"], axis=-1), tf.uint8)
                         self._image_summaries[obj] = self._layers[obj]
         return
 
@@ -173,7 +171,8 @@ class UNet(base.BaseNet):
                     labels = split_labels[i]
                     for met in self.args.metrics_train:
                         metric_func = eval("metrics.metric_" + met.lower())
-                        metric_func(logits, labels, name=obj + met)
+                        res = metric_func(logits, labels, name=obj + met)
+                        self.metrics_dict["{}/{}".format(obj, met)] = res
 
     def _build_summaries(self):
         if self.mode == ModeKeys.TRAIN:
@@ -201,11 +200,11 @@ class UNet(base.BaseNet):
 
             labels = tf.expand_dims(self._inputs["labels"], axis=-1)
             labels_uint8 = tf.cast(labels * 255 / len(self.args.classes), tf.uint8)
-            if self.args.only_tumor:
-                livers_uint8 = tf.cast(tf.expand_dims(self._inputs["livers"], axis=-1)
-                                       * 255 / len(self.args.classes), tf.uint8)
-                tf.summary.image("{}/Liver".format(self.args.tag), livers_uint8,
-                                 max_outputs=1, collections=[self.DEFAULT])
+            # if self.args.only_tumor:
+            #     livers_uint8 = tf.cast(tf.expand_dims(self._inputs["livers"], axis=-1)
+            #                            * 255 / len(self.args.classes), tf.uint8)
+            #     tf.summary.image("{}/Liver".format(self.args.tag), livers_uint8,
+            #                      max_outputs=1, collections=[self.DEFAULT])
             tf.summary.image("{}/{}".format(self.args.tag, labels.op.name), labels_uint8,
                              max_outputs=1, collections=[self.DEFAULT])
 

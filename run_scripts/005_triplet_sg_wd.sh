@@ -20,7 +20,6 @@ if [ "$TASK" == "train" ]; then
         --im_height 256 --im_width 256 --im_channel 4 \
         --resize_for_batch \
         --num_of_total_steps 400000 \
-        --lr_decay_step 400001 \
         --primary_metric "Tumor/Dice" \
         --secondary_metric "Liver/Dice" \
         --loss_weight_type numerical \
@@ -28,9 +27,12 @@ if [ "$TASK" == "train" ]; then
         --eval_steps 2500 \
         --batch_size 8 \
         --weight_init "xavier" \
-        --weight_decay_rate 0.00001 \
+        --weight_decay_rate 0.000001 \
+        --learning_policy custom_step \
+        --lr_decay_boundaries 200000 300000 --lr_custom_values 0.003 0.0003 0.0001 \
         --triplet \
-        --use_spatial_guide --use_fake_guide \
+        --use_spatial_guide --use_fake_guide --random_spatial_guide \
+        --eval_3d \
         $@
 elif [ "$TASK" == "eval" ]; then
     PYTHONPATH=${PROJECT_DIR} CUDA_VISIBLE_DEVICES=${GPU_ID} python ./main.py \

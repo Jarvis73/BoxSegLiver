@@ -19,6 +19,8 @@ import tensorflow.contrib.slim as slim
 
 import loss_metrics as losses
 from Networks import base
+from Networks.layers.generate_anchors import generate_anchors_pre
+from Networks.layers.anchor_target_layer import anchor_target_layer
 
 ModeKeys = tf.estimator.ModeKeys
 metrics = losses
@@ -30,6 +32,12 @@ def _check_size_type(size):
     return size
 
 
+def debug(tensor):
+    ops = tf.print(tensor.op.name, tf.shape(tensor))
+    with tf.control_dependencies([ops]):
+        return tf.identity(tensor)
+
+
 class DiscrimUNet(base.BaseNet):
     """ Only for tumor segmentation (without liver) """
     def __init__(self, args, name=None):
@@ -39,10 +47,10 @@ class DiscrimUNet(base.BaseNet):
         self.classes.extend(self.args.classes)
 
         self.bs = args.batch_size
-        self.roi_bs = args.roi_batch_size
         self.height = args.im_height
         self.width = args.im_width
         self.channel = args.im_channel
+        self.metrics_dict = {}
 
     def _net_arg_scope(self, *args, **kwargs):
         default_w_regu, default_b_regu = self._get_regularizer()
@@ -58,78 +66,115 @@ class DiscrimUNet(base.BaseNet):
                                 normalizer_params=params) as scope:
                 return scope
 
+    def _anchor_component(self):
+        """ Wrapper function for generate_anchors_pre """
+        with tf.variable_scope("Anchors"):
+            height = tf.to_int32(tf.to_float(self.height) * 1.0 / self.feature_stride)
+            width = tf.to_int32(tf.to_float(self.width) * 1.0 / self.feature_stride)
+
+            # [w * h * A, 4]
+            anchors, anchor_length = tf.py_func(generate_anchors_pre,
+                                                [height, width, self.feature_stride,
+                                                 self.anchor_scales, self.anchor_ratios],
+                                                [tf.float32, tf.int32],
+                                                name="gen_anchors")
+            anchors.set_shape([None, 4])
+            anchor_length.set_shape([])
+            self._anchors = anchors
+            self._anchor_length = anchor_length
+
+    def _anchor_target_layer(self, cls_score):
+        """ Wrapper function for anchor_target_layer """
+        cls_labels = tf.py_func(anchor_target_layer,
+                                [cls_score, self._inputs["gt_boxes"], self._inputs["im_info"],
+                                 self._anchors, self._num_anchors],
+                                tf.float32)
+        cls_labels.set_shape([1, 1, None, None])
+        self.cls_labels = tf.to_int32(cls_labels)
+
+    @staticmethod
+    def _reshape_layer(bottom, num_dim, name):
+        input_shape = tf.shape(bottom)
+        with tf.variable_scope(name):
+            # change the channel to the caffe format
+            to_caffe = tf.transpose(bottom, [0, 3, 1, 2])
+            # then force it to have channel 2
+            reshaped = tf.reshape(to_caffe,
+                                  tf.concat(axis=0, values=[[1, num_dim, -1], [input_shape[2]]]))
+            # then swap the channel back
+            to_tf = tf.transpose(reshaped, [0, 2, 3, 1])
+            return to_tf
+
     def _build_network(self, *args, **kwargs):
         out_channels = kwargs.get("init_channels", 64)
         num_down_samples = kwargs.get("num_down_samples", 4)
+        self.feature_stride = 2 ** num_down_samples
+        self.anchor_scales = kwargs.get("anchor_scales", [0, 1, 2])
+        self.anchor_ratios = kwargs.get("anchor_ratios", [1])
+        self._num_anchors = len(self.anchor_ratios) * len(self.anchor_scales)
 
         # Tensorflow can not infer input tensor shape when constructing graph
         self.height = _check_size_type(self.height)
         self.width = _check_size_type(self.width)
         self._inputs["images"].set_shape([self.bs, self.height, self.width, self.channel])
         self._inputs["labels"].set_shape([self.bs, None, None])
-        self._inputs["livers"].set_shape([self.bs, self.height, self.width])
-        self._inputs["rois"].set_shape([self.roi_bs, 5])
-        self._inputs["roi_labels"].set_shape([self.roi_bs])
+        self._inputs["gt_boxes"].set_shape([self.bs, None, 4])
+        self._inputs["im_info"].set_shape([self.bs, 2])
+        # self.bs == 1
+        self._inputs["gt_boxes"] = tf.squeeze(self._inputs["gt_boxes"], axis=0)
+        self._inputs["im_info"] = tf.squeeze(self._inputs["im_info"], axis=0)
+        self.height, self.width = tf.split(self._inputs["im_info"], 2)
 
         tensor_out = self._inputs["images"]
-        down_sample = kwargs.get("input_down_sample", False)
-        h, w = self._inputs["images"].shape[1:3]
-        if down_sample:
-            rate = kwargs.get("input_down_sample_rate", 2)
-            tensor_out = tf.image.resize_bilinear(tensor_out, [h // rate, w // rate])
 
         with tf.variable_scope(self.name, "DiscrimUNet"):
             encoder_layers = {}
 
-            # encoder
+            # image to head
             for i in range(num_down_samples):
                 with tf.variable_scope("Encode{:d}".format(i + 1)):
                     tensor_out = slim.repeat(tensor_out, 2, slim.conv2d, out_channels, 3)   # Conv-BN-ReLU
                     encoder_layers["Encode{:d}".format(i + 1)] = tensor_out
                     tensor_out = slim.max_pool2d(tensor_out, [2, 2])
                 out_channels *= 2
-
-            # Encode-Decode-Bridge
             high_level_tensor_out = slim.repeat(tensor_out, 2, slim.conv2d, out_channels, 3, scope="ED-Bridge")
 
-            # Branch 1: decoder for segmentation
+            # Branch 1: decode for segmentation
+            tensor_out = high_level_tensor_out
             for i in reversed(range(num_down_samples)):
                 out_channels /= 2
                 with tf.variable_scope("Decode{:d}".format(i + 1)):
-                    tensor_out = slim.conv2d_transpose(high_level_tensor_out,
+                    tensor_out = slim.conv2d_transpose(tensor_out,
                                                        tensor_out.get_shape()[-1] // 2, 2, 2)
                     tensor_out = tf.concat((encoder_layers["Encode{:d}".format(i + 1)], tensor_out), axis=-1)
                     tensor_out = slim.repeat(tensor_out, 2, slim.conv2d, out_channels, 3)
-
-            # final
             with slim.arg_scope([slim.conv2d],
                                 activation_fn=None,
                                 normalizer_fn=None, normalizer_params=None):
                 logits = slim.conv2d(tensor_out, self.num_classes, 1, scope="AdjustChannels")
-                if down_sample:
-                    logits = tf.image.resize_bilinear(logits, [h, w])
                 self._layers["logits"] = logits
 
             # Branch 2: discriminator for classification
             with tf.name_scope("BboxLayer"):
-                # bool_split = tf.squeeze(tf.cast(self._layers[obj], tf.bool), axis=-1)
-                # labeled = image_ops.connected_components(bool_split)
-                pooling_size = kwargs.get("pooling_size", 8)
-                pre_pooling_size = pooling_size * 2
-                rois = tf.image.crop_and_resize(image=high_level_tensor_out,
-                                                bboxes=self._inputs["rois"][:, 1:],
-                                                box_ind=self._inputs["rois"][:, 0],
-                                                crop_size=[pre_pooling_size, pre_pooling_size])
-                rois = slim.max_pool2d(rois, 2)
-                rois_flat = slim.flatten(rois)
-                fc = slim.fully_connected(rois_flat, 1024)
-                fc = slim.dropout(fc, keep_prob=0.5, is_training=self.is_training)
-                fc = slim.fully_connected(fc, 1024)
-                fc = slim.dropout(fc, keep_prob=0.5, is_training=self.is_training)
-                cls_score = slim.fully_connected(fc, 2, activation_fn=None)
-                self._layers["Classify"] = cls_score
+                self._anchor_component()
+                cls_layer = slim.conv2d(high_level_tensor_out,
+                                        kwargs.get("cls_layer_channels", 512),
+                                        kernel_size=3,
+                                        scope="cls_conv-3x3")
+                cls_score = slim.conv2d(cls_layer, self._num_anchors * 2, 1,
+                                        padding="VALID",
+                                        activation_fn=None,
+                                        scope="cls_score")
+                cls_score_reshape = self._reshape_layer(cls_score, 2, "cls_score_reshape")
+                cls_prob_reshape = slim.softmax(cls_score_reshape, "cls_prob_reshape")
+                cls_prob = self._reshape_layer(cls_prob_reshape, self._num_anchors * 2, "cls_prob")
+                self._layers["cls_score_reshape"] = cls_score_reshape
+                self._layers["cls_prob"] = cls_prob
+                self._anchor_target_layer(cls_score)
 
             with tf.name_scope("Prediction"):
+                self.ret_prob = kwargs.get("ret_prob", False)
+                self.ret_pred = kwargs.get("ret_pred", False)
                 # Segmentation
                 self.probability = slim.softmax(logits)
                 split = tf.split(self.probability, self.num_classes, axis=-1)
@@ -142,40 +187,43 @@ class DiscrimUNet(base.BaseNet):
                 for i in range(1, self.num_classes):
                     obj = self.classes[i] + "Pred"
                     self._layers[obj] = tf.where(split[i] > 0.5, ones, zeros, name=obj)
-                    if self.args.only_tumor and self.classes[i] == "Tumor":
-                        self._layers[obj] = self._layers[obj] * tf.cast(
-                            tf.expand_dims(self._inputs["livers"], axis=-1), tf.uint8)
+                    # if self.args.only_tumor and self.classes[i] == "Tumor":
+                    #     self._layers[obj] = self._layers[obj] * tf.cast(
+                    #         tf.expand_dims(self._inputs["livers"], axis=-1), tf.uint8)
                     self._image_summaries[obj] = self._layers[obj]
 
+            with tf.name_scope("ClsPrediction"):
                 # Classification
-                cls_prob = slim.softmax(cls_score)
-                self._layers["ClassifyPred"] = tf.cast(tf.argmax(cls_prob, axis=1),
-                                                       self._inputs["roi_labels"].dtype)
+                cls_pred = tf.argmax(tf.reshape(cls_score_reshape, [-1, 2]), axis=1,
+                                     name="cls_pred", output_type=tf.int32)
+                self._layers["ClsPred"] = cls_pred
         return
 
     def _build_loss(self):
-        # Segmentation loss
-        w_param = self._get_weights_params()
-        if self.args.loss_type == "xentropy":
-            losses.weighted_sparse_softmax_cross_entropy(logits=self._layers["logits"],
-                                                         labels=self._inputs["labels"],
-                                                         w_type=self.args.loss_weight_type, **w_param)
-        elif self.args.loss_type == "dice":
-            losses.weighted_dice_loss(logits=self.probability,
-                                      labels=self._inputs["labels"],
-                                      w_type=self.args.loss_weight_type, **w_param)
-        else:
-            raise ValueError("Not supported loss_type: {}".format(self.args.loss_type))
-
-        # Classification loss
-        cls_params = {
-            "logits": self._layers["Classify"],
-            "labels": self._inputs["roi_labels"],
-            "scope": "ClsLoss"
-        }
-        tf.losses.sparse_softmax_cross_entropy(**cls_params)
-
         with tf.name_scope("Losses/"):
+            # Segmentation loss
+            w_param = self._get_weights_params()
+            if self.args.loss_type == "xentropy":
+                losses.weighted_sparse_softmax_cross_entropy(logits=self._layers["logits"],
+                                                             labels=self._inputs["labels"],
+                                                             w_type=self.args.loss_weight_type, **w_param)
+            elif self.args.loss_type == "dice":
+                losses.weighted_dice_loss(logits=self.probability,
+                                          labels=self._inputs["labels"],
+                                          w_type=self.args.loss_weight_type, **w_param)
+            else:
+                raise ValueError("Not supported loss_type: {}".format(self.args.loss_type))
+
+            # Classification loss
+            cls_score = tf.reshape(self._layers["cls_score_reshape"], [-1, 2])
+            label = tf.reshape(self.cls_labels, [-1])
+            self.select = tf.where(tf.not_equal(label, -1))
+            cls_score = tf.reshape(tf.gather(cls_score, self.select), [-1, 2])
+            self.label = tf.reshape(tf.gather(label, self.select), [-1])
+            cls_loss = losses.sparse_focal_loss(cls_score, self.label)
+            tf.losses.add_loss(cls_loss)
+            # tf.losses.sparse_softmax_cross_entropy(logits=cls_score, labels=self.label, scope="ClsLoss")
+
             total_loss = tf.losses.get_total_loss()
             tf.losses.add_loss(total_loss)
             return total_loss
@@ -207,13 +255,25 @@ class DiscrimUNet(base.BaseNet):
                     labels = split_labels[i]
                     for met in self.args.metrics_train:
                         metric_func = eval("metrics.metric_" + met.lower())
-                        metric_func(logits, labels, name=obj + met)
+                        res = metric_func(logits, labels, name=obj + met)
+                        self.metrics_dict["{}/{}".format(obj, met)] = res
 
                 # Classification
-                is_correct = tf.to_float(tf.equal(self._layers["ClassifyPred"],
-                                                  self._inputs["roi_labels"]))
-                accuracy = tf.reduce_mean(is_correct, name="Accuracy")
+                cls_pred = tf.reshape(tf.gather(self._layers["ClsPred"], self.select), [-1])
+                is_correct = tf.to_float(tf.equal(cls_pred, self.label))
+                accuracy = tf.reduce_mean(is_correct, name="Accuracy/value")
+                self.metrics_dict["ClsAcc"] = accuracy
                 tf.add_to_collection(metrics.METRICS, accuracy)
+
+                positive = tf.to_float(tf.reduce_sum(self.label), name="Pos/value")
+                pre_b = tf.cast(cls_pred, tf.bool)
+                lab_b = tf.cast(self.label, tf.bool)
+                tp = tf.reduce_sum(tf.to_float(tf.logical_and(pre_b, lab_b)))
+                recall = tf.div(tp + 1e-6,  positive + 1e-6, name="Recall/value")
+                self.metrics_dict["ClsPos"] = positive
+                self.metrics_dict["ClsRec"] = recall
+                tf.add_to_collection(metrics.METRICS, positive)
+                tf.add_to_collection(metrics.METRICS, recall)
 
     def _build_summaries(self):
         if self.mode == ModeKeys.TRAIN:
@@ -241,11 +301,11 @@ class DiscrimUNet(base.BaseNet):
 
             labels = tf.expand_dims(self._inputs["labels"], axis=-1)
             labels_uint8 = tf.cast(labels * 255 / len(self.args.classes), tf.uint8)
-            if self.args.only_tumor:
-                livers_uint8 = tf.cast(tf.expand_dims(self._inputs["livers"], axis=-1)
-                                       * 255 / len(self.args.classes), tf.uint8)
-                tf.summary.image("{}/Liver".format(self.args.tag), livers_uint8,
-                                 max_outputs=1, collections=[self.DEFAULT])
+            # if self.args.only_tumor:
+            #     livers_uint8 = tf.cast(tf.expand_dims(self._inputs["livers"], axis=-1)
+            #                            * 255 / len(self.args.classes), tf.uint8)
+            #     tf.summary.image("{}/Liver".format(self.args.tag), livers_uint8,
+            #                      max_outputs=1, collections=[self.DEFAULT])
             tf.summary.image("{}/{}".format(self.args.tag, labels.op.name), labels_uint8,
                              max_outputs=1, collections=[self.DEFAULT])
 

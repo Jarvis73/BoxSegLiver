@@ -151,9 +151,9 @@ def weighted_sparse_softmax_cross_entropy(logits, labels, w_type, name=None, **k
         one_hot_labels = tf.one_hot(labels, num_classes)
     with tf.name_scope(name, "WsceLoss"):   # weighted softmax cross entropy --> Wsce
         weights = _compute_weights(w_type, one_hot_labels, **kwargs)
-        if "livers" in kwargs:
-            loss_mask = kwargs.pop("livers")
-            weights = tf.to_float(loss_mask) * weights
+        # if "livers" in kwargs:
+        #     loss_mask = kwargs.pop("livers")
+        #     weights = tf.to_float(loss_mask) * weights
         return tf.losses.sparse_softmax_cross_entropy(labels, logits, weights)
 
 
@@ -211,6 +211,22 @@ def weighted_dice_loss(logits, labels, w_type, name=None, **kwargs):
         return sparse_dice_loss(labels=labels, logits=logits)
 
 
+def sparse_focal_loss(prediction_tensor, target_tensor, alpha=0.25, gamma=2):
+    target_tensor = tf.reshape(target_tensor, [-1, 1])
+    one_minus_target = 1 - target_tensor
+    merged_target = tf.cast(tf.concat((one_minus_target, target_tensor), axis=1), tf.float32)
+    sigmoid_p = tf.nn.sigmoid(prediction_tensor)
+    zeros = tf.zeros_like(sigmoid_p, dtype=sigmoid_p.dtype)
+
+    pos_p_sub = tf.where(merged_target > zeros, merged_target - sigmoid_p, zeros)
+
+    neg_p_sub = tf.where(merged_target > zeros, zeros, sigmoid_p)
+    per_entry_cross_ent = (pos_p_sub ** gamma) * tf.nn.softplus(-prediction_tensor) + \
+                          (neg_p_sub ** gamma) * tf.nn.softplus(prediction_tensor)
+
+    return tf.reduce_mean(tf.reduce_sum(per_entry_cross_ent, axis=1))
+
+
 ################################################################################################
 #
 #   API for metrics
@@ -253,7 +269,7 @@ def metric_dice(logits, labels, eps=1e-5, collections=METRICS, name=None):
         intersection = tf.reduce_sum(logits * labels, axis=sum_axis)
         left = tf.reduce_sum(logits, axis=sum_axis)
         right = tf.reduce_sum(labels, axis=sum_axis)
-        dice = (2 * intersection) / (left + right + eps)
+        dice = (2 * intersection + eps) / (left + right + eps)
         dice = tf.reduce_mean(dice, name="value")
         tf.add_to_collection(collections, dice)
         return dice

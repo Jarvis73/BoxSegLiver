@@ -21,6 +21,7 @@ from pathlib import Path
 from Networks.UNet import UNet
 from Networks.AtrousUNet import AtrousUNet
 from Networks.DeepLabV3Plus import DeepLabV3Plus
+from Networks.DiscrimUNet import DiscrimUNet
 
 ModeKeys = tf.estimator.ModeKeys
 
@@ -28,7 +29,8 @@ ModeKeys = tf.estimator.ModeKeys
 MODEL_ZOO = [
     UNet,
     AtrousUNet,
-    DeepLabV3Plus
+    DeepLabV3Plus,
+    DiscrimUNet
 ]
 
 
@@ -51,7 +53,7 @@ def add_arguments(parser):
                        required=False, help="Model batch size (default: %(default)d)")
     group.add_argument("--weight_init",
                        type=str,
-                       default="trunc_norm",
+                       default="xavier",
                        choices=["trunc_norm", "xavier"],
                        required=False, help="Model variable initialization method (default: %(default)s)")
     group.add_argument("--normalizer",
@@ -59,6 +61,9 @@ def add_arguments(parser):
                        default="batch_norm",
                        choices=["batch_norm"],
                        required=False, help="Normalization method (default: %(default)s)")
+    group.add_argument("--cls_branch",
+                       action="store_true",
+                       required=False, help="Classify branch")
 
 
 def get_model_params(args):
@@ -78,14 +83,15 @@ def get_model_params(args):
 
 
 def model_fn(features, labels, mode, params):
-    images = tf.identity(features["images"], name="Images")
+    # Add graph nodes for images and labels
+    images = tf.identity(features.pop("images"), name="Images")
     if labels is not None:
         labels = tf.identity(labels, name="Labels")
     elif "labels" in features:
-        labels = tf.identity(features["labels"], name="Labels")
+        labels = tf.identity(features.pop("labels"), name="Labels")
+
     inputs = {"images": images, "labels": labels}
-    if params["args"].only_tumor:
-        inputs["livers"] = features["livers"]
+    inputs.update(features)
 
     train_op = None
     predictions = None
@@ -106,8 +112,9 @@ def model_fn(features, labels, mode, params):
         train_op = solver(loss, *solver_args, **solver_kwargs)
 
     if not params["args"].train_without_eval or mode == ModeKeys.PREDICT:
-        predictions = {obj + "Pred": model.layers[obj + "Pred"]
-                       for obj in model.classes if obj != "Background"}
+        predictions = {key: value for key, value in model.layers.items()
+                       if key.endswith("Pred")}
+        predictions.update(model.metrics_dict)
 
         with tf.name_scope("LabelProcess/"):
             graph = tf.get_default_graph()
@@ -136,12 +143,19 @@ def model_fn(features, labels, mode, params):
 
     if mode == ModeKeys.TRAIN:
         predictions["GlobalStep"] = tf.train.get_global_step(tf.get_default_graph())
-    if params["args"].only_tumor:
-        predictions["Livers"] = features["livers"]
+    if "livers" in features:
+        predictions["BgMasks"] = features["livers"]
 
     #############################################################################
     kwargs = {"loss": loss,
               "train_op": train_op,
               "predictions": predictions}
+
+    #############################################################################
+    # Initialize partial graph variables by init_fn
+    def init_fn(scaffold, session):
+        pass
+
+    kwargs["scaffold"] = tf.train.Scaffold(init_fn=init_fn)
 
     return tf.estimator.EstimatorSpec(mode=mode, **kwargs)

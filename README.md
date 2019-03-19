@@ -38,11 +38,28 @@ python main.py --help
 **B. Write your bash file `train_unet.sh` in `./run_scripts/`.**
 * Required Parameters:
   * --mode {train, eval}
-  * --tag (use script name)
+  * --tag (better to use current script name, such as ${BASE_NAME%".sh"})
   * --model {UNet}
-  * --classes (your class name, a list)
-  * --dataset_for_train
-  * --dataset_for_eval
+  * --classes (your class names, such as "Liver")
+  * --dataset_for_train (a list of *.tfrecord files or *.json file)
+  * --dataset_for_eval_while_train (a list of *.tfrecord files or *.json file)
+
+* Optional Parameters:
+  * --zoom --noise --flip --zoom_scale 1.2 (for data augmentation)
+  * --im_height 256 --im_width 256 (specify training image size, -1 if not specified)
+  * --im_channel 1 (specify image channel)
+  * --resize_for_batch (resize training image to the same size for batching operation)
+  * --num_of_total_steps (number of max training steps)
+  * --primary_metric ("<class>/<metric>", such as "Liver/Dice")
+  * --weight_decay_rate (weight decay rate)
+  * --learning_policy (learning policy, such as "custom_step")
+  * --lr_decay_boundaries (in which step to decay learning rate, such as "200000 300000")
+  * --lr_custom_values (learning rate values in each interval, such as "0.003 0.0003 0.0001")
+  * --input_group (group image neighbor slices as a multi-channel input, such as "3". This
+    parameter must be match with your examples in *.tfrecord dataset)
+
+* Other Parameters:
+  * Please run `python main.py --help` for details
 
 **C. Add execution permission for your bash file: `chmod u+x ./run_scripts/train_unet.sh`**
 * training
@@ -73,14 +90,9 @@ python main.py --help
 
 - [x] UNet
 - [x] AtrousUNet
-- [ ] DiscrimUNet
+- [x] DiscrimUNet
+- [ ] DiscrimUNet with RetinaNet head (Use FPN)
 
 - [ ] Pre-trained backbone
-- [x] Spatial guide network
-- [ ] Classifier for Gaussian distribution
-
-
-## Notice
-
-* Modify Xception: First conv stride = 1, First conv out_channel = 64, Xception_41 number of channels
-
+- [x] Spatial guide
+- [x] Classifier for Gaussian distribution
