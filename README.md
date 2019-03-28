@@ -92,7 +92,9 @@ python main.py --help
 - [x] AtrousUNet
 - [x] DiscrimUNet
 - [ ] DiscrimUNet with RetinaNet head (Use FPN)
+- [ ] Attention UNet
 
+- [ ] Weighted examples
 - [ ] Pre-trained backbone
 - [x] Spatial guide
 - [x] Classifier for Gaussian distribution

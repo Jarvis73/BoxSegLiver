@@ -143,11 +143,21 @@ class EvaluateVolume(EvaluateBase):
         for key in self._metric_values:
             self._metric_values[key].clear()
 
+    @staticmethod
+    def maybe_append(dst, src, name, clear=False):
+        if clear:
+            dst.clear()
+        if name in src:
+            dst.append(src[name])
+
     def _evaluate(self, predicts, cases=None, verbose=False, save=False):
         # process a 3D image slice by slice or patch by patch
         logits3d = defaultdict(list)
         labels3d = defaultdict(list)
-        bg_masks3d = list()
+        # bg_masks3d = list()
+        # cls_acc = list()
+        # cls_pos = list()
+        # cls_rec = list()
         self.clear_metrics()
 
         pad = -1
@@ -171,16 +181,19 @@ class EvaluateVolume(EvaluateBase):
                 for c, cls in enumerate(self.classes):
                     logits3d[cls].append(np.squeeze(pred[cls + "Pred"], axis=-1))
                     labels3d[cls].append(pred["Labels_{}".format(c)])
-                    if "BgMasks" in pred:
-                        bg_masks3d.append(pred["BgMasks"])
+                # self.maybe_append(bg_masks3d, pred, "BgMasks")
+                # self.maybe_append(cls_acc, pred, "ClsAcc")
+                # self.maybe_append(cls_pos, pred, "ClsPos")
+                # self.maybe_append(cls_rec, pred, "ClsRec")
             elif cur_case + ".rev" == new_case:
                 # Append reversed batch to another collections
                 for c, cls in enumerate(self.classes):
                     logits3d[cls + "_rev"].append(np.squeeze(pred[cls + "Pred"], axis=-1))
             else:
-                # result = self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox, save)
-                result = self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox, save,
-                                             bg_masks3d=bg_masks3d)
+                result = self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox, save)
+                # result = self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox, save,
+                #                              bg_masks3d=bg_masks3d, cls_acc=cls_acc, cls_pos=cls_pos,
+                #                              cls_rec=cls_rec)
                 self._timer.toc()
                 if verbose:
                     log_str = "Evaluate-{} {}".format(self._timer.calls, Path(cur_case).stem)
@@ -190,13 +203,15 @@ class EvaluateVolume(EvaluateBase):
                 for c, cls in enumerate(self.classes):
                     logits3d[cls].clear()
                     labels3d[cls].clear()
-                    bg_masks3d.clear()
                     logits3d[cls].append(np.squeeze(pred[cls + "Pred"], axis=-1))
                     labels3d[cls].append(pred["Labels_{}".format(c)])
                     if cls + "_rev" in logits3d:
                         logits3d[cls + "_rev"].clear()
-                    if "BgMasks" in pred:
-                        bg_masks3d.append(pred["BgMasks"])
+
+                # self.maybe_append(bg_masks3d, pred, "BgMasks", clear=True)
+                # self.maybe_append(cls_acc, pred, "ClsAcc", clear=True)
+                # self.maybe_append(cls_pos, pred, "ClsPos", clear=True)
+                # self.maybe_append(cls_rec, pred, "ClsRec", clear=True)
 
                 if cases is not None and self._timer.calls >= cases:
                     break
@@ -208,11 +223,12 @@ class EvaluateVolume(EvaluateBase):
                     bbox = pred["Bboxes"][0]
                 self._timer.tic()
 
-        if cases is None:
+        if cases is None or (self._timer.calls < cases):
             # Final case
-            # result = self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox, save)
-            result = self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox, save,
-                                         bg_masks=bg_masks3d)
+            result = self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox, save)
+            # result = self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox, save,
+            #                              bg_masks3d=bg_masks3d, cls_acc=cls_acc, cls_pos=cls_pos,
+            #                              cls_rec=cls_rec)
             self._timer.toc()
             if verbose:
                 log_str = "Evaluate-{} {}".format(self._timer.calls, Path(cur_case).stem)
@@ -237,9 +253,10 @@ class EvaluateVolume(EvaluateBase):
     def evaluate_with_session(self, session=None, cases=None):
         predicts = [x for x in self._predict_keys
                     if x not in self.params["model"].metrics_dict]
+        predicts.extend(self.params["model"].metrics_eval)
         predict_gen = self.model.predict_with_session(session, predicts, yield_single_examples=False)
-        tf.logging.info("Begin evaluating ...")
-        return self._evaluate(predict_gen, cases=cases, verbose=False)
+        tf.logging.info("Begin evaluating 3D ...")
+        return self._evaluate(predict_gen, cases=cases, verbose=True)
 
     def evaluate(self,
                  input_fn,
@@ -281,8 +298,7 @@ class EvaluateVolume(EvaluateBase):
                 log_str += "{} -> {}  ".format(key, value)
             raise ValueError(log_str)
 
-    def _evaluate_case(self, logits3d, labels3d, cur_case, pad, bbox=None, save=False,
-                       **kwargs):
+    def _evaluate_case(self, logits3d, labels3d, cur_case, pad, bbox=None, save=False):
         # Process a complete volume
         logits3d = {cls: np.concatenate(values) for cls, values in logits3d.items()}
         labels3d = {cls: np.concatenate(values) for cls, values in labels3d.items()}
@@ -299,10 +315,13 @@ class EvaluateVolume(EvaluateBase):
                 # Merge two volumes which generated from different directions
                 logits3d[key] = np.maximum(logits3d[key], np.flip(logits3d[key + "_rev"], axis=0))
 
-        livers3d = None
-        if kwargs.get("bg_masks3d", []):
-            livers3d = (np.concatenate(kwargs["bg_masks3d"])[:-pad]
-                        if pad != 0 else np.concatenate(kwargs["bg_masks3d"]))
+        # livers3d = None
+        # if kwargs.get("bg_masks3d", []):
+        #     livers3d = (np.concatenate(kwargs["bg_masks3d"])[:-pad]
+        #                 if pad != 0 else np.concatenate(kwargs["bg_masks3d"]))
+
+        # Find volume voxel spacing from data source
+        header = self.img_reader.header(cur_case)
 
         if bbox is not None:
             # Resize logits3d to the shape of labels3d
@@ -312,11 +331,6 @@ class EvaluateVolume(EvaluateBase):
             scales = np.array(ori_shape) / np.array(cur_shape)
             for c, cls in enumerate(self.classes):
                 logits3d[cls] = ndi.zoom(logits3d[cls], scales, order=0)
-            # if livers3d is not None:
-            #     livers3d = ndi.zoom(livers3d, scales, order=0)
-            # for c, cls in enumerate(self.classes):
-            #     print(labels3d[cls].shape, scales)
-            #     labels3d[cls] = ndi.zoom(labels3d[cls], scales, order=0)
 
         # Add tumor to liver volume
         if self.merge_tumor_to_liver and "Tumor" in logits3d and "Liver" in logits3d:
@@ -331,11 +345,8 @@ class EvaluateVolume(EvaluateBase):
                 logits3d["Tumor"] *= logits3d["Liver"].astype(logits3d["Tumor"].dtype)
 
         # Remove false positives outside liver region
-        if livers3d is not None and "Tumor" in logits3d:
-            logits3d["Tumor"] *= livers3d.astype(logits3d["Tumor"].dtype)
-
-        # Find volume voxel spacing from data source
-        header = self.img_reader.header(cur_case)
+        # if livers3d is not None and "Tumor" in logits3d:
+        #     logits3d["Tumor"] *= livers3d.astype(logits3d["Tumor"].dtype)
 
         # Calculate 3D metrics
         cur_pairs = {}

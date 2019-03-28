@@ -19,13 +19,12 @@ if [ "$TASK" == "train" ]; then
         --im_height 256 --im_width 256 --im_channel 3 \
         --resize_for_batch \
         --num_of_total_steps 400000 \
+        --lr_decay_step 400001 \
         --primary_metric "Tumor/Dice" \
         --secondary_metric "Liver/Dice" \
         --loss_weight_type numerical \
         --loss_numeric_w 0.2 0.4 4.4 \
         --weight_decay_rate 0 \
-        --learning_policy custom_step \
-        --lr_decay_boundaries 200000 300000 --lr_custom_values 0.003 0.0003 0.0001 \
         --input_group 3 \
         $@
 elif [ "$TASK" == "eval" ]; then
@@ -40,6 +39,6 @@ elif [ "$TASK" == "eval" ]; then
         --primary_metric "Tumor/Dice" \
         --secondary_metric "Liver/Dice" \
         --batch_size 8 \
-        --triplet \
+        --input_group 3 \
         $@
 fi

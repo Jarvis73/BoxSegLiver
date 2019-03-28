@@ -22,9 +22,9 @@ def main():
     # build_lits_liver.convert_to_liver("trainval", keep_only_liver=True, seed=1234)
 
     # Liver and tumor
-    build_lits_liver.convert_to_liver_bounding_box("trainval", keep_only_liver=False, seed=1234,
-                                                   align=(16, 16, 1), padding=(25, 25, 2),
-                                                   folds_file="k_folds.txt")
+    # build_lits_liver.convert_to_liver_bounding_box("trainval", keep_only_liver=False, seed=1234,
+    #                                                align=(16, 16, 1), padding=(25, 25, 2),
+    #                                                folds_file="k_folds.txt")
 
     # Liver and tumor --> triplet as input
     # build_lits_liver.convert_to_liver_bbox_group("trainval", keep_only_liver=False, seed=1234,
@@ -47,6 +47,11 @@ def main():
     # Ground truth bounding box
     # build_lits_liver.convert_to_tp_dataset("trainval", align=(16, 16, 1), padding=(25, 25, 2),
     #                                        folds_file="k_folds.txt")
+
+    # Histogram
+    build_lits_liver.convert_to_histogram_dataset("trainval", keep_only_liver=False, seed=1234,
+                                                  bins=100, xrng=(-200, 250),
+                                                  folds_file="k_folds.txt")
 
 
 if __name__ == "__main__":

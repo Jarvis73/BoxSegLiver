@@ -27,7 +27,8 @@ matplotlib.use("qt5Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-import input_pipeline
+import input_pipeline_osmn
+input_pipeline = input_pipeline_osmn
 
 
 def add_arguments(parser):
@@ -59,6 +60,10 @@ def add_arguments(parser):
                        type=int,
                        default=0,
                        required=False, help="Skip some cases for evaluating determined case")
+    group.add_argument("--eval_3d",
+                       action="store_true",
+                       required=False, help="Evaluate when training in 2D slices or 3D volume."
+                                            "Default in 2D slices")
 
 
 class CheckInputPipeline(object):
@@ -69,7 +74,8 @@ class CheckInputPipeline(object):
         record2_3d = Path(__file__).parent / "data/LiTS/records/sample-bbox-3D-2-of-5.tfrecord"
         self.records = [str(record1), str(record2)]
         self.records_3d = [str(record1_3d), str(record2_3d)]
-        self.records_3d = [str(Path(__file__).parent / "data/LiTS/records/trainval-bbox-3D-1-of-5.tfrecord")]
+        self.records_3d = [str(Path(__file__).parent / "data/LiTS/records/trainval-bbox-3D-3-of-5.tfrecord")]
+        self.records_hist_3d = [str(Path(__file__).parent / "data/LiTS/records/hist-100--200_250-3D-3-of-5.tfrecord")]
 
         self.parser = argparse.ArgumentParser()
         add_arguments(self.parser)
@@ -82,68 +88,48 @@ class CheckInputPipeline(object):
         ])
         self.sess = tf.Session()
 
-    def test_get_multi_records_dataset_for_eval(self):
-        sys.argv.extend([
-            "--mode", "eval",
-        ])
-        self.args = self.parser.parse_args()
-        print(self.args)
-
-        dataset = input_pipeline.get_3d_multi_records_dataset_for_eval(self.records_3d, self.args)
-        inputs = dataset.make_one_shot_iterator().get_next("Inputs")
-
-        cnt = 0
-        while True:
-            features, labels = self.sess.run(inputs)
-            print(features["images"].shape)
-            print(features["bboxes"], flush=True)
-            # print(features["name"])
-            # print(features["id"])
-            print(labels.shape, features["pads"])
-            # print(features["images"].max(), features["images"].min())
-            # print(labels.max(), labels.min())
-            plt.subplot(121)
-            plt.imshow(features["images"][0, ..., 0], cmap="gray")
-            plt.subplot(122)
-            plt.imshow(labels[0], cmap="gray")
-            plt.show()
-            cnt += 1
-            if cnt > 20:
-                break
-
     def test_get_multi_records_dataset_for_train(self):
         sys.argv.extend([
             "--mode", "train",
             "--only_tumor",
-            "--filter_size", "10"
+            "--filter_size", "10",
+            "--input_group", "3",
         ])
         self.args = self.parser.parse_args()
         print(self.args)
 
-        dataset = input_pipeline.get_2d_multi_records_dataset_for_eval(self.records, self.args)
+        dataset = input_pipeline.get_2d_multi_records_dataset_for_train(self.records, self.args)
         inputs = dataset.make_one_shot_iterator().get_next("Inputs")
+        cnt = 0
+        cnt2 = -1
         while True:
             features, labels = self.sess.run(inputs)
             print(features["images"].shape)
-            # print(features["name"])
+            # print(features["names"][0])
             # print(features["id"])
             print(labels.shape)
             # print(features["images"].max(), features["images"].min())
             # print(labels.max(), labels.min())
-            plt.subplot(231)
-            plt.imshow(features["images"][0, ..., 0], cmap="gray")
-            plt.subplot(232)
-            plt.imshow(features["images"][0, ..., 1], cmap="gray")
-            plt.subplot(233)
-            plt.imshow(features["images"][0, ..., 2], cmap="gray")
-            plt.subplot(234)
-            plt.imshow(labels[0], cmap="gray")
-            plt.subplot(235)
-            plt.imshow(labels[1], cmap="gray")
-            plt.subplot(236)
-            plt.imshow(labels[2], cmap="gray")
-            plt.show()
-            plt.pause(3)
+            if cnt2 < 0:
+                cnt2 = features["bboxes"][0][2] + 1
+            for i in range(8):
+                plt.subplot(231)
+                plt.imshow(features["images"][i, ..., 0], cmap="gray")
+                plt.subplot(232)
+                plt.imshow(features["images"][i, ..., 1], cmap="gray")
+                plt.title("{}".format(cnt2))
+                plt.subplot(233)
+                plt.imshow(features["images"][i, ..., 2], cmap="gray")
+                plt.subplot(234)
+                plt.imshow(labels[i], cmap="gray")
+                plt.subplot(235)
+                plt.imshow(labels[i], cmap="gray")
+                plt.subplot(236)
+                plt.imshow(labels[i], cmap="gray")
+                plt.show()
+                cnt2 += 1
+                plt.pause(100)
+            cnt += 1
 
     def test_get_2d_multi_records_dataset_for_eval(self):
         sys.argv.extend([
@@ -227,7 +213,7 @@ class CheckInputPipeline(object):
             str(Path(__file__).parent / "data/LiTS/records/cls-0tp-1-of-5.tfrecord"),
             str(Path(__file__).parent / "data/LiTS/records/cls-0tp-2-of-5.tfrecord")
         ]
-        dataset = input_pipeline.get_images_and_bboxes_dataset(self.records, boxes, self.args)
+        dataset = input_pipeline.get_2d_images_and_bboxes_dataset_for_train(self.records, boxes, self.args)
         inputs = dataset.make_one_shot_iterator().get_next("Inputs")
         cnt = 0
         cnt2 = -1
@@ -263,46 +249,68 @@ class CheckInputPipeline(object):
             #     break
             cnt += 1
 
-    def test_get_multi_channels_dataset_for_eval(self):
+    def test_get_multi_records_dataset_for_eval(self):
         sys.argv.extend([
-            "--mode", "eval",
+            "--mode", "train",
             "--input_group", "3",
-            "--only_tumor",
+            # "--only_tumor",
+            "--eval_3d",
+            "--eval_skip_num", "9"
         ])
         self.args = self.parser.parse_args()
         print(self.args)
 
-        dataset = input_pipeline.get_3d_multi_channels_dataset_for_eval(self.records_3d, self.args)
+        dataset = input_pipeline.get_3d_multi_records_dataset_for_eval(self.records_3d, self.records_hist_3d,
+                                                                       "eval_while_train", self.args)
         inputs = dataset.make_one_shot_iterator().get_next("Inputs")
         cnt = 0
         cnt2 = -1
         while True:
             features, labels = self.sess.run(inputs)
-            print(features["images"].shape)
-            # print(features["names"][0])
+            # print(features["images"].shape)
+            print(features["names"][0])
             # print(features["id"])
             print(labels.shape)
             # print(features["images"].max(), features["images"].min())
             # print(labels.max(), labels.min())
-            if cnt2 < 0:
-                cnt2 = features["bboxes"][0][2] + 1
-            for i in range(8):
-                plt.subplot(231)
-                plt.imshow(features["images"][i, ..., 0], cmap="gray")
-                plt.subplot(232)
-                plt.imshow(features["images"][i, ..., 1], cmap="gray")
-                plt.title("{}".format(cnt2))
-                plt.subplot(233)
-                plt.imshow(features["images"][i, ..., 2], cmap="gray")
-                plt.subplot(234)
-                plt.imshow(labels[i], cmap="gray")
-                plt.show()
-                cnt2 += 1
-                plt.pause(1)
-            cnt += 1
+            # if cnt2 < 0:
+            #     cnt2 = features["bboxes"][0][2] + 1
+            # for i in range(8):
+            #     plt.subplot(231)
+            #     plt.imshow(features["images"][i, ..., 0], cmap="gray")
+            #     plt.subplot(232)
+            #     plt.imshow(features["images"][i, ..., 1], cmap="gray")
+            #     plt.title("{}".format(cnt2))
+            #     plt.subplot(233)
+            #     plt.imshow(features["images"][i, ..., 2], cmap="gray")
+            #     plt.subplot(234)
+            #     plt.imshow(labels[i], cmap="gray")
+            #     plt.show()
+            #     cnt2 += 1
+            #     plt.pause(1)
+            # cnt += 1
+
+    def test_gt_boxes(self):
+        sys.argv.extend([
+            "--mode", "eval",
+        ])
+        self.args = self.parser.parse_args()
+        print(self.args)
+
+        inputs = input_pipeline.get_gt_boxes(self.records_3d)
+
+        bboxes = []
+        while True:
+            try:
+                features = self.sess.run(inputs)
+                bboxes.extend(features["gt_boxes"])
+            except tf.errors.OutOfRangeError:
+                break
+
+        gt_boxes = np.array(bboxes)
 
 
 if __name__ == "__main__":
     h = CheckInputPipeline()
     h.setUp()
-    h.test_get_multi_channels_dataset_for_eval()
+    h.test_get_multi_records_dataset_for_eval()

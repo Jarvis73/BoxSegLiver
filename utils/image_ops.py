@@ -263,3 +263,42 @@ def random_zero_or_one(shape, dtype, seed=None):
     rd_val = tf.random_uniform((), 0, 1, dtype=dtype, seed=seed)
     rd_rnd = tf.round(rd_val)
     return tf.fill(shape, rd_rnd)
+
+
+def binary_dilation2d(inputs, connection=1, iterations=1, padding="SAME", name=None):
+    """
+    Computes the gray-scale binary dilation of 4-D input
+
+    Parameters
+    ----------
+    inputs: Tensor.
+        Must be one of the following types: float32, float64, int32, uint8, int16, int8,
+        int64, bfloat16, uint16, half, uint32, uint64. 4-D with shape [batch, in_height, in_width, depth].
+    connection: int
+        If connection == 1, then [[0, 1, 0], [1, 1, 1], [0, 1, 0]] will be the filter.
+        If connection == 2, then [[1, 1, 1], [1, 1, 1], [1, 1, 1]] will be the filter.
+    iterations: int
+        Iteration numbers
+    padding: str
+        From: "SAME", "VALID". The type of padding algorithm to use.
+    name: str
+        A name for the operation (optional).
+
+    Returns
+    -------
+    A Tensor. Has the same type as input.
+    """
+    if connection == 1:
+        kernel_array = [0, 1, 0, 1, 1, 1, 0, 1, 0]
+    elif connection == 2:
+        kernel_array = [1, 1, 1, 1, 1, 1, 1, 1, 1]
+    else:
+        raise ValueError("connection must be 1 or 2, got {}".format(connection))
+    kernel = tf.constant(kernel_array, dtype=tf.int32, shape=(3, 3, 1), name="DilationFilter")
+    kernel = tf.tile(kernel, tf.concat(([1, 1], [tf.shape(inputs)[-1]]), axis=0))
+
+    outputs = inputs
+    for _ in range(iterations):
+        outputs = tf.nn.dilation2d(outputs, kernel, [1, 1, 1, 1],
+                                   [1, 1, 1, 1], padding, name) - 1
+    return outputs

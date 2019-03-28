@@ -13,49 +13,33 @@ from Networks.layers.bbox_transform import bbox_transform
 # If an anchor satisfied by positive and negative conditions set to negative
 RPN_CLOBBER_POSITIVES = False
 # IOU < thresh: negative example
-RPN_NEGATIVE_OVERLAP = 0.1
-# IOU >= thresh: positive example
-RPN_POSITIVE_OVERLAP = 0.6
-# Max number of foreground examples
-RPN_FG_FRACTION = 0.5
-# Total number of examples
-RPN_BATCH_SIZE = 256
-# Give the positive RPN examples weight of p * 1 / {num positives}
-# and give negatives a weight of (1 - p)
-# Set to -1.0 to use uniform example weighting
-RPN_POSITIVE_WEIGHT = -1.0
+RPN_NEGATIVE_OVERLAP = 0.01
 
 
-def anchor_target_layer(rpn_cls_score,
-                        gt_boxes,
+def anchor_target_layer(gt_boxes,
                         im_info,
                         all_anchors,
-                        num_anchors):
+                        rpn_bs,
+                        rpn_pos_overlap,
+                        rpn_fg_fraction):
     """
     Same as the anchor target layer in original Fast/er RCNN
 
     Parameters
     ----------
-    rpn_cls_score: ndarray
-        rpn class score before softmax layer, shape is [bs, h, w, A*2]
     gt_boxes: ndarray
         ground truth boxes, shape is [?, 4]
     im_info: list or tuple
         image information, three elements
     all_anchors: ndarray
         all anchors, shape is [w*h*A, 4]
-    num_anchors: int
 
     """
-    A = num_anchors
     total_anchors = all_anchors.shape[0]
     # K = total_anchors / num_anchors
 
     # allow boxes to sit over the edge by a small amount
     _allowed_border = 0
-
-    # map of shape (..., H, W)
-    height, width = rpn_cls_score.shape[1:3]
 
     # only keep anchors inside the image
     inds_inside = np.where(
@@ -92,14 +76,14 @@ def anchor_target_layer(rpn_cls_score,
     labels[gt_argmax_overlaps] = 1
 
     # fg label: above threshold IOU
-    labels[max_overlaps >= RPN_POSITIVE_OVERLAP] = 1
+    labels[max_overlaps >= rpn_pos_overlap] = 1
 
     if RPN_CLOBBER_POSITIVES:
         # assign bg labels last so that negative labels can clobber positives
         labels[max_overlaps < RPN_NEGATIVE_OVERLAP] = 0
 
     # subsample positive labels if we have too many
-    num_fg = int(RPN_FG_FRACTION * RPN_BATCH_SIZE)
+    num_fg = int(rpn_fg_fraction * rpn_bs)
     fg_inds = np.where(labels == 1)[0]
     if len(fg_inds) > num_fg:
         disable_inds = npr.choice(
@@ -107,7 +91,7 @@ def anchor_target_layer(rpn_cls_score,
         labels[disable_inds] = -1
 
     # subsample negative labels if we have too many
-    num_bg = RPN_BATCH_SIZE - np.sum(labels == 1)
+    num_bg = rpn_bs - np.sum(labels == 1)
     bg_inds = np.where(labels == 0)[0]
     if len(bg_inds) > num_bg:
         disable_inds = npr.choice(
@@ -116,10 +100,7 @@ def anchor_target_layer(rpn_cls_score,
 
     # map up to original set of anchors
     labels = _unmap(labels, total_anchors, inds_inside, fill=-1)                # [h*w*9]
-
-    # labels
-    labels = labels.reshape((1, height, width, A)).transpose(0, 3, 1, 2)
-    labels = labels.reshape((1, 1, A * height, width))
+    labels = labels.reshape((1, -1))
 
     return labels
 

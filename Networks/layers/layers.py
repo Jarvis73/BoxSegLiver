@@ -67,3 +67,7 @@ def split_separable_conv2d(inputs,
         scope=scope + '_pointwise')
 
 
+def upsample(inputs, target):
+    target_shape = tf.shape(target)
+    output = tf.image.resize_nearest_neighbor(inputs, target_shape[1:3], align_corners=True)
+    return output

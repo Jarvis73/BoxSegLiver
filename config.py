@@ -85,8 +85,8 @@ def check_args(args, parser):
             if not record.exists():
                 raise parser.error("File not found: " + str(record))
 
-    if args.use_spatial_guide and args.im_channel <= 1:
-        raise ValueError("When using spatial guide, im_channel should be 2, got {}"
+    if hasattr(args, "use_spatial_guide") and args.use_spatial_guide and args.im_channel <= 1:
+        raise ValueError("When using spatial guide, im_channel should be at least 2, got {}"
                          .format(args.im_channel))
 
     if args.use_fewer_guide:
@@ -94,7 +94,7 @@ def check_args(args, parser):
         logging.info("Using fewer guides will force batch_size = 1.")
 
     # TODO(ZJW): For compatibility
-    if args.triplet:
+    if hasattr(args, "triplet") and args.triplet:
         if args.input_group == 1:
             args.input_group = 3
         args.triplet = False

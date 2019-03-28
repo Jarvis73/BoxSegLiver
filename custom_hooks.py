@@ -15,6 +15,7 @@
 # =================================================================================
 
 import os
+import copy
 import json
 import numpy as np
 from pathlib import Path
@@ -31,6 +32,7 @@ from tensorflow.python.training import session_run_hook
 from tensorflow.python.training import basic_session_run_hooks
 from tensorflow.python.training import saver as saver_lib
 from tensorflow.python.training.summary_io import SummaryWriterCache
+# from tensorflow.core.protobuf import config_pb2
 
 import data_kits.build_data as data_ops
 from custom_evaluator_base import EvaluateBase
@@ -238,7 +240,7 @@ class BestCheckpointSaverHook(session_run_hook.SessionRunHook):
 
 class FeedGuideHook(session_run_hook.SessionRunHook):
     def __init__(self, features_ph, labels_ph, features, labels, model_dir):
-        self.features_ph = features_ph
+        self.features_ph = copy.copy(features_ph)    # Copy a new dict
         self.labels_ph = labels_ph
         self.features = features
         self.labels = labels

@@ -178,33 +178,35 @@ class UNet(base.BaseNet):
         if self.mode == ModeKeys.TRAIN:
             # Make sure all the elements are positive
             images = []
-            if self.args.im_channel == 1:
-                images.append(self._inputs["images"])
-            elif self.args.im_channel == 2:
-                image1 = self._inputs["images"][..., 0:1]
-                images.append(image1 - tf.reduce_min(image1))
-                image2 = self._inputs["images"][..., 1:2]
-                images.append(image2 - tf.reduce_min(image2))
-            elif self.args.im_channel == 3:
-                images = self._inputs["images"][..., 1:2]
-                images = [images - tf.reduce_min(images)]
-            elif self.args.im_channel == 4:
-                image1 = self._inputs["images"][..., 1:2]
-                images.append(image1 - tf.reduce_min(image1))
-                image2 = self._inputs["images"][..., 3:4]
-                images.append(image2 - tf.reduce_min(image2))
+            with tf.name_scope("SumImage"):
+                if self.args.im_channel == 1:
+                    images.append(self._inputs["images"])
+                elif self.args.im_channel == 2:
+                    image1 = self._inputs["images"][..., 0:1]
+                    images.append(image1 - tf.reduce_min(image1))
+                    image2 = self._inputs["images"][..., 1:2]
+                    images.append(image2 - tf.reduce_min(image2))
+                elif self.args.im_channel == 3:
+                    images = self._inputs["images"][..., 1:2]
+                    images = [images - tf.reduce_min(images)]
+                elif self.args.im_channel == 4:
+                    image1 = self._inputs["images"][..., 1:2]
+                    images.append(image1 - tf.reduce_min(image1))
+                    image2 = self._inputs["images"][..., 3:4]
+                    images.append(image2 - tf.reduce_min(image2))
 
             for image in images:
                 tf.summary.image("{}/{}".format(self.args.tag, image.op.name), image,
                                  max_outputs=1, collections=[self.DEFAULT])
 
-            labels = tf.expand_dims(self._inputs["labels"], axis=-1)
-            labels_uint8 = tf.cast(labels * 255 / len(self.args.classes), tf.uint8)
-            # if self.args.only_tumor:
-            #     livers_uint8 = tf.cast(tf.expand_dims(self._inputs["livers"], axis=-1)
-            #                            * 255 / len(self.args.classes), tf.uint8)
-            #     tf.summary.image("{}/Liver".format(self.args.tag), livers_uint8,
-            #                      max_outputs=1, collections=[self.DEFAULT])
+            with tf.name_scope("SumLabel"):
+                labels = tf.expand_dims(self._inputs["labels"], axis=-1)
+                labels_uint8 = tf.cast(labels * 255 / len(self.args.classes), tf.uint8)
+                # if self.args.only_tumor:
+                #     livers_uint8 = tf.cast(tf.expand_dims(self._inputs["livers"], axis=-1)
+                #                            * 255 / len(self.args.classes), tf.uint8)
+                #     tf.summary.image("{}/Liver".format(self.args.tag), livers_uint8,
+                #                      max_outputs=1, collections=[self.DEFAULT])
             tf.summary.image("{}/{}".format(self.args.tag, labels.op.name), labels_uint8,
                              max_outputs=1, collections=[self.DEFAULT])
 

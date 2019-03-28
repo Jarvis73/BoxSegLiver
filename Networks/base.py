@@ -36,6 +36,7 @@ class BaseNet(object):
         self._image_summaries = {}
         self.classes = ["Background"]
         self.metrics_dict = {}
+        self.metrics_eval = []
 
         self._is_training = self.mode == ModeKeys.TRAIN
         self._feed_dict = {}
@@ -133,9 +134,16 @@ class BaseNet(object):
 
         return w_init, b_init
 
-    def _get_normalization(self):
+    def _get_normalization(self, freeze=None):
         if self.args.normalizer == "batch_norm":
-            normalizer_params = {"scale": True, "is_training": self.is_training}
+            normalizer_params = {"scale": True}
+            if freeze is None:
+                normalizer_params.update({"is_training": self.is_training})
+            elif not freeze:    # False
+                normalizer_params.update({"is_training": True})
+            else:
+                normalizer_params.update({"is_training": False, "trainable": False})
+
             normalizer = slim.batch_norm
         # elif cfg.MODEL.NORMALIZATION == "instance_norm":
         #     normalizer_params = {}

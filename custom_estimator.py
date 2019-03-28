@@ -116,34 +116,35 @@ def parse_input_fn_result(train_with_eval, result, handler=None):
         ValueError: if the result is a list or tuple of length != 2.
     """
     input_hooks = []
-    if not train_with_eval:
-        try:
-            # We can't just check whether this is a tf.data.Dataset instance here,
-            # as this is plausibly a PerDeviceDataset. Try treating as a dataset first.
-            iterator = result.make_initializable_iterator()
-        except AttributeError:
-            # Not a dataset or dataset-like-object. Move along.
-            pass
+    with ops.name_scope("DataGenerator"):
+        if not train_with_eval:
+            try:
+                # We can't just check whether this is a tf.data.Dataset instance here,
+                # as this is plausibly a PerDeviceDataset. Try treating as a dataset first.
+                iterator = result.make_initializable_iterator()
+            except AttributeError:
+                # Not a dataset or dataset-like-object. Move along.
+                pass
+            else:
+                input_hooks.append(estimator_util._DatasetInitializerHook(iterator))
+                result = iterator.get_next()
+                return estimator_util.parse_iterator_result(result) + (input_hooks,)
         else:
-            input_hooks.append(estimator_util._DatasetInitializerHook(iterator))
+            err_str = "`result` must be a list of Dataset instance if set train_with_eval as True"
+            if not isinstance(result, (list, tuple)):
+                raise TypeError(err_str)
+            if len(result) != 2:
+                raise ValueError("`result` should contains 2 Dataset instances, but got {}".format(len(result)))
+            _check_dataset_structure(result[0], result[1])
+
+            train_iterator = result[0].make_one_shot_iterator()
+            eval_iterator = result[1].make_initializable_iterator()
+            input_hooks.append(estimator_util._DatasetInitializerHook(eval_iterator))
+
+            iterator = Iterator.from_string_handle(handler, result[0].output_types, result[0].output_shapes,
+                                                   result[0].output_classes)
             result = iterator.get_next()
-            return estimator_util.parse_iterator_result(result) + (input_hooks,)
-    else:
-        err_str = "`result` must be a list of Dataset instance if set train_with_eval as True"
-        if not isinstance(result, (list, tuple)):
-            raise TypeError(err_str)
-        if len(result) != 2:
-            raise ValueError("`result` should contains 2 Dataset instances, but got {}".format(len(result)))
-        _check_dataset_structure(result[0], result[1])
-
-        train_iterator = result[0].make_one_shot_iterator()
-        eval_iterator = result[1].make_initializable_iterator()
-        input_hooks.append(estimator_util._DatasetInitializerHook(eval_iterator))
-
-        iterator = Iterator.from_string_handle(handler, result[0].output_types, result[0].output_shapes,
-                                               result[0].output_classes)
-        result = iterator.get_next()
-        return estimator_util.parse_iterator_result(result) + (train_iterator, eval_iterator, input_hooks)
+            return estimator_util.parse_iterator_result(result) + (train_iterator, eval_iterator, input_hooks)
 
 
 class CustomEstimator(object):
@@ -271,6 +272,7 @@ class CustomEstimator(object):
             if not predict_keys:
                 predict_keys = [x for x in estimator_spec.predictions
                                 if x not in self.params["model"].metrics_dict]
+                predict_keys.extend(list(self.params["model"].metrics_eval))
             predictions = self._extract_keys(estimator_spec.predictions, predict_keys)
             all_hooks = list(input_hooks)
             all_hooks.extend(hooks)
@@ -309,11 +311,11 @@ class CustomEstimator(object):
             random_seed.set_random_seed(self._config.tf_random_seed)
             self._create_and_assert_global_step(g)
             features, labels, input_hooks = self._get_features_and_labels_from_input_fn(
-                input_fn, model_fn_lib.ModeKeys.PREDICT)
+                input_fn, model_fn_lib.ModeKeys.EVAL)
 
-            features_ph = {key: array_ops.placeholder(value.dtype, value.shape)
+            features_ph = {key: array_ops.placeholder(value.dtype, value.shape, name=key)
                            for key, value in features.items()}
-            labels_ph = array_ops.placeholder(labels.dtype, labels.shape)
+            labels_ph = array_ops.placeholder(labels.dtype, labels.shape, name="labels")
             feed_guide_hook = FeedGuideHook(features_ph, labels_ph, features, labels,
                                             self.model_dir)
 

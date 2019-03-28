@@ -212,19 +212,20 @@ def weighted_dice_loss(logits, labels, w_type, name=None, **kwargs):
 
 
 def sparse_focal_loss(prediction_tensor, target_tensor, alpha=0.25, gamma=2):
-    target_tensor = tf.reshape(target_tensor, [-1, 1])
-    one_minus_target = 1 - target_tensor
-    merged_target = tf.cast(tf.concat((one_minus_target, target_tensor), axis=1), tf.float32)
-    sigmoid_p = tf.nn.sigmoid(prediction_tensor)
-    zeros = tf.zeros_like(sigmoid_p, dtype=sigmoid_p.dtype)
+    with tf.name_scope("FocalLoss"):
+        target_tensor = tf.reshape(target_tensor, [-1, 1])
+        one_minus_target = 1 - target_tensor
+        merged_target = tf.cast(tf.concat((one_minus_target, target_tensor), axis=1), tf.float32)
+        sigmoid_p = tf.nn.sigmoid(prediction_tensor)
+        zeros = tf.zeros_like(sigmoid_p, dtype=sigmoid_p.dtype)
 
-    pos_p_sub = tf.where(merged_target > zeros, merged_target - sigmoid_p, zeros)
+        pos_p_sub = tf.where(merged_target > zeros, merged_target - sigmoid_p, zeros)
 
-    neg_p_sub = tf.where(merged_target > zeros, zeros, sigmoid_p)
-    per_entry_cross_ent = (pos_p_sub ** gamma) * tf.nn.softplus(-prediction_tensor) + \
-                          (neg_p_sub ** gamma) * tf.nn.softplus(prediction_tensor)
+        neg_p_sub = tf.where(merged_target > zeros, zeros, sigmoid_p)
+        per_entry_cross_ent = (pos_p_sub ** gamma) * tf.nn.softplus(-prediction_tensor) + \
+                              (neg_p_sub ** gamma) * tf.nn.softplus(prediction_tensor)
 
-    return tf.reduce_mean(tf.reduce_sum(per_entry_cross_ent, axis=1))
+        return tf.reduce_mean(tf.reduce_sum(per_entry_cross_ent, axis=1))
 
 
 ################################################################################################

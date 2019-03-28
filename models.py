@@ -14,23 +14,21 @@
 #
 # =================================================================================
 
+import copy
 import yaml  # conda install -c conda-forge pyyaml
 import tensorflow as tf
 from pathlib import Path
+from tensorflow.python import pywrap_tensorflow as pt
 
 from Networks.UNet import UNet
-from Networks.AtrousUNet import AtrousUNet
-from Networks.DeepLabV3Plus import DeepLabV3Plus
-from Networks.DiscrimUNet import DiscrimUNet
+from Networks.OSMN import OSMNUNet
 
 ModeKeys = tf.estimator.ModeKeys
 
 # Available models
 MODEL_ZOO = [
     UNet,
-    AtrousUNet,
-    DeepLabV3Plus,
-    DiscrimUNet
+    OSMNUNet
 ]
 
 
@@ -64,6 +62,15 @@ def add_arguments(parser):
     group.add_argument("--cls_branch",
                        action="store_true",
                        required=False, help="Classify branch")
+    group.add_argument("--load_weights",
+                       type=str,
+                       required=False, help="Initialize some of the model parameters from this given "
+                                            "ckpt file.")
+    group.add_argument("--weights_scope",
+                       type=str,
+                       required=False, help="Network scope of the weights in the given ckpt file, which "
+                                            "will be replaced with current network scope. If not provide,"
+                                            " it will be inferred")
 
 
 def get_model_params(args):
@@ -82,7 +89,45 @@ def get_model_params(args):
     return params
 
 
+def _find_root_scope(ckpt_filename):
+    reader = pt.NewCheckpointReader(ckpt_filename)
+    variables = list(reader.get_variable_to_shape_map())
+    for var in variables:
+        if var.startswith("Optimizer") and not var.endswith("power"):
+            return var.split("/")[1]
+        continue
+
+
+def init_partial_model(model, args):
+    if not args.load_weights:
+        return None
+
+    weights_dir = Path(args.model_dir).parent / args.load_weights
+    ckpt_filename = args.load_weights
+    if weights_dir.is_dir():
+        ckpt = tf.train.get_checkpoint_state(str(weights_dir), latest_filename="checkpoint_best")
+        if ckpt and ckpt.model_checkpoint_path:
+            ckpt_filename = ckpt.model_checkpoint_path
+
+    if not tf.train.checkpoint_exists(ckpt_filename):
+        raise FileNotFoundError("ckpt_filename {} doesn't exist".format(ckpt_filename))
+
+    root_scope = args.weights_scope or _find_root_scope(ckpt_filename)
+    model_vars = tf.global_variables(".*?{}/(?!BboxLayer)".format(model.name))
+    var_list = {var.op.name.replace(model.name, root_scope): var for var in model_vars}
+    # This is an one-off Saver. Do not add it to GraphKeys.SAVERS collection.
+    saver = tf.train.Saver(var_list=var_list)
+    tf.logging.info("Create init_fn with checkpoint: " + ckpt_filename)
+
+    def init_fn(scaffold, session):
+        _ = scaffold
+        saver.restore(session, ckpt_filename)
+
+    return init_fn
+
+
 def model_fn(features, labels, mode, params):
+    features = copy.copy(features)
     # Add graph nodes for images and labels
     images = tf.identity(features.pop("images"), name="Images")
     if labels is not None:
@@ -96,6 +141,7 @@ def model_fn(features, labels, mode, params):
     train_op = None
     predictions = None
 
+    args = params["args"]
     #############################################################################
     # create model
     model = params["model"]
@@ -111,7 +157,7 @@ def model_fn(features, labels, mode, params):
         solver_kwargs = params.get("solver_kwargs", {})
         train_op = solver(loss, *solver_args, **solver_kwargs)
 
-    if not params["args"].train_without_eval or mode == ModeKeys.PREDICT:
+    if not args.train_without_eval or mode == ModeKeys.PREDICT:
         predictions = {key: value for key, value in model.layers.items()
                        if key.endswith("Pred")}
         predictions.update(model.metrics_dict)
@@ -133,7 +179,7 @@ def model_fn(features, labels, mode, params):
         for i, split_label in enumerate(split_labels[1:]):
             predictions["Labels_{}".format(i)] = split_label
 
-        if params["args"].resize_for_batch:
+        if args.resize_for_batch:
             predictions["Bboxes"] = features["bboxes"]
 
         predictions.update({
@@ -153,9 +199,8 @@ def model_fn(features, labels, mode, params):
 
     #############################################################################
     # Initialize partial graph variables by init_fn
-    def init_fn(scaffold, session):
-        pass
-
+    init_fn = init_partial_model(model, args)
     kwargs["scaffold"] = tf.train.Scaffold(init_fn=init_fn)
 
     return tf.estimator.EstimatorSpec(mode=mode, **kwargs)
+    tf.estimator.Estimator

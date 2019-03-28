@@ -67,6 +67,7 @@ import numpy as np
 import tensorflow as tf
 from pathlib import Path
 
+import data_kits.build_data as bd
 from data_kits.build_data import ImageReader
 from data_kits.build_data import SubVolumeReader
 from data_kits.build_data import image_to_examples
@@ -204,7 +205,7 @@ def convert_to_liver(dataset, keep_only_liver, k_split=5, seed=None, folds_file=
                     for example in image_to_examples(image_reader, label_reader, split=True,
                                                      extra_int_info=extra_info):
                         writer_2d.write(example.SerializeToString())
-                        # Convert 3D volume to example
+                    # Convert 3D volume to example
                     for example in image_to_examples(image_reader, label_reader, split=False):
                         writer_3d.write(example.SerializeToString())
                     counter += 1
@@ -288,6 +289,7 @@ def convert_to_liver_bbox_group(dataset,
                                 prefix="bbox-none",
                                 group="none",
                                 only_tumor=False,
+                                mask_image=False,
                                 folds_file="k_folds.txt"):
     file_names = get_lits_list(dataset, keep_only_liver if not only_tumor else False)
     num_images = len(file_names)
@@ -340,7 +342,8 @@ def convert_to_liver_bbox_group(dataset,
                         image_reader.shape, label_reader.shape))
                 # Convert 2D slices to example
                 for example in image_to_examples(image_reader, label_reader, split=True,
-                                                 group=group, group_label=only_tumor, mask_image=only_tumor):
+                                                 group=group, group_label=only_tumor,
+                                                 mask_image=mask_image):
                     writer_2d.write(example.SerializeToString())
                 counter += 1
             print()
@@ -384,7 +387,8 @@ def convert_to_tp_dataset(dataset,
                           seed=None,
                           align=1,
                           padding=0,
-                          min_bbox_shape=None):
+                          min_bbox_shape=None,
+                          prefix="cls-0tp"):
     file_names = get_lits_list(dataset, False)
     num_images = len(file_names)
 
@@ -396,7 +400,7 @@ def convert_to_tp_dataset(dataset,
 
     counter = 1
     for i, fold in enumerate(k_folds):
-        output_filename = LiTS_records / "cls-0tp-{}-of-{}.tfrecord".format(i + 1, k_split)
+        output_filename = LiTS_records / "{}-{}-of-{}.tfrecord".format(prefix, i + 1, k_split)
         with tf.io.TFRecordWriter(str(output_filename)) as writer:
             for j, image_name in enumerate(fold):
                 image_file = LiTS_Dir / image_name
@@ -470,3 +474,92 @@ def convert_to_classify_dataset(dataset,
                     writer.write(example.SerializeToString())
                 counter += 1
             print()
+
+
+def hist_to_examples(label_reader, liver_hist_array, tumor_hist_array, split=False):
+    assert len(liver_hist_array.shape) == 2
+    assert len(tumor_hist_array.shape) == 2
+    if split:
+        liver_length = liver_hist_array.shape[1]
+        tumor_length = tumor_hist_array.shape[1]
+        for idx in label_reader.indices:
+            feature_dict = {
+                "liver_hist/encoded": bd._bytes_list_feature(liver_hist_array[idx].tobytes()),
+                "liver_hist/shape": bd._int64_list_feature(liver_length),
+                "tumor_hist/encoded": bd._bytes_list_feature(tumor_hist_array[idx].tobytes()),
+                "tumor_hist/shape": bd._int64_list_feature(tumor_length),
+                "case/name": bd._bytes_list_feature(label_reader.name)
+            }
+            yield tf.train.Example(features=tf.train.Features(feature=feature_dict))
+    else:
+        feature_dict = {
+            "liver_hist/encoded": bd._bytes_list_feature(liver_hist_array.tobytes()),
+            "liver_hist/shape": bd._int64_list_feature(liver_hist_array.shape),
+            "tumor_hist/encoded": bd._bytes_list_feature(tumor_hist_array.tobytes()),
+            "tumor_hist/shape": bd._int64_list_feature(tumor_hist_array.shape),
+            "case/name": bd._bytes_list_feature(label_reader.name)
+        }
+        yield tf.train.Example(features=tf.train.Features(feature=feature_dict))
+
+
+def convert_to_histogram_dataset(dataset,
+                                 keep_only_liver,
+                                 k_split=5,
+                                 seed=None,
+                                 prefix="hist",
+                                 folds_file="k_folds.txt",
+                                 bins=100,
+                                 xrng=(-200, 250)):
+    file_names = get_lits_list(dataset, keep_only_liver)
+    num_images = len(file_names)
+
+    k_folds = read_or_create_k_folds(Path(__file__).parent.parent / "data/LiTS/{}".format(folds_file),
+                                     file_names, k_split, seed)
+    LiTS_records = _get_lits_records_dir()
+
+    image_reader = SubVolumeReader(np.int16, extend_channel=True)
+    label_reader = SubVolumeReader(np.uint8, extend_channel=False)  # use uint8 to save space
+
+    # Convert each split
+    counter = 1
+    for i, fold in enumerate(k_folds):
+        output_filename_2d = LiTS_records / "{}-{}-{}_{}-2D-{}-of-{}.tfrecord"\
+            .format(prefix, bins, xrng[0], xrng[1], i + 1, k_split)
+        output_filename_3d = LiTS_records / "{}-{}-{}_{}-3D-{}-of-{}.tfrecord"\
+            .format(prefix, bins, xrng[0], xrng[1], i + 1, k_split)
+        print("Write to {} and {}".format(str(output_filename_2d), str(output_filename_3d)))
+        with tf.io.TFRecordWriter(str(output_filename_2d)) as writer_2d, \
+                tf.io.TFRecordWriter(str(output_filename_3d)) as writer_3d:
+            for j, image_name in enumerate(fold):
+                print("\r>> Converting fold {}, {}/{}, {}/{}"
+                      .format(i + 1, j + 1, len(fold), counter, num_images), end="")
+
+                # Read image
+                image_file = LiTS_Dir / image_name
+                seg_file = image_file.parent / image_file.name.replace("volume", "segmentation")
+
+                label_reader.read(seg_file)
+                image_reader.read(image_file)
+
+                # we have extended extra dimension for image
+                if image_reader.shape[:-1] != label_reader.shape:
+                    raise RuntimeError("Shape mismatched between image and label: {} vs {}".format(
+                        image_reader.shape, label_reader.shape))
+
+                images = image_reader.image()
+                labels = label_reader.image()
+                liver, tumor = images[labels == 1], images[labels == 2]
+                val1, _ = np.histogram(liver.flat, bins=bins, range=xrng, density=True)
+                val2, _ = np.histogram(tumor.flat, bins=bins, range=xrng, density=True)
+                val1_total = np.tile(val1[None, :].astype(np.float32), [len(label_reader.indices), 1])
+                val2_total = np.tile(val2[None, :].astype(np.float32), [len(label_reader.indices), 1])
+
+                # Convert 2D slices to example
+                for example in hist_to_examples(label_reader, val1_total, val2_total, split=True):
+                    writer_2d.write(example.SerializeToString())
+                # Convert 3D slices to example
+                for example in hist_to_examples(label_reader, val1_total, val2_total, split=False):
+                    writer_3d.write(example.SerializeToString())
+                counter += 1
+            print()
+

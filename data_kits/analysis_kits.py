@@ -18,13 +18,17 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 
 
-def compute_liver_tumor_hist(image, mask, liver_lab=1, tumor_lab=2, title="", show=True, save_path=None):
+def compute_liver_tumor_hist(image, mask, liver_lab=1, tumor_lab=2, title="",
+                             bins=50, xrng=(0, 200), alpha=0.8, density=True,
+                             yrng=(0, 1),
+                             show=True, save_path=None):
     if not show and save_path is None:
         raise ValueError("If not show, save_path must be provided.")
     liver_volume = image[mask == liver_lab]
     tumor_volume = image[mask == tumor_lab]
-    plt.hist(liver_volume.flat, bins=50, range=(0, 200), alpha=0.8, density=True)
-    plt.hist(tumor_volume.flat, bins=50, range=(0, 200), alpha=0.8, density=True)
+    val1, bin1 = plt.hist(liver_volume.flat, bins=bins, range=xrng, alpha=alpha, density=density)
+    val2, bin2 = plt.hist(tumor_volume.flat, bins=bins, range=xrng, alpha=alpha, density=density)
+    plt.ylim(yrng)
     plt.legend(["Liver HU intensity", "Tumor HU intensity"])
     plt.xlabel("Intensity in CT Sequence")
     plt.ylabel("Normalized bin count")
@@ -38,4 +42,4 @@ def compute_liver_tumor_hist(image, mask, liver_lab=1, tumor_lab=2, title="", sh
         plt.savefig(str(save_path))
     plt.close()
 
-
+    return val1, bin1, val2, bin2
