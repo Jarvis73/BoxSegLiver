@@ -19,6 +19,7 @@ import tensorflow.contrib.slim as slim
 
 import loss_metrics as losses
 from Networks import base
+from utils import distribution_utils
 
 ModeKeys = tf.estimator.ModeKeys
 metrics = losses
@@ -37,7 +38,7 @@ class UNet(base.BaseNet):
         self.name = name or "UNet"
         self.classes.extend(self.args.classes)
 
-        self.bs = args.batch_size
+        self.bs = distribution_utils.per_device_batch_size(args.batch_size, args.num_gpus)
         self.height = args.im_height
         self.width = args.im_width
         self.channel = args.im_channel
@@ -45,16 +46,18 @@ class UNet(base.BaseNet):
     def _net_arg_scope(self, *args, **kwargs):
         default_w_regu, default_b_regu = self._get_regularizer()
         default_w_init, _ = self._get_initializer()
-        normalizer, params = self._get_normalization()
 
         with slim.arg_scope([slim.conv2d, slim.conv2d_transpose],
                             weights_regularizer=default_w_regu,
                             weights_initializer=default_w_init,
-                            biases_regularizer=default_b_regu):
+                            biases_regularizer=default_b_regu) as scope:
+            if self.args.without_bn:
+                return scope
+            normalizer, params = self._get_normalization()
             with slim.arg_scope([slim.conv2d],
                                 normalizer_fn=normalizer,
-                                normalizer_params=params) as scope:
-                return scope
+                                normalizer_params=params) as scope2:
+                return scope2
 
     def _build_network(self, *args, **kwargs):
         out_channels = kwargs.get("init_channels", 64)

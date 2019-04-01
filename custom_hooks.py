@@ -20,6 +20,8 @@ import json
 import numpy as np
 from pathlib import Path
 
+from tensorflow.contrib.distribute.python import values
+from tensorflow.python.data.ops import iterator_ops
 from tensorflow.python.framework import ops
 # from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import errors_impl
@@ -45,8 +47,16 @@ class IteratorStringHandleHook(session_run_hook.SessionRunHook):
     """ Hook to initialize string handle of Iterator """
 
     def __init__(self, train_iterator, eval_iterator):
-        self._train_iterator = train_iterator
-        self._eval_iterator = eval_iterator
+        if isinstance(train_iterator, iterator_ops.Iterator) and \
+                isinstance(eval_iterator, iterator_ops.Iterator):
+            self._train_iterator = train_iterator
+            self._eval_iterator = eval_iterator
+        elif isinstance(train_iterator, values.PerDeviceDataIterator) and \
+                isinstance(eval_iterator, values.PerDeviceDataIterator):
+            self._train_iterator = train_iterator._iterator
+            self._eval_iterator = eval_iterator._iterator
+        else:
+            raise TypeError()
         self._train_handle = None
         self._eval_handle = None
 

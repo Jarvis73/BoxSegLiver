@@ -71,6 +71,9 @@ def add_arguments(parser):
                        required=False, help="Network scope of the weights in the given ckpt file, which "
                                             "will be replaced with current network scope. If not provide,"
                                             " it will be inferred")
+    group.add_argument("--without_bn",
+                       action="store_true",
+                       required=False, help="Conv without batch normalization")
 
 
 def get_model_params(args):
@@ -79,7 +82,7 @@ def get_model_params(args):
     if False:   # Add sophisticated models
         pass
     else:   # Simpler model (only need "args" to initialize)
-        params["model"] = eval(args.model)(args)
+        params["model"] = eval(args.model)
         if not args.model_config:
             args.model_config = args.model + ".yml"
         model_config_path = Path(__file__).parent / "Networks" / args.model_config
@@ -144,7 +147,10 @@ def model_fn(features, labels, mode, params):
     args = params["args"]
     #############################################################################
     # create model
-    model = params["model"]
+    model = params["model"](args)
+    if "model_instances" not in params:
+        params["model_instances"] = []
+    params["model_instances"].append(model)
     model_args = params.get("model_args", ())
     model_kwargs = params.get("model_kwargs", {})
 
@@ -163,18 +169,8 @@ def model_fn(features, labels, mode, params):
         predictions.update(model.metrics_dict)
 
         with tf.name_scope("LabelProcess/"):
-            graph = tf.get_default_graph()
-            try:
-                one_hot_label = graph.get_tensor_by_name("LabelProcess/one_hot:0")
-            except KeyError:
-                one_hot_label = tf.one_hot(labels, model.num_classes)
-
-            split_labels = []
-            try:
-                for i in range(model.num_classes):
-                    split_labels.append(graph.get_tensor_by_name("LabelProcess/split:{}".format(i)))
-            except KeyError:
-                split_labels = tf.split(one_hot_label, model.num_classes, axis=-1)
+            one_hot_label = tf.one_hot(labels, model.num_classes)
+            split_labels = tf.split(one_hot_label, model.num_classes, axis=-1)
 
         for i, split_label in enumerate(split_labels[1:]):
             predictions["Labels_{}".format(i)] = split_label
@@ -203,4 +199,3 @@ def model_fn(features, labels, mode, params):
     kwargs["scaffold"] = tf.train.Scaffold(init_fn=init_fn)
 
     return tf.estimator.EstimatorSpec(mode=mode, **kwargs)
-    tf.estimator.Estimator

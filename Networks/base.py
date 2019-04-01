@@ -113,8 +113,11 @@ class BaseNet(object):
         raise NotImplementedError
 
     def _get_regularizer(self):
-        w_reg = slim.l2_regularizer(self.args.weight_decay_rate)
-        b_reg = None if self.args.bias_decay else w_reg
+        if self.args.weight_decay_rate > 0:
+            w_reg = slim.l2_regularizer(self.args.weight_decay_rate)
+            b_reg = None if self.args.bias_decay else w_reg
+        else:
+            w_reg, b_reg = None, None
 
         return w_reg, b_reg
 

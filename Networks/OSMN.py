@@ -19,6 +19,7 @@ import tensorflow.contrib.slim as slim
 
 import loss_metrics as losses
 from Networks import base
+from utils import distribution_utils
 
 ModeKeys = tf.estimator.ModeKeys
 metrics = losses
@@ -63,16 +64,22 @@ def conditional_normalization(inputs, gamma, reuse=None, scope=None):
         return inputs * gamma
 
 
-def modulated_conv_block(net, repeat, channels, dilation=1, scope_id=0, density_mod_id=0,
+def modulated_conv_block(self, net, repeat, channels, dilation=1, scope_id=0, density_mod_id=0,
                          density_modulation_params=None,
                          spatial_modulation_params=None,
                          density_modulation=False,
                          spatial_modulation=False):
     spatial_mod_id = 0
+
     with tf.variable_scope("down_conv{}".format(scope_id)):
         for i in range(repeat):
             with tf.variable_scope("mod_conv{}".format(i + 1)):
-                net = slim.conv2d(net, channels, 3, rate=dilation)
+                if density_modulation or spatial_modulation or self.args.without_bn:
+                    net = slim.conv2d(net, channels, 3, rate=dilation, activation_fn=None)
+                else:
+                    batch_norm_params = {"scale": True, "is_training": self.is_training}
+                    net = slim.conv2d(net, channels, 3, rate=dilation, activation_fn=None,
+                                      normalizer_fn=slim.batch_norm, normalizer_params=batch_norm_params)
                 if density_modulation:
                     den_params = tf.slice(density_modulation_params, [0, density_mod_id], [-1, channels],
                                           name="de_params")
@@ -85,6 +92,7 @@ def modulated_conv_block(net, repeat, channels, dilation=1, scope_id=0, density_
                                          name="sp_params")
                     net = tf.add(net, sp_params, name="guide")
                     spatial_mod_id += channels
+                net = tf.nn.relu(net)
         return net, density_mod_id
 
 
@@ -95,7 +103,7 @@ class OSMNUNet(base.BaseNet):
         self.name = name or "OSMNUNet"
         self.classes.extend(self.args.classes)
 
-        self.bs = args.batch_size
+        self.bs = distribution_utils.per_device_batch_size(args.batch_size, args.num_gpus)
         self.height = args.im_height
         self.width = args.im_width
         self.channel = args.im_channel
@@ -110,10 +118,15 @@ class OSMNUNet(base.BaseNet):
                             biases_regularizer=default_b_regu):
             with slim.arg_scope([slim.avg_pool2d, slim.max_pool2d],
                                 padding="SAME") as scope:
-                return scope
+                if self.args.without_bn:
+                    return scope
+                normalizer, params = self._get_normalization()
+                with slim.arg_scope([slim.conv2d],
+                                    normalizer_fn=normalizer,
+                                    normalizer_params=params) as scope2:
+                    return scope2
 
     def _build_network(self, *args, **kwargs):
-        # TODO(ZJW): Add OSMN.yml
         images, labels, density_hists, sp_guide = (self._inputs["images"], self._inputs["labels"],
                                                    self._inputs["density_hists"], self._inputs["sp_guide"])
         out_channels = kwargs.get("init_channels", 64)
@@ -140,7 +153,6 @@ class OSMNUNet(base.BaseNet):
                 'decay': 0.99,
                 'scale': True,
                 'epsilon': 0.001,
-                'updates_collections': None,
                 'is_training': self.is_training
             }
 
@@ -165,11 +177,27 @@ class OSMNUNet(base.BaseNet):
                     ds_mask = slim.avg_pool2d(ds_mask, 2, scope="pool4")
                     conv5_att = slim.conv2d(ds_mask, 1024 * num_mod_layers[4], 1, scope="conv5")
 
+            def encode_arg_scope():
+                if self.args.without_bn:
+                    return slim.current_arg_scope()
+                else:
+                    encode_bn_params = {
+                        'decay': 0.99,
+                        'center': False,  # Replace with spatial guide
+                        'scale': False,  # Replace with density guide
+                        'is_training': self.is_training
+                    }
+                    with slim.arg_scope([slim.conv2d],
+                                        normalizer_fn=slim.batch_norm,
+                                        normalizer_params=encode_bn_params) as scope:
+                        return scope
+
             # encoder
             density_mod_id = 0
-            with tf.variable_scope("Encode"):
+            with tf.variable_scope("Encode"), slim.arg_scope(encode_arg_scope()):
                 net_1, density_mod_id = modulated_conv_block(
-                    images, 2, out_channels * 1, scope_id=1, density_mod_id=density_mod_id,
+                    self, images, 2, out_channels * 1, scope_id=1,
+                    density_mod_id=density_mod_id,
                     density_modulation_params=density_modulation_params,
                     spatial_modulation_params=conv1_att,
                     density_modulation=use_density_modulator and mod_early_conv,
@@ -177,7 +205,8 @@ class OSMNUNet(base.BaseNet):
 
                 net_2 = slim.max_pool2d(net_1, 2, scope="pool1")
                 net_2, density_mod_id = modulated_conv_block(
-                    net_2, 2, out_channels * 2, scope_id=2, density_mod_id=density_mod_id,
+                    self, net_2, 2, out_channels * 2, scope_id=2,
+                    density_mod_id=density_mod_id,
                     density_modulation_params=density_modulation_params,
                     spatial_modulation_params=conv2_att,
                     density_modulation=use_density_modulator,
@@ -185,7 +214,8 @@ class OSMNUNet(base.BaseNet):
 
                 net_3 = slim.max_pool2d(net_2, 2, scope="pool2")
                 net_3, density_mod_id = modulated_conv_block(
-                    net_3, 2, out_channels * 4, scope_id=3, density_mod_id=density_mod_id,
+                    self, net_3, 2, out_channels * 4, scope_id=3,
+                    density_mod_id=density_mod_id,
                     density_modulation_params=density_modulation_params,
                     spatial_modulation_params=conv3_att,
                     density_modulation=use_density_modulator,
@@ -193,7 +223,8 @@ class OSMNUNet(base.BaseNet):
 
                 net_4 = slim.max_pool2d(net_3, 2, scope="pool3")
                 net_4, density_mod_id = modulated_conv_block(
-                    net_4, 2, out_channels * 8, scope_id=4, density_mod_id=density_mod_id,
+                    self, net_4, 2, out_channels * 8, scope_id=4,
+                    density_mod_id=density_mod_id,
                     density_modulation_params=density_modulation_params,
                     spatial_modulation_params=conv4_att,
                     density_modulation=use_density_modulator,
@@ -201,7 +232,8 @@ class OSMNUNet(base.BaseNet):
 
                 net_5 = slim.max_pool2d(net_4, 2, scope="pool4")
                 net_5, density_mod_id = modulated_conv_block(
-                    net_5, 2, out_channels * 16, scope_id=5, density_mod_id=density_mod_id,
+                    self, net_5, 2, out_channels * 16, scope_id=5,
+                    density_mod_id=density_mod_id,
                     density_modulation_params=density_modulation_params,
                     spatial_modulation_params=conv5_att,
                     density_modulation=use_density_modulator,
@@ -229,7 +261,8 @@ class OSMNUNet(base.BaseNet):
             # final
             with slim.arg_scope([slim.conv2d],
                                 activation_fn=None):
-                logits = slim.conv2d(net_1r, self.num_classes, 1, scope="AdjustChannels")
+                logits = slim.conv2d(net_1r, self.num_classes, 1, activation_fn=None,
+                                     normalizer_fn=None, normalizer_params=None, scope="AdjustChannels")
                 self._layers["logits"] = logits
 
             # Probability & Prediction

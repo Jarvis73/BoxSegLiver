@@ -17,6 +17,7 @@
 import six
 import json
 import copy
+import collections
 from functools import partial
 from pathlib import Path
 
@@ -32,14 +33,18 @@ from tensorflow.python.training import training_util
 from tensorflow.python.training import warm_starting_util
 # from tensorflow.python.training import monitored_session
 from tensorflow.python.training import checkpoint_management
+from tensorflow.python.training import distribute as distribute_lib
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import random_seed
 from tensorflow.python.framework import errors_impl
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import variable_scope
+from tensorflow.python.ops import variables
+from tensorflow.python.util import nest
 from tensorflow.python.util import function_utils
 # from tensorflow.python.ops import math_ops
+from tensorflow.contrib.distribute.python import values
 
 from custom_evaluator_base import EvaluateBase
 from custom_hooks import IteratorStringHandleHook
@@ -68,24 +73,24 @@ def _add_key_value(feed_dict, key, value):
         raise TypeError("`feed_dict` must be None or a dict instance")
 
 
-def _check_dataset_structure(ds1, ds2):
-    if not isinstance(ds1, Dataset):
-        raise TypeError("input_fn must return Dataset instance, but got {}"
-                        .format(type(ds1)))
-    if not isinstance(ds2, Dataset):
-        raise TypeError("input_fn must return Dataset instance, but got {}"
-                        .format(type(ds2)))
-
-    # if ds1.output_shapes != ds2.output_shapes:
-    #     raise ValueError("Train/Eval dataset shapes mismatch: {} vs {}"
-    #                      .format(ds1.output_shapes, ds2.output_shapes))
+def _check_dataset_structure(result1, result2):
+    if isinstance(result1, Dataset) and isinstance(result2, Dataset):
+        ds1, ds2 = result1, result2
+    elif isinstance(result1, values.PerDeviceDataset) and isinstance(result2, values.PerDeviceDataset):
+        ds1, ds2 = result1._dataset, result2._dataset
+    else:
+        raise TypeError("input_fn must return Dataset instance, but got ({} {})"
+                        .format(type(result1), type(result2)))
 
     if ds1.output_types != ds2.output_types:
         raise ValueError("Train/Eval dataset types mismatch: {} vs {}"
                          .format(ds1.output_types, ds2.output_types))
 
+    return (collections.namedtuple("DatasetProp", ["shapes", "types", "classes"])
+            (ds1.output_shapes, ds1.output_types, ds1.output_classes))
 
-def parse_input_fn_result(train_with_eval, result, handler=None):
+
+def parse_input_fn_result(train_with_eval, result, handler=None, only_iterator=False):
     """Gets features, labels, and hooks from the result of an Estimator input_fn.
 
     Parameters
@@ -105,6 +110,8 @@ def parse_input_fn_result(train_with_eval, result, handler=None):
         For train with eval:
             * A list of 2 `tf.data.Dataset` object: Train Dataset & Eval Dataset
     handler: placeholder
+    only_iterator: bool
+        Return iterator or features. Set true for distribution strategy
 
     Returns
     -------
@@ -127,6 +134,9 @@ def parse_input_fn_result(train_with_eval, result, handler=None):
                 pass
             else:
                 input_hooks.append(estimator_util._DatasetInitializerHook(iterator))
+                if only_iterator:
+                    return iterator, input_hooks
+
                 result = iterator.get_next()
                 return estimator_util.parse_iterator_result(result) + (input_hooks,)
         else:
@@ -135,16 +145,32 @@ def parse_input_fn_result(train_with_eval, result, handler=None):
                 raise TypeError(err_str)
             if len(result) != 2:
                 raise ValueError("`result` should contains 2 Dataset instances, but got {}".format(len(result)))
-            _check_dataset_structure(result[0], result[1])
+            ds_prop = _check_dataset_structure(result[0], result[1])
 
             train_iterator = result[0].make_one_shot_iterator()
             eval_iterator = result[1].make_initializable_iterator()
             input_hooks.append(estimator_util._DatasetInitializerHook(eval_iterator))
 
-            iterator = Iterator.from_string_handle(handler, result[0].output_types, result[0].output_shapes,
-                                                   result[0].output_classes)
+            iterator = Iterator.from_string_handle(handler, ds_prop.types, ds_prop.shapes, ds_prop.classes)
+            if only_iterator:
+                return iterator, train_iterator, eval_iterator, input_hooks
+
             result = iterator.get_next()
             return estimator_util.parse_iterator_result(result) + (train_iterator, eval_iterator, input_hooks)
+
+
+def per_device_dataset(iterator, devices):
+    """ Split a batch features into per-device features """
+    batch = iterator.get_next()
+    index = {}
+
+    def get_ith(i_):
+        return lambda x: x[i_]
+
+    for i, d in enumerate(devices):
+        index[d] = nest.map_structure(get_ith(i), batch)
+
+    return values.regroup(index)
 
 
 class CustomEstimator(object):
@@ -163,10 +189,15 @@ class CustomEstimator(object):
     """
     def __init__(self, model_fn, model_dir=None, config=None, params=None, warm_start_from=None):
         self._config = estimator_lib.maybe_overwrite_model_dir_and_session_config(config, model_dir)
+        self._train_distribution = self._config.train_distribute
         # Model directory
         self._model_dir = self._config.model_dir
         self._session_config = self._config.session_config
         logging.info('Using config: %s', str(vars(self._config)))
+
+        # None for local mode
+        self._device_fn = (
+                self._config.device_fn or estimator_lib._get_replica_device_setter(self._config))
 
         if model_fn is None:
             raise ValueError('model_fn must be provided to Estimator.')
@@ -353,7 +384,7 @@ class CustomEstimator(object):
 
     def predict_with_session(self, session, predict_keys=None, steps=None, yield_single_examples=False):
         predictions = self._extract_keys(self._predict_keys, predict_keys)
-        pred_feed_dict = self._params["model"].get_eval_feed_dict()
+        pred_feed_dict = self._params["model_instances"][0].get_eval_feed_dict()
         if self._train_with_eval:
             pred_feed_dict = _add_key_value(pred_feed_dict, self.handler, self.dataset_handle_hook.eval_handle)
 
@@ -470,12 +501,46 @@ class CustomEstimator(object):
 
     def _get_features_and_labels_for_train_and_eval(self, input_fn, handler):
         return parse_input_fn_result(
-            True,
-            [self._call_input_fn(input_fn, model_fn_lib.ModeKeys.TRAIN),  # Keep order: [train, eval]
-             self._call_input_fn(input_fn, EVAL_WHILE_TRAIN)],
-            handler)
+            train_with_eval=True,
+            result=[self._call_input_fn(input_fn, model_fn_lib.ModeKeys.TRAIN),  # Keep order: [train, eval]
+                    self._call_input_fn(input_fn, EVAL_WHILE_TRAIN)],
+            handler=handler)
+
+    def _get_iterator_from_input_fn(self, input_fn, mode, distribution=None):
+        if distribution is not None:
+            result = distribution.distribute_dataset(
+                lambda: self._call_input_fn(input_fn, mode))
+        else:
+            result = self._call_input_fn(input_fn, mode)
+        return parse_input_fn_result(train_with_eval=False,
+                                     result=result,
+                                     only_iterator=True)
+
+    def _get_iterator_for_train_and_eval(self, input_fn, handler, distribution=None):
+        if distribution is not None:
+            result = [
+                distribution.distribute_dataset(
+                    lambda: self._call_input_fn(input_fn, model_fn_lib.ModeKeys.TRAIN)),
+                distribution.distribute_dataset(
+                    lambda: self._call_input_fn(input_fn, EVAL_WHILE_TRAIN))
+            ]
+        else:
+            result = [
+                self._call_input_fn(input_fn, model_fn_lib.ModeKeys.TRAIN),
+                self._call_input_fn(input_fn, EVAL_WHILE_TRAIN)
+            ]
+        return parse_input_fn_result(train_with_eval=True,
+                                     result=result,
+                                     handler=handler,
+                                     only_iterator=True)
 
     def _train_model(self, input_fn, hooks, saving_listeners, save_best_ckpt):
+        if self._train_distribution:
+            return self._train_model_distributed(input_fn, hooks, saving_listeners, save_best_ckpt)
+        else:
+            return self._train_model_default(input_fn, hooks, saving_listeners, save_best_ckpt)
+
+    def _train_model_default(self, input_fn, hooks, saving_listeners, save_best_ckpt):
         """Initiate training with `input_fn`, without `DistributionStrategies`.
 
         Args:
@@ -490,8 +555,7 @@ class CustomEstimator(object):
             Loss from training
         """
         worker_hooks = []
-        worker_hooks.extend(hooks)
-        with ops.Graph().as_default() as g:     # Set device if distribution
+        with ops.Graph().as_default() as g:
             random_seed.set_random_seed(self._config.tf_random_seed)
             global_step_tensor = self._create_and_assert_global_step(g)
             training_util._get_or_create_global_step_read(g)
@@ -510,11 +574,111 @@ class CustomEstimator(object):
             worker_hooks.extend(input_hooks)
 
             estimator_spec = self._call_model_fn(features, labels, model_fn_lib.ModeKeys.TRAIN, self.config)
-            self._feed_dict = self._params["model"].feed_dict
+            self._feed_dict = self._params["model_instances"][0].feed_dict
 
-            return self._train_with_estimator_spec(estimator_spec, worker_hooks,
+            return self._train_with_estimator_spec(estimator_spec, worker_hooks, hooks,
                                                    global_step_tensor, saving_listeners,
                                                    save_best_ckpt)
+
+    def _train_model_distributed(self, input_fn, hooks, saving_listeners, save_best_ckpt):
+        """Initiate training with `input_fn`, using `DistributionStrategies`.
+
+        Args:
+          input_fn: A function that provides input data for training as minibatches.
+          hooks: List of `tf.train.SessionRunHook` subclass instances. Used for
+            callbacks inside the training loop.
+          saving_listeners: list of `tf.train.CheckpointSaverListener` objects. Used
+            for callbacks that run immediately before or after checkpoint savings.
+
+        Returns:
+            Loss from training
+        """
+        self._train_distribution.configure(self._session_config)
+
+        worker_hooks = []
+        with ops.Graph().as_default() as g:
+            # We want to create the iterations variable outside the distribution scope
+            # as that is just stored on the host and mainly used to drive the loop
+            # and doesn't need to be a Mirrored/Device variable.
+            with self._train_distribution.scope():
+                random_seed.set_random_seed(self._config.tf_random_seed)
+
+                if self._train_with_eval:
+                    self.handler = array_ops.placeholder(dtypes.string, shape=(), name="Handler")
+                    iterator, self.train_iterator, self.eval_iterator, input_hooks = (
+                        self._get_iterator_for_train_and_eval(input_fn, self.handler,
+                                                              self._train_distribution))
+                else:
+                    self.handler, self.train_iterator, self.eval_iterator = None, None, None
+                    iterator, input_hooks = self._get_iterator_from_input_fn(
+                        input_fn, model_fn_lib.ModeKeys.TRAIN, self._train_distribution)
+                worker_hooks.extend(input_hooks)
+                global_step_tensor = self._create_and_assert_global_step(g)
+                # we want to add to the global collection in the main thread not the
+                # tower threads.
+                ops.add_to_collection(
+                    training_util.GLOBAL_STEP_READ_KEY,
+                    self._train_distribution.read_var(global_step_tensor))
+
+                features, labels = estimator_util.parse_iterator_result(
+                    per_device_dataset(iterator, self._train_distribution._devices))
+                grouped_estimator_spec = self._train_distribution.call_for_each_tower(
+                    self._call_model_fn,
+                    features,
+                    labels,
+                    model_fn_lib.ModeKeys.TRAIN,
+                    self.config)
+                loss = self._train_distribution.unwrap(
+                    self._train_distribution.reduce(
+                        distribute_lib.get_loss_reduction(),
+                        grouped_estimator_spec.loss,
+                        destinations="/device:CPU:0"))[0]
+                distributed_train_op = grouped_estimator_spec.train_op
+                predictions = {}
+                for key, val in grouped_estimator_spec.predictions.items():
+                    if key == "GlobalStep":
+                        predictions["GlobalStep"] = self._train_distribution.unwrap(val)[0]
+                    elif "/" in key:
+                            predictions[key] = self._train_distribution.unwrap(
+                                self._train_distribution.reduce(variables.VariableAggregation.MEAN,
+                                                                val,
+                                                                destinations="device:GPU:0"))[0]
+                    else:
+                        predictions[key] = array_ops.concat(self._train_distribution.unwrap(val),
+                                                            axis=0)
+
+                scaffold = estimator_lib._combine_distributed_scaffold(
+                    grouped_estimator_spec.scaffold, self._train_distribution)
+
+                # add a test for unwrapping per_device_hooks.
+                def get_hooks_from_the_first_device(per_device_hooks):
+                    # In tensorflow-1.12 Estimator, Next line is self._distribution.unwrap()
+                    # but self._distribution is not defined, which maybe a bug?
+                    return [
+                        self._train_distribution.unwrap(per_device_hook)[0]
+                        for per_device_hook in per_device_hooks
+                    ]
+
+                training_hooks = get_hooks_from_the_first_device(
+                    grouped_estimator_spec.training_hooks)
+                training_chief_hooks = get_hooks_from_the_first_device(
+                    grouped_estimator_spec.training_chief_hooks)
+                worker_hooks.append(
+                    estimator_util.StrategyInitFinalizeHook(
+                        self._train_distribution.initialize,
+                        self._train_distribution.finalize))
+
+                estimator_spec = model_fn_lib.EstimatorSpec(
+                    mode=grouped_estimator_spec.mode,
+                    loss=loss,
+                    train_op=self._train_distribution.group(distributed_train_op),
+                    predictions=predictions,
+                    training_hooks=training_hooks,
+                    training_chief_hooks=training_chief_hooks,
+                    scaffold=scaffold)
+                return self._train_with_estimator_spec(estimator_spec, worker_hooks, hooks,
+                                                       global_step_tensor, saving_listeners,
+                                                       save_best_ckpt)
 
     def _call_model_fn(self, features, labels, mode, config):
         model_fn_args = function_utils.fn_args(self._model_fn)
@@ -541,19 +705,20 @@ class CustomEstimator(object):
 
         return model_fn_results
 
-    def _train_with_estimator_spec(self, estimator_spec, worker_hooks,
+    def _train_with_estimator_spec(self, estimator_spec, worker_hooks, hooks,
                                    global_step_tensor, saving_listeners, save_best_ckpt):
         """Train a model with the given Estimator Spec."""
         if self._warm_start_settings:
             logging.info('Warm-starting with WarmStartSettings: %s' %
                          (self._warm_start_settings,))
             warm_starting_util.warm_start(*self._warm_start_settings)
-
+        worker_hooks.extend(hooks)
         worker_hooks.append(training.NanTensorHook(estimator_spec.loss))
         if self._config.log_step_count_steps is not None:
             tensors = {"loss": estimator_spec.loss,
                        "step": global_step_tensor}
-            tensors.update(self._params["model"].metrics)
+            tensors.update({key.replace("/", ""): val
+                            for key, val in estimator_spec.predictions.items() if "/" in key})
             worker_hooks.append(
                 training.LoggingTensorHook(tensors, every_n_iter=self._config.log_step_count_steps))
         worker_hooks.extend(estimator_spec.training_hooks)

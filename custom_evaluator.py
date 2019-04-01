@@ -124,7 +124,7 @@ class EvaluateVolume(EvaluateBase):
 
     @property
     def classes(self):
-        return self.params["model"].classes[1:]  # Remove background
+        return self.params["model_instances"][0].classes[1:]  # Remove background
 
     @property
     def metrics(self):
@@ -252,8 +252,9 @@ class EvaluateVolume(EvaluateBase):
 
     def evaluate_with_session(self, session=None, cases=None):
         predicts = [x for x in self._predict_keys
-                    if x not in self.params["model"].metrics_dict]
-        predicts.extend(self.params["model"].metrics_eval)
+                    if x not in self.params["model_instances"][0].metrics_dict]
+        # TODO(ZJW): Remove metrics_eval
+        # predicts.extend(self.params["model_instances"][0].metrics_eval)
         predict_gen = self.model.predict_with_session(session, predicts, yield_single_examples=False)
         tf.logging.info("Begin evaluating 3D ...")
         return self._evaluate(predict_gen, cases=cases, verbose=True)
@@ -413,7 +414,7 @@ class EvaluateSlice(EvaluateBase):
 
     @property
     def classes(self):
-        return self.params["model"].classes[1:]  # Remove background
+        return self.params["model_instances"][0].classes[1:]  # Remove background
 
     @property
     def metric_values(self):
@@ -429,7 +430,7 @@ class EvaluateSlice(EvaluateBase):
             self._metric_values[key].clear()
 
     def evaluate_with_session(self, session=None, cases=None):
-        predicts = list(self.params["model"].metrics_dict.keys())
+        predicts = list(self.params["model_instances"][0].metrics_dict.keys())
         tf.logging.info("Begin evaluating 2D ...")
         predict_gen = self.model.predict_with_session(session, predicts, yield_single_examples=False)
 

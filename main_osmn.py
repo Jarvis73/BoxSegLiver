@@ -26,6 +26,7 @@ import loss_metrics
 import input_pipeline_osmn
 import custom_evaluator
 from utils.logger import create_logger
+from utils import distribution_utils
 from custom_estimator import CustomEstimator
 from custom_evaluator import EvaluateVolume, EvaluateSlice
 from custom_hooks import LogLearningRateHook
@@ -72,9 +73,17 @@ def main(argv):
     _custom_tf_logger(args)
     logging.info(args)
 
+    distribution_strategy = distribution_utils.get_distribution_strategy(
+        distribution_strategy=args.distribution_strategy,
+        num_gpus=args.num_gpus,
+        num_workers=1,
+        all_reduce_alg=args.all_reduce_alg
+    ) if args.num_gpus > 1 else None
+
     if args.mode == ModeKeys.TRAIN:
         log_step_count_steps = 500
         run_config = tf.estimator.RunConfig(
+            train_distribute=distribution_strategy,
             tf_random_seed=TF_RANDOM_SEED,
             save_summary_steps=200,
             save_checkpoints_steps=5000,

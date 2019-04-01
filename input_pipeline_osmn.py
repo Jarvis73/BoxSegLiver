@@ -19,9 +19,11 @@ import tensorflow as tf
 from functools import partial
 from pathlib import Path
 from tensorflow.python.platform import tf_logging as logging
+from tensorflow.contrib import data as contrib_data
 
 from utils import image_ops
 from utils import array_kits
+from utils import distribution_utils
 
 Dataset = tf.data.Dataset
 ModeKeys = tf.estimator.ModeKeys
@@ -546,14 +548,13 @@ def data_processing_eval(features, labels, args):
 
 
 def get_2d_multi_records_dataset_for_train(image_filenames, hist_filenames, args):
-    augment_fn = partial(data_augmentation, args=args)
     filter_fn = partial(filter_slices, args=args, strategy="area", size=args.filter_size)
 
     def parse_image_hist(*examples):
         features, labels = parse_2d_example_proto(examples[0], mode=ModeKeys.TRAIN, args=args)
         hists = parse_hist_example_proto(examples[1], nd=2, args=args)
         features["density_hists"] = hists["hists"]
-        return features, labels
+        return data_augmentation(features, labels, args=args)
 
     if len(image_filenames) != len(hist_filenames):
         raise ValueError("Image and bbox shape mismatch: {} vs {}"
@@ -569,25 +570,24 @@ def get_2d_multi_records_dataset_for_train(image_filenames, hist_filenames, args
         dataset = Dataset.zip((tf.data.TFRecordDataset(image_filenames[0]),
                                tf.data.TFRecordDataset(hist_filenames[0])))
 
+    bs = distribution_utils.per_device_batch_size(args.batch_size, args.num_gpus)
     dataset = (dataset.filter(filter_fn)
-               .apply(tf.data.experimental.shuffle_and_repeat(buffer_size=SHUFFLE_BUFFER_SIZE,
-                                                              count=None, seed=SEED_BATCH))
-               .map(parse_image_hist, num_parallel_calls=args.batch_size)
-               .map(augment_fn, num_parallel_calls=args.batch_size)
-               .batch(args.batch_size)
-               .prefetch(buffer_size=args.batch_size))
+               .prefetch(buffer_size=bs)
+               .shuffle(buffer_size=SHUFFLE_BUFFER_SIZE, seed=SEED_BATCH)
+               .repeat(count=None)
+               .apply(tf.data.experimental.map_and_batch(parse_image_hist, bs,
+                                                         num_parallel_batches=1))
+               .prefetch(buffer_size=contrib_data.AUTOTUNE))
 
     return dataset
 
 
 def get_2d_multi_records_dataset_for_eval(image_filenames, hist_filenames, args):
-    augment_fn = partial(data_processing_eval_while_train, args=args)
-
     def parse_image_hist(*examples):
         features, labels = parse_2d_example_proto(examples[0], mode="eval_while_train", args=args)
         hists = parse_hist_example_proto(examples[1], nd=2, args=args)
         features["density_hists"] = hists["hists"]
-        return features, labels
+        return data_processing_eval_while_train(features, labels, args=args)
 
     if len(image_filenames) != len(hist_filenames):
         raise ValueError("Image and bbox shape mismatch: {} vs {}"
@@ -599,10 +599,11 @@ def get_2d_multi_records_dataset_for_eval(image_filenames, hist_filenames, args)
         dataset = dataset.concatenate(Dataset.zip((tf.data.TFRecordDataset(image_filename),
                                                    tf.data.TFRecordDataset(hist_filename))))
 
-    dataset = (dataset.map(parse_image_hist, num_parallel_calls=args.batch_size)
-               .map(augment_fn, num_parallel_calls=args.batch_size)
-               .batch(args.batch_size, drop_remainder=True)
-               .prefetch(buffer_size=args.batch_size))
+    bs = distribution_utils.per_device_batch_size(args.batch_size, args.num_gpus)
+    dataset = (dataset.apply(tf.data.experimental.map_and_batch(parse_image_hist, bs,
+                                                                num_parallel_batches=1,
+                                                                drop_remainder=True))
+               .prefetch(buffer_size=contrib_data.AUTOTUNE))
 
     return dataset
 
@@ -714,7 +715,6 @@ def _flat_map_fn_multi_channels(x, y, mode, args):
 
 
 def get_3d_multi_records_dataset_for_eval(image_filenames, hist_filenames, mode, args):
-    before_flat_fn = partial(_before_flat_fn, args=args)
     flat_fn = (partial(_flat_map_fn, mode=mode, args=args)
                if args.input_group == 1 else
                partial(_flat_map_fn_multi_channels, mode=mode, args=args))
@@ -726,7 +726,7 @@ def get_3d_multi_records_dataset_for_eval(image_filenames, hist_filenames, mode,
         features, labels = parse_3d_example_proto(examples[0], args=args)
         hists = parse_hist_example_proto(examples[1], nd=3, args=args, pad=features["pads"])
         features["density_hists"] = hists["hists"]
-        return features, labels
+        return _before_flat_fn(features, labels, args=args)
 
     if len(image_filenames) != len(hist_filenames):
         raise ValueError("Image and bbox shape mismatch: {} vs {}"
@@ -740,11 +740,11 @@ def get_3d_multi_records_dataset_for_eval(image_filenames, hist_filenames, mode,
     if args.eval_skip_num:
         dataset = dataset.skip(args.eval_skip_num)
 
+    bs = distribution_utils.per_device_batch_size(args.batch_size, args.num_gpus)
     dataset = (dataset.map(parse_image_hist, num_parallel_calls=2)
-               .map(before_flat_fn, num_parallel_calls=2)
                .flat_map(flat_fn)
-               .map(augment_fn, num_parallel_calls=args.batch_size)
-               .batch(args.batch_size)
-               .prefetch(buffer_size=args.batch_size))
+               .apply(tf.data.experimental.map_and_batch(augment_fn, bs,
+                                                         num_parallel_batches=1))
+               .prefetch(buffer_size=contrib_data.AUTOTUNE))
 
     return dataset

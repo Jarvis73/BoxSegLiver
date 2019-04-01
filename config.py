@@ -43,6 +43,23 @@ def add_arguments(parser):
                        action="store_true",
                        required=False, help="Save prediction to file")
 
+    group = parser.add_argument_group(title="Distribution Arguments")
+    group.add_argument("--distribution_strategy",
+                       type=str,
+                       default="off",
+                       choices=['off', 'default', 'one_device', 'mirrored', 'parameter_server'],
+                       required=False, help="A string specify which distribution strategy to use "
+                                            "(default: %(default)s)")
+    group.add_argument("--num_gpus",
+                       type=int,
+                       default=1,
+                       required=False, help="Number of gpus to run this model")
+    group.add_argument("--all_reduce_alg",
+                       type=str,
+                       default="",
+                       choices=["", "hierarchical_copy", "nccl"],
+                       required=False, help="Specify which algorithm to use when performing all-reduce")
+
 
 def check_args(args, parser):
 
