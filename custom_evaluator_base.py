@@ -14,6 +14,11 @@
 #
 # =================================================================================
 
+import copy
+from functools import reduce
+from pathlib import Path
+from collections import defaultdict
+
 
 class EvaluateBase(object):
     """ Base class for custom evaluator """
@@ -31,8 +36,36 @@ class EvaluateBase(object):
 
         self.model = model
         self.params = model.params
-        self._metrics = model.params["args"].metrics_eval
         self._predict_keys = self.model._predict_keys
+
+        self._metric_values = defaultdict(list)
+
+    @property
+    def metric_values(self):
+        return self._metric_values
+
+    def append_metrics(self, pairs):
+        for key, value in pairs.items():
+            self._metric_values[key].append(value)
+
+    def clear_metrics(self):
+        for key in self._metric_values:
+            self._metric_values[key].clear()
+
+    def save_metrics(self, save_file, save_dir=None):
+        max_len = reduce(max, [len(val) for val in self._metric_values.values()])
+        temp_metrics = copy.deepcopy(self._metric_values)
+        for key in self._metric_values:
+            diff = max_len - len(self._metric_values)
+            temp_metrics[key].extend(["--"] * diff)
+
+        keys = list(temp_metrics.keys())
+        save_path = Path(save_dir) / save_file if save_dir else save_file
+        with Path(save_path).open("w") as f:
+            f.write(",".join(map(str, keys)) + "\n")
+            for i in range(max_len):
+                f.write(",".join([str(temp_metrics[key][i]) for key in keys]) + "\n")
+        print("Write all metrics to", str(save_file))
 
     def evaluate_with_session(self, session):
         """

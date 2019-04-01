@@ -238,7 +238,7 @@ def get_metrics():
         yield metric
 
 
-def metric_dice(logits, labels, eps=1e-5, collections=METRICS, name=None):
+def metric_dice(logits, labels, eps=1e-5, collections=METRICS, name=None, reduce=True):
     """
     Dice coefficient for N-D Tensor.
 
@@ -256,6 +256,8 @@ def metric_dice(logits, labels, eps=1e-5, collections=METRICS, name=None):
         collections to collect metrics
     name: str
         operation name used in tensorflow
+    reduce: bool
+        reduce metrics by mean or not
 
     Returns
     -------
@@ -271,12 +273,15 @@ def metric_dice(logits, labels, eps=1e-5, collections=METRICS, name=None):
         left = tf.reduce_sum(logits, axis=sum_axis)
         right = tf.reduce_sum(labels, axis=sum_axis)
         dice = (2 * intersection + eps) / (left + right + eps)
-        dice = tf.reduce_mean(dice, name="value")
+        if reduce:
+            dice = tf.reduce_mean(dice, name="value")
+        else:
+            dice = tf.identity(dice, name="value")
         tf.add_to_collection(collections, dice)
         return dice
 
 
-def metric_voe(logits, labels, eps=1e-5, collections=METRICS, name=None):
+def metric_voe(logits, labels, eps=1e-5, collections=METRICS, name=None, reduce=True):
     """ Volumetric Overlap Error for N-D Tensor """
     dim = len(logits.get_shape())
     sum_axis = list(range(1, dim))
@@ -287,12 +292,15 @@ def metric_voe(logits, labels, eps=1e-5, collections=METRICS, name=None):
         numerator = tf.reduce_sum(logits * labels, axis=sum_axis)
         denominator = tf.reduce_sum(tf.clip_by_value(logits + labels, 0.0, 1.0), axis=sum_axis)
         voe = 100 * (1.0 - numerator / (denominator + eps))
-        voe = tf.reduce_mean(voe, name="value")
+        if reduce:
+            voe = tf.reduce_mean(voe, name="value")
+        else:
+            voe = tf.identity(voe, name="value")
         tf.add_to_collection(collections, voe)
         return voe
 
 
-def metric_vd(logits, labels, eps=1e-5, collections=METRICS, name=None):
+def metric_vd(logits, labels, eps=1e-5, collections=METRICS, name=None, reduce=True):
     """ Relative Volume Difference for N-D Tensor """
     dim = len(logits.get_shape())
     sum_axis = list(range(1, dim))
@@ -303,7 +311,10 @@ def metric_vd(logits, labels, eps=1e-5, collections=METRICS, name=None):
         a = tf.reduce_sum(logits, axis=sum_axis)
         b = tf.reduce_sum(labels, axis=sum_axis)
         vd = 100 * (tf.abs(a - b) / (b + eps))
-        vd = tf.reduce_mean(vd, name="value")
+        if reduce:
+            vd = tf.reduce_mean(vd, name="value")
+        else:
+            vd = tf.identity(vd, name="value")
         tf.add_to_collection(collections, vd)
         return vd
 

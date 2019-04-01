@@ -64,6 +64,7 @@ class BaseNet(object):
     def mode(self, new_mode):
         if new_mode in [ModeKeys.TRAIN, ModeKeys.EVAL, ModeKeys.PREDICT]:
             self._mode = new_mode
+            self._is_training = self.mode == ModeKeys.TRAIN
 
     @property
     def is_training(self):
@@ -182,14 +183,16 @@ class BaseNet(object):
         with slim.arg_scope(self._net_arg_scope()):
             self._build_network(*args, **kwargs)
 
+        ret = None
         if self.mode == ModeKeys.TRAIN:
-            loss = self._build_loss()
-            self._build_metrics()
+            ret = self._build_loss()
+        self._build_metrics()
+        if self.mode == ModeKeys.TRAIN:
             # Call _build_summaries() after _build_loss() to summarize losses and
             # _build_metrics() to summarize metrics
             self._build_summaries()
 
-            return loss
+        return ret
 
     def get_eval_feed_dict(self):
         if self._args.normalizer == "batch_norm" and not isinstance(self._is_training, bool):

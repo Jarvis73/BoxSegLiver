@@ -276,7 +276,8 @@ class CustomEstimator(object):
                                      hooks=hooks,
                                      checkpoint_path=checkpoint_path,
                                      cases=cases)
-        with (Path(self.model_dir) / "eval_results.txt").open("w") as f:
+        with (Path(self.model_dir) / "eval_results{}.txt".format("_3d" if self.params["args"].eval_3d
+                                                                 else "_2d")).open("w") as f:
             json.dump(results, f)
 
     def predict(self,
@@ -299,11 +300,16 @@ class CustomEstimator(object):
             estimator_spec = self._call_model_fn(
                 features, labels, model_fn_lib.ModeKeys.PREDICT, self.config)
 
-            # Evaluating volume don't need metrics in model, we use XXXPred to generate 3D predict
-            if not predict_keys:
+            if isinstance(predict_keys, list):
+                predict_keys += list(self.params["model_instances"][0].metrics_dict.keys())
+            elif predict_keys is None:
+                # Evaluating volume don't need metrics in model, we use XXXPred to generate 3D predict
                 predict_keys = [x for x in estimator_spec.predictions
-                                if x not in self.params["model"].metrics_dict]
+                                if x not in self.params["model_instances"][0].metrics_dict]
                 predict_keys.extend(list(self.params["model"].metrics_eval))
+            else:
+                raise TypeError("predict_keys must be None(for 3d eval) or a list(for 2d eval, "
+                                "for example [\"Names\", \"Indices\"])")
             predictions = self._extract_keys(estimator_spec.predictions, predict_keys)
             all_hooks = list(input_hooks)
             all_hooks.extend(hooks)
@@ -353,10 +359,16 @@ class CustomEstimator(object):
             estimator_spec = self._call_model_fn(
                 features_ph, labels_ph, model_fn_lib.ModeKeys.PREDICT, self.config)
 
-            # Evaluating volume don't need metrics in model, we use XXXPred to generate 3D predict
-            if not predict_keys:
+            if isinstance(predict_keys, list):
+                predict_keys += list(self.params["model_instances"][0].metrics_dict.keys())
+            elif predict_keys is None:
+                # Evaluating volume don't need metrics in model, we use XXXPred to generate 3D predict
                 predict_keys = [x for x in estimator_spec.predictions
-                                if x not in self.params["model"].metrics_dict]
+                                if x not in self.params["model_instances"][0].metrics_dict]
+                predict_keys.extend(list(self.params["model"].metrics_eval))
+            else:
+                raise TypeError("predict_keys must be None(for 3d eval) or a list(for 2d eval, "
+                                "for example [\"Names\", \"Indices\"])")
             predictions = self._extract_keys(estimator_spec.predictions, predict_keys)
             feed_guide_hook.predictions = predictions
 

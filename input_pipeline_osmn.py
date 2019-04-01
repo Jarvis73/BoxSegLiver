@@ -145,6 +145,10 @@ def add_arguments(parser):
                        default=100,
                        required=False, help="Input pipeline example filter for removing small size objects "
                                             "(default: %(default)d)")
+    group.add_argument("--case_weights",
+                       action="store_true",
+                       required=False, help="Add cases' weights to loss for balancing dataset. If set, "
+                                            "'extra/weights' will be parsed from example proto")
     group.add_argument("--hist_scale",
                        type=float,
                        default=20.0,
@@ -201,19 +205,16 @@ def input_fn(mode, params):
     if len(hist_records) == 0:
         raise ValueError("No valid hist dataset found!")
 
-    if mode == ModeKeys.TRAIN:
-        logging.info("Train: {}".format(tf_records))
-        return get_2d_multi_records_dataset_for_train(tf_records, hist_records, args)
-    elif mode == "eval_while_train":
-        logging.info("Eval WT: {}".format(tf_records))
-        if args.eval_3d:
-            return get_3d_multi_records_dataset_for_eval(tf_records, hist_records, mode, args)
-        else:
-            return get_2d_multi_records_dataset_for_eval(tf_records, hist_records, args)
-    elif mode == ModeKeys.EVAL:
-        # For 3D
-        logging.info("Eval: {}".format(tf_records))
-        return get_3d_multi_records_dataset_for_eval(tf_records, hist_records, mode, args)
+    with tf.variable_scope("InputPipeline"):
+        if mode == ModeKeys.TRAIN:
+            logging.info("Train: {}".format(tf_records))
+            return get_2d_multi_records_dataset_for_train(tf_records, hist_records, args)
+        elif mode in ["eval_while_train", "eval"]:
+            logging.info("Eval{}: {}".format("" if mode == "eval" else " WT", tf_records))
+            if args.eval_3d:
+                return get_3d_multi_records_dataset_for_eval(tf_records, hist_records, mode, args)
+            else:
+                return get_2d_multi_records_dataset_for_eval(tf_records, hist_records, mode, args)
 
 
 def filter_slices(*example_proto, args=None, strategy="empty", **kwargs):
@@ -247,11 +248,18 @@ def filter_slices(*example_proto, args=None, strategy="empty", **kwargs):
     with tf.name_scope("DecodeProto/"):
         if strategy == "empty":
             features = {"extra/empty": tf.FixedLenFeature([], tf.int64)}
+            if args.case_weights:
+                features["extra/weights"] = tf.FixedLenFeature([], tf.float32)
             features = tf.parse_single_example(example_proto[0], features=features)
 
             cond1 = tf.equal(features["extra/empty"], 0)
+            if args.case_weights:
+                cond2 = tf.less(tf.random.uniform((), dtype=tf.float32), features["extra/weights"])
+                return tf.logical_and(cond1, cond2)
         else:   # strategy == "area"
             features = {"segmentation/encoded": tf.FixedLenFeature([], tf.string)}
+            if args.case_weights:
+                features["extra/weights"] = tf.FixedLenFeature([], tf.float32)
             features = tf.parse_single_example(example_proto[0], features=features)
 
             label = tf.decode_raw(features["segmentation/encoded"], tf.uint8, name="DecodeMask")
@@ -262,6 +270,9 @@ def filter_slices(*example_proto, args=None, strategy="empty", **kwargs):
             num_dense = tf.count_nonzero(obj_label)
 
             cond1 = tf.greater_equal(num_dense, kwargs["size"])
+            if args.case_weights:
+                cond2 = tf.less(tf.random.uniform((), dtype=tf.float32), features["extra/weights"])
+                return tf.logical_and(cond1, cond2)
 
         return cond1
 
@@ -277,6 +288,8 @@ def parse_2d_example_proto(example_proto, mode, args):
             "segmentation/shape": tf.FixedLenFeature([3 if args.only_tumor else 2], tf.int64),
             "extra/number": tf.FixedLenFeature([], tf.int64),
         }
+        if args.case_weights:
+            features["extra/weights"] = tf.FixedLenFeature([], tf.float32)
         features = tf.parse_single_example(example_proto, features=features)
 
         with tf.name_scope(PREPROCESS):
@@ -299,6 +312,10 @@ def parse_2d_example_proto(example_proto, mode, args):
                 ret_features["pads"] = tf.constant(0, dtype=tf.int64)
             if args.resize_for_batch:
                 ret_features["bboxes"] = tf.constant([0] * 6, dtype=tf.int64)
+            if args.case_weights:
+                ret_features["weights"] = features["extra/weights"]
+            if mode != "train" and not args.eval_3d:
+                ret_features["indices"] = features["extra/number"]
 
     # return features and labels
     return ret_features, label
@@ -444,18 +461,19 @@ def data_augmentation(features, labels, args):
             if args.hist_noise:
                 features["density_hists"] += tf.random.normal(features["density_hists"].shape) * args.hist_noise_scale
 
-        logging.info("Train: Resize image to {} x {}".format(args.im_height, args.im_width))
-        image = tf.image.resize_bilinear(tf.expand_dims(features["images"], axis=0),
-                                         [args.im_height, args.im_width])
-        features["images"] = tf.squeeze(image, axis=0)
-        logging.info("Train: Resize guide to {} x {}".format(args.im_height, args.im_width))
-        guide = tf.image.resize_bilinear(tf.expand_dims(features["sp_guide"], axis=0),
-                                         [args.im_height, args.im_width])
-        features["sp_guide"] = tf.squeeze(guide, axis=0)
-        logging.info("Train: Resize label to {} x {}".format(args.im_height, args.im_width))
-        labels = tf.image.resize_nearest_neighbor(tf.expand_dims(tf.expand_dims(labels, axis=0), axis=-1),
-                                                  [args.im_height, args.im_width])
-        labels = tf.squeeze(labels, axis=(0, -1))
+        if args.resize_for_batch:
+            logging.info("Train: Resize image to {} x {}".format(args.im_height, args.im_width))
+            image = tf.image.resize_bilinear(tf.expand_dims(features["images"], axis=0),
+                                             [args.im_height, args.im_width])
+            features["images"] = tf.squeeze(image, axis=0)
+            logging.info("Train: Resize guide to {} x {}".format(args.im_height, args.im_width))
+            guide = tf.image.resize_bilinear(tf.expand_dims(features["sp_guide"], axis=0),
+                                             [args.im_height, args.im_width])
+            features["sp_guide"] = tf.squeeze(guide, axis=0)
+            logging.info("Train: Resize label to {} x {}".format(args.im_height, args.im_width))
+            labels = tf.image.resize_nearest_neighbor(tf.expand_dims(tf.expand_dims(labels, axis=0), axis=-1),
+                                                      [args.im_height, args.im_width])
+            labels = tf.squeeze(labels, axis=(0, -1))
 
         if args.only_tumor:
             logging.info("Train: Clip label to [0, 1]")
@@ -502,20 +520,20 @@ def data_processing_eval_while_train(features, labels, args):
         guide = tf.py_func(_wrap_get_gd_image_multi_objs, [labels], tf.float32)
         features["sp_guide"] = guide
 
-    logging.info("Eval WT: Resize image to {} x {}".format(args.im_height, args.im_width))
-    image = tf.image.resize_bilinear(tf.expand_dims(features["images"], axis=0),
-                                     [args.im_height, args.im_width])
-    features["images"] = tf.squeeze(image, axis=0)
-    logging.info("Eval WT: Resize guide to {} x {}".format(args.im_height, args.im_width))
-    guide = tf.image.resize_bilinear(tf.expand_dims(features["sp_guide"], axis=0),
-                                     [args.im_height, args.im_width])
-    features["sp_guide"] = tf.squeeze(guide, axis=0)
-
-    if not args.eval_3d:    # 3D evaluation don't need to resize label
-        logging.info("Eval WT: Resize label to {} x {}".format(args.im_height, args.im_width))
-        labels = tf.image.resize_nearest_neighbor(tf.expand_dims(tf.expand_dims(labels, axis=0), axis=-1),
-                                                  [args.im_height, args.im_width])
-        labels = tf.squeeze(labels, axis=(0, -1))
+    if args.resize_for_batch:
+        logging.info("Eval WT: Resize image to {} x {}".format(args.im_height, args.im_width))
+        image = tf.image.resize_bilinear(tf.expand_dims(features["images"], axis=0),
+                                         [args.im_height, args.im_width])
+        features["images"] = tf.squeeze(image, axis=0)
+        logging.info("Eval WT: Resize guide to {} x {}".format(args.im_height, args.im_width))
+        guide = tf.image.resize_bilinear(tf.expand_dims(features["sp_guide"], axis=0),
+                                         [args.im_height, args.im_width])
+        features["sp_guide"] = tf.squeeze(guide, axis=0)
+        if not args.eval_3d:    # 3D evaluation don't need to resize label
+            logging.info("Eval WT: Resize label to {} x {}".format(args.im_height, args.im_width))
+            labels = tf.image.resize_nearest_neighbor(tf.expand_dims(tf.expand_dims(labels, axis=0), axis=-1),
+                                                      [args.im_height, args.im_width])
+            labels = tf.squeeze(labels, axis=(0, -1))
 
     if args.only_tumor:
         logging.info("Eval WT: Clip label to [0, 1]")
@@ -527,16 +545,17 @@ def data_processing_eval_while_train(features, labels, args):
 
 
 def data_processing_eval(features, labels, args):
-    # Resize only when batch size > 1 for batch operation
-    logging.info("Eval: Resize image to {} x {}".format(args.im_height, args.im_width))
-    image = tf.image.resize_bilinear(tf.expand_dims(features["images"], axis=0),
-                                     [args.im_height, args.im_width])
-    features["images"] = tf.squeeze(image, axis=0)
-    logging.info("Eval: Resize guide to {} x {}".format(args.im_height, args.im_width))
-    guide = tf.image.resize_bilinear(tf.expand_dims(features["sp_guide"], axis=0),
-                                     [args.im_height, args.im_width])
-    features["sp_guide"] = tf.squeeze(guide, axis=0)
-    # Label isn't need resize
+    """ For computing 3d metrics """
+    if args.resize_for_batch:
+        logging.info("Eval: Resize image to {} x {}".format(args.im_height, args.im_width))
+        image = tf.image.resize_bilinear(tf.expand_dims(features["images"], axis=0),
+                                         [args.im_height, args.im_width])
+        features["images"] = tf.squeeze(image, axis=0)
+        logging.info("Eval: Resize guide to {} x {}".format(args.im_height, args.im_width))
+        guide = tf.image.resize_bilinear(tf.expand_dims(features["sp_guide"], axis=0),
+                                         [args.im_height, args.im_width])
+        features["sp_guide"] = tf.squeeze(guide, axis=0)
+        # Label isn't need resize
 
     if args.only_tumor:
         logging.info("Eval: Clip label to [0, 1]")
@@ -582,9 +601,9 @@ def get_2d_multi_records_dataset_for_train(image_filenames, hist_filenames, args
     return dataset
 
 
-def get_2d_multi_records_dataset_for_eval(image_filenames, hist_filenames, args):
+def get_2d_multi_records_dataset_for_eval(image_filenames, hist_filenames, mode, args):
     def parse_image_hist(*examples):
-        features, labels = parse_2d_example_proto(examples[0], mode="eval_while_train", args=args)
+        features, labels = parse_2d_example_proto(examples[0], mode=mode, args=args)
         hists = parse_hist_example_proto(examples[1], nd=2, args=args)
         features["density_hists"] = hists["hists"]
         return data_processing_eval_while_train(features, labels, args=args)

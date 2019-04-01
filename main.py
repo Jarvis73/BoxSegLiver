@@ -124,8 +124,7 @@ def main(argv):
 
         estimator = CustomEstimator(models.model_fn, args.model_dir, run_config, params)
 
-        evaluator = EvaluateVolume(estimator)
-
+        evaluator = EvaluateVolume(estimator) if args.eval_3d else EvaluateSlice(estimator)
         estimator.evaluate(evaluator,
                            input_pipeline.input_fn,
                            checkpoint_path=args.ckpt_path,

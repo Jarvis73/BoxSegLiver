@@ -187,6 +187,8 @@ def model_fn(features, labels, mode, params):
         predictions["GlobalStep"] = tf.train.get_global_step(tf.get_default_graph())
     if "livers" in features:
         predictions["BgMasks"] = features["livers"]
+    if mode == ModeKeys.PREDICT and not args.eval_3d:
+        predictions["Indices"] = features["indices"]
 
     #############################################################################
     kwargs = {"loss": loss,

@@ -4,6 +4,7 @@ TASK=$1
 GPU_ID=$2
 shift 2
 
+IFS="," read -ra GPU_IDS <<< ${GPU_ID}
 PROJECT_DIR=$(dirname $(dirname $(realpath $0)))
 BASE_NAME=$(basename $0)
 
@@ -26,6 +27,7 @@ if [ "$TASK" == "train" ]; then
         --loss_numeric_w 0.2 0.4 4.4 \
         --weight_decay_rate 0 \
         --input_group 3 \
+        --distribution_strategy mirrored --num_gpus ${#GPU_IDS[@]} \
         $@
 elif [ "$TASK" == "eval" ]; then
     PYTHONPATH=${PROJECT_DIR} CUDA_VISIBLE_DEVICES=${GPU_ID} python ./main.py \

@@ -152,20 +152,10 @@ class UNet(base.BaseNet):
             tf.logging.warning("Model not return prediction, no metric will be created! "
                                "If needed, set ret_pred=true in <model>.yml")
             return
-        if self.mode in [ModeKeys.TRAIN, ModeKeys.EVAL]:
+        if self.mode in [ModeKeys.TRAIN, ModeKeys.PREDICT]:
             with tf.name_scope("LabelProcess/"):
-                graph = tf.get_default_graph()
-                try:
-                    one_hot_label = graph.get_tensor_by_name("LabelProcess/one_hot:0")
-                except KeyError:
-                    one_hot_label = tf.one_hot(self._inputs["labels"], self.num_classes)
-
-                split_labels = []
-                try:
-                    for i in range(self.num_classes):
-                        split_labels.append(graph.get_tensor_by_name("LabelProcess/split:{}".format(i)))
-                except KeyError:
-                    split_labels = tf.split(one_hot_label, self.num_classes, axis=-1)
+                one_hot_label = tf.one_hot(self._inputs["labels"], self.num_classes)
+                split_labels = tf.split(one_hot_label, self.num_classes, axis=-1)
 
             with tf.name_scope("Metrics"):
                 for i in range(1, self.num_classes):
@@ -174,7 +164,7 @@ class UNet(base.BaseNet):
                     labels = split_labels[i]
                     for met in self.args.metrics_train:
                         metric_func = eval("metrics.metric_" + met.lower())
-                        res = metric_func(logits, labels, name=obj + met)
+                        res = metric_func(logits, labels, name=obj + met, reduce=self.is_training)
                         self.metrics_dict["{}/{}".format(obj, met)] = res
 
     def _build_summaries(self):

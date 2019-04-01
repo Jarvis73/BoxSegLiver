@@ -142,10 +142,6 @@ def add_arguments(parser):
                        action="store_true",
                        required=False, help="Add cases' weights to loss for balancing dataset. If set, "
                                             "'extra/weights' will be parsed from example proto")
-    group.add_argument("--gt_boxes_height",
-                       type=int,
-                       default=10,
-                       required=False, help="Gt boxes height")
 
 
 def _collect_datasets(datasets):
@@ -187,16 +183,12 @@ def input_fn(mode, params):
         if mode == ModeKeys.TRAIN:
             logging.info("Train: {}".format(tf_records))
             return get_2d_multi_records_dataset_for_train(tf_records, args)
-        elif mode == "eval_while_train":
-            logging.info("Eval WT: {}".format(tf_records))
+        elif mode in ["eval_while_train", "eval"]:
+            logging.info("Eval{}: {}".format("" if mode == "eval" else " WT", tf_records))
             if args.eval_3d:
                 return get_3d_multi_records_dataset_for_eval(tf_records, mode, args)
             else:
-                return get_2d_multi_records_dataset_for_eval(tf_records, args)
-        elif mode == ModeKeys.EVAL:
-            # For 3D
-            logging.info("Eval: {}".format(tf_records))
-            return get_3d_multi_records_dataset_for_eval(tf_records, mode, args)
+                return get_2d_multi_records_dataset_for_eval(tf_records, mode, args)
 
 
 def filter_slices(*example_proto, args=None, strategy="empty", **kwargs):
@@ -282,6 +274,8 @@ def parse_2d_example_proto(example_proto, mode, args):
             "segmentation/shape": tf.FixedLenFeature([2], tf.int64),
             "extra/number": tf.FixedLenFeature([], tf.int64),
         }
+        if args.case_weights:
+            features["extra/weights"] = tf.FixedLenFeature([], tf.float32)
         features = tf.parse_single_example(example_proto, features=features)
 
         with tf.name_scope(PREPROCESS):
@@ -306,9 +300,10 @@ def parse_2d_example_proto(example_proto, mode, args):
                 ret_features["pads"] = tf.constant(0, dtype=tf.int64)
             if args.resize_for_batch:
                 ret_features["bboxes"] = tf.constant([0] * 6, dtype=tf.int64)
-
             if args.case_weights:
                 ret_features["weights"] = features["extra/weights"]
+            if mode != "train" and not args.eval_3d:
+                ret_features["indices"] = features["extra/number"]
 
     # return features and labels
     return ret_features, label
@@ -388,35 +383,6 @@ def parse_3d_example_proto(example_proto, args):
     return ret_features, label
 
 
-def parse_bb_example_proto(example_proto, args):
-    """
-    Parse example proto
-
-    Parameters
-    ----------
-    example_proto
-    args: ArgumentParser
-        Used arguments: w_width, w_level
-
-    Returns
-    -------
-    features and labels
-
-    """
-    _ = args
-    logging.info("Parse bb example")
-    with tf.name_scope("DecodeProto/"):
-        features = {
-            "name": tf.FixedLenFeature([], tf.string),
-            "data": tf.FixedLenFeature([], tf.string),
-            "shape": tf.FixedLenFeature([2], tf.int64)
-        }
-        features = tf.parse_single_example(example_proto, features=features)
-        data = tf.decode_raw(features["data"], tf.float32)
-        cls_bb = tf.reshape(data, features["shape"])
-    return {"cls_bb": cls_bb, "name": features["name"]}
-
-
 def data_augmentation(example_proto, args):
     """ 2D
     c = args.input_group
@@ -466,8 +432,7 @@ def data_augmentation(example_proto, args):
                     logging.info("Train: Add random spatial guide")
                 features["images"] = tf.concat((features["images"], guide), axis=-1)
 
-        # Resize only when batch size > 1 for batch operation
-        if args.resize_for_batch and args.batch_size > 1:
+        if args.resize_for_batch:
             logging.info("Train: Resize image to {} x {}".format(args.im_height, args.im_width))
             image = tf.image.resize_bilinear(tf.expand_dims(features["images"], axis=0),
                                              [args.im_height, args.im_width])
@@ -476,10 +441,6 @@ def data_augmentation(example_proto, args):
             labels = tf.image.resize_nearest_neighbor(tf.expand_dims(tf.expand_dims(labels, axis=0), axis=-1),
                                                       [args.im_height, args.im_width])
             labels = tf.squeeze(labels, axis=(0, -1))
-        if args.resize_for_batch and args.batch_size == 1:
-            logging.warning("Train: Resize operation is skipped for batch_size=1. "
-                            "Make sure that the shape of input images are aligned with multiplier "
-                            "of 2**n where n is the pooling times if slim.conv2d_transpose is used.")
 
     return features, labels
 
@@ -508,8 +469,7 @@ def data_processing_eval_while_train(features, labels, args):
         guide = tf.py_func(_wrap_get_gd_image_multi_objs, [labels], tf.float32)
         features["images"] = tf.concat((features["images"], guide), axis=-1)
 
-    # Resize only when batch size > 1 for batch operation
-    if args.resize_for_batch and args.batch_size > 1:
+    if args.resize_for_batch:
         logging.info("Eval WT: Resize image to {} x {}".format(args.im_height, args.im_width))
         image = tf.image.resize_bilinear(
             tf.expand_dims(features["images"], axis=0),
@@ -527,16 +487,11 @@ def data_processing_eval_while_train(features, labels, args):
 
 def data_processing_eval(features, labels, args):
     # Resize only when batch size > 1 for batch operation
-    if (args.resize_for_batch and args.batch_size > 1) or args.use_fewer_guide:
+    if args.resize_for_batch or args.use_fewer_guide:
         logging.info("Eval: Resize image to {} x {}".format(args.im_height, args.im_width))
         image = tf.image.resize_bilinear(tf.expand_dims(features["images"], axis=0),
                                          [args.im_height, args.im_width])
         features["images"] = tf.squeeze(image, axis=0)
-        # Label isn't need resize
-    if args.resize_for_batch and args.batch_size == 1:
-        logging.warning("Eval: Resize operation is skipped for batch_size=1. "
-                        "Make sure that the shape of input images are aligned with multiplier "
-                        "of 2**n where n is the pooling times if slim.conv2d_transpose is used.")
 
     return features, labels
 
@@ -580,13 +535,13 @@ def get_2d_multi_records_dataset_for_train(file_names, args):
     return dataset
 
 
-def get_2d_multi_records_dataset_for_eval(file_names, args):
+def get_2d_multi_records_dataset_for_eval(file_names, mode, args):
     dataset = tf.data.TFRecordDataset(file_names[0])
     for file_name in file_names[1:]:
         dataset = dataset.concatenate(tf.data.TFRecordDataset(file_name))
 
     def parse_fn(example_proto):
-        features, labels = parse_2d_example_proto(example_proto, mode="eval_while_train", args=args)
+        features, labels = parse_2d_example_proto(example_proto, mode=mode, args=args)
         return data_processing_eval_while_train(features, labels, args=args)
 
     bs = distribution_utils.per_device_batch_size(args.batch_size, args.num_gpus)

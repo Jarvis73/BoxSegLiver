@@ -65,6 +65,7 @@ python main.py --help
 * training
 ```bash
 ./run_scripts/train_unet.sh train 0
+./run_scripts/train_unet.sh train 0,1   # Using multiple GPUs
 ```
 * evaluation
 ```bash
@@ -87,12 +88,14 @@ python main.py --help
 - [x] Evaluate
 - [ ] Predict
 - [x] Visualization
+- [x] Multi-GPU Training
+- [ ] Multi-GPU Evaluation/Prediction
 
 - [x] UNet
 - [x] AtrousUNet
 - [x] DiscrimUNet
-- [ ] DiscrimUNet with RetinaNet head (Use FPN)
 - [ ] Attention UNet
+- [x] OSMN
 
 - [ ] Weighted examples
 - [ ] Pre-trained backbone

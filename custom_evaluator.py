@@ -111,11 +111,6 @@ class EvaluateVolume(EvaluateBase):
             raise TypeError("model need a custom_estimator.CustomEstimator instance")
         super(EvaluateVolume, self).__init__(model, **kwargs)
 
-        self.model = model
-        # self._metric_values = {"{}/{}".format(cls, met): []
-        #                        for cls in self.classes
-        #                        for met in self._metrics}
-        self._metric_values = defaultdict(list)
         self.img_reader = data_ops.ImageReader()
 
         self.merge_tumor_to_liver = kwargs.get("merge_tumor_to_liver", True)
@@ -127,21 +122,8 @@ class EvaluateVolume(EvaluateBase):
         return self.params["model_instances"][0].classes[1:]  # Remove background
 
     @property
-    def metrics(self):
-        return self._metrics[:]
-
-    @property
-    def metric_values(self):
-        return self._metric_values
-
-    def append_metrics(self, pairs):
-        for key, value in pairs.items():
-            # if key in self._metric_values:
-            self._metric_values[key].append(value)
-
-    def clear_metrics(self):
-        for key in self._metric_values:
-            self._metric_values[key].clear()
+    def metrics_str(self):
+        return self.model.params["args"].metrics_eval
 
     @staticmethod
     def maybe_append(dst, src, name, clear=False):
@@ -239,6 +221,7 @@ class EvaluateVolume(EvaluateBase):
         tf.logging.info("Evaluate all the dataset ({} cases) finished! ({:.3f} secs/case)"
                         .format(self._timer.calls, self._timer.average_time))
 
+        self.save_metrics("metrics_3d.txt", self.model.model_dir)
         # Compute average metrics
         results = {key: np.mean(values) for key, values in self._metric_values.items()}
         display_str = ""
@@ -353,7 +336,7 @@ class EvaluateVolume(EvaluateBase):
         cur_pairs = {}
         for c, cls in enumerate(self.classes):
             pairs = metric_ops.metric_3d(logits3d[cls], labels3d[cls],
-                                         sampling=header.spacing, required=self.metrics)
+                                         sampling=header.spacing, required=self.metrics_str)
             for met, value in pairs.items():
                 cur_pairs["{}/{}".format(cls, met)] = value
 
@@ -404,30 +387,9 @@ class EvaluateSlice(EvaluateBase):
             raise TypeError("model need a custom_estimator.CustomEstimator instance")
         super(EvaluateSlice, self).__init__(model, **kwargs)
 
-        self.model = model
-        # self._metric_values = {"{}/{}".format(cls, met): []
-        #                        for cls in self.classes
-        #                        for met in self._metrics}
-        # if self.params["args"].cls_branch and "ClsAcc" in self._predict_keys:
-        #     self._metric_values["ClsAcc"] = []
-        self._metric_values = defaultdict(list)
-
     @property
     def classes(self):
         return self.params["model_instances"][0].classes[1:]  # Remove background
-
-    @property
-    def metric_values(self):
-        return self._metric_values
-
-    def append_metrics(self, pairs):
-        for key, value in pairs.items():
-            # if key in self._metric_values:
-            self._metric_values[key].append(value)
-
-    def clear_metrics(self):
-        for key in self._metric_values:
-            self._metric_values[key].clear()
 
     def evaluate_with_session(self, session=None, cases=None):
         predicts = list(self.params["model_instances"][0].metrics_dict.keys())
@@ -439,6 +401,40 @@ class EvaluateSlice(EvaluateBase):
             self.append_metrics(pred)
 
         results = {key: np.mean(values) for key, values in self._metric_values.items()}
+        display_str = ""
+        for key, value in results.items():
+            display_str += "{}: {:.3f} ".format(key, value)
+        tf.logging.info(display_str)
+
+        return results
+
+    def evaluate(self,
+                 input_fn,
+                 predict_keys=None,
+                 hooks=None,
+                 checkpoint_path=None,
+                 cases=None):
+        predicts = ["Names", "Indices"]
+        tf.logging.info("Begin evaluating 2D ...")
+        if not self.params["args"].use_fewer_guide:
+            predict_gen = self.model.predict(input_fn, predicts, hooks, checkpoint_path,
+                                             yield_single_examples=True)
+        else:
+            # Construct model with batch_size = 1
+            # Disconnect input pipeline with model pipeline
+            self.params["args"].batch_size = 1
+            predict_gen = self.model.predict_with_guide(input_fn, predicts, hooks,
+                                                        checkpoint_path, yield_single_examples=True)
+
+        self.clear_metrics()
+        for i, pred in enumerate(predict_gen):
+            print("\rEval {} examples ...".format(i + 1), end="")
+            self.append_metrics(pred)
+        print()
+        self.save_metrics("metrics_2d.txt", self.model.model_dir)
+
+        results = {key: float(np.mean(values)) for key, values in self._metric_values.items()
+                   if key not in ["Names", "Indices"]}
         display_str = ""
         for key, value in results.items():
             display_str += "{}: {:.3f} ".format(key, value)
