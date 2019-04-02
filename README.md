@@ -57,6 +57,7 @@ python main.py --help
   * --lr_custom_values (learning rate values in each interval, such as "0.003 0.0003 0.0001")
   * --input_group (group image neighbor slices as a multi-channel input, such as "3". This
     parameter must be match with your examples in *.tfrecord dataset)
+  * --warm_start_from "004_triplet/best_model.ckpt-215001" (absolute or relative path)
 
 * Other Parameters:
   * Please run `python main.py --help` for details
