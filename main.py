@@ -101,7 +101,8 @@ def main(argv):
                                                            primary_metric=args.primary_metric,
                                                            secondary_metric=args.secondary_metric))
 
-        estimator = CustomEstimator(models.model_fn, args.model_dir, run_config, params)
+        estimator = CustomEstimator(models.model_fn, args.model_dir, run_config, params,
+                                    args.warm_start_from)
 
         steps, max_steps = ((args.num_of_steps, None)
                             if args.num_of_steps > 0 else (None, args.num_of_total_steps))

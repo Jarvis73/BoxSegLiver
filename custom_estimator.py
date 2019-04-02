@@ -306,7 +306,7 @@ class CustomEstimator(object):
                 # Evaluating volume don't need metrics in model, we use XXXPred to generate 3D predict
                 predict_keys = [x for x in estimator_spec.predictions
                                 if x not in self.params["model_instances"][0].metrics_dict]
-                predict_keys.extend(list(self.params["model"].metrics_eval))
+                predict_keys.extend(list(self.params["model_instances"][0].metrics_eval))
             else:
                 raise TypeError("predict_keys must be None(for 3d eval) or a list(for 2d eval, "
                                 "for example [\"Names\", \"Indices\"])")
@@ -365,7 +365,7 @@ class CustomEstimator(object):
                 # Evaluating volume don't need metrics in model, we use XXXPred to generate 3D predict
                 predict_keys = [x for x in estimator_spec.predictions
                                 if x not in self.params["model_instances"][0].metrics_dict]
-                predict_keys.extend(list(self.params["model"].metrics_eval))
+                predict_keys.extend(list(self.params["model_instances"][0].metrics_eval))
             else:
                 raise TypeError("predict_keys must be None(for 3d eval) or a list(for 2d eval, "
                                 "for example [\"Names\", \"Indices\"])")

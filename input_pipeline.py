@@ -302,7 +302,7 @@ def parse_2d_example_proto(example_proto, mode, args):
                 ret_features["bboxes"] = tf.constant([0] * 6, dtype=tf.int64)
             if args.case_weights:
                 ret_features["weights"] = features["extra/weights"]
-            if mode != "train" and not args.eval_3d:
+            if mode == "eval" and not args.eval_3d:
                 ret_features["indices"] = features["extra/number"]
 
     # return features and labels

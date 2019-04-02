@@ -23,6 +23,21 @@ class CustomKeys(object):
     LEARNING_RATE = "learning_rate"
 
 
+def _try_to_find_ckpt(path, args):
+    path = Path(path)
+
+    if path.exists() or path.with_suffix(path.suffix + ".index").exists():   # Absolute path
+        return str(path)
+    cur_path = Path(__file__).parent / path
+    if cur_path.exists() or cur_path.with_suffix(path.suffix + ".index").exists():   # Relative path
+        return str(cur_path)
+    model_dir = "model_dir" if not args.model_dir else args.model_dir
+    cur_path = Path(__file__).parent / model_dir / path
+    if cur_path.exists() or cur_path.with_suffix(path.suffix + ".index").exists():   # Relative path
+        return str(cur_path)
+    raise FileNotFoundError(path)
+
+
 def add_arguments(parser):
     group = parser.add_argument_group(title="Global Arguments")
     group.add_argument("--mode",
@@ -59,6 +74,9 @@ def add_arguments(parser):
                        default="",
                        choices=["", "hierarchical_copy", "nccl"],
                        required=False, help="Specify which algorithm to use when performing all-reduce")
+    group.add_argument("--warm_start_from",
+                       type=str,
+                       required=False, help="Warm start the model from a checkpoint")
 
 
 def check_args(args, parser):
@@ -115,6 +133,9 @@ def check_args(args, parser):
         if args.input_group == 1:
             args.input_group = 3
         args.triplet = False
+
+    if args.warm_start_from:
+        args.warm_start_from = _try_to_find_ckpt(args.warm_start_from, args)
 
 
 def fill_default_args(args):
