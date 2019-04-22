@@ -72,6 +72,17 @@ def add_arguments(parser):
                        default="Adam",
                        choices=["Adam", "Momentum"],
                        required=False, help="Optimizer for training (default: %(default)s)")
+    group.add_argument("--lr_warm_up",
+                       action="store_true",
+                       required=False, help="Warm up with a low learning rate to stabilize parameters")
+    group.add_argument("--slow_start_step",
+                       type=int,
+                       default=1000,
+                       required=False, help="Training model with small learning rate for few steps")
+    group.add_argument("--slow_start_lr",
+                       type=float,
+                       default=1e-4,
+                       required=False, help="Learning rate employed during slow start")
 
 
 def get_solver_params(args, warm_up=False, slow_start_step=None, slow_start_learning_rate=None):

@@ -57,7 +57,7 @@ def add_arguments(parser):
     group.add_argument("--normalizer",
                        type=str,
                        default="batch_norm",
-                       choices=["batch_norm"],
+                       choices=["batch_norm", "instance_norm"],
                        required=False, help="Normalization method (default: %(default)s)")
     group.add_argument("--cls_branch",
                        action="store_true",
@@ -71,7 +71,7 @@ def add_arguments(parser):
                        required=False, help="Network scope of the weights in the given ckpt file, which "
                                             "will be replaced with current network scope. If not provide,"
                                             " it will be inferred")
-    group.add_argument("--without_bn",
+    group.add_argument("--without_norm",
                        action="store_true",
                        required=False, help="Conv without batch normalization")
 

@@ -65,6 +65,7 @@ class BaseNet(object):
         if new_mode in [ModeKeys.TRAIN, ModeKeys.EVAL, ModeKeys.PREDICT]:
             self._mode = new_mode
             self._is_training = self.mode == ModeKeys.TRAIN
+            tf.logging.info("Create graph in {} mode".format(new_mode))
 
     @property
     def is_training(self):
@@ -147,17 +148,10 @@ class BaseNet(object):
                 normalizer_params.update({"is_training": True})
             else:
                 normalizer_params.update({"is_training": False, "trainable": False})
-
             normalizer = slim.batch_norm
-        # elif cfg.MODEL.NORMALIZATION == "instance_norm":
-        #     normalizer_params = {}
-        #     normalizer = slim.instance_norm
-        # elif cfg.MODEL.NORMALIZATION == "layer_norm":
-        #     normalizer_params = {}
-        #     normalizer = slim.layer_norm
-        # elif cfg.MODEL.NORMALIZATION == "group_norm":
-        #     normalizer_params = {}
-        #     normalizer = slim.group_norm
+        elif self.args.normalizer == "instance_norm":
+            normalizer_params = {}
+            normalizer = slim.instance_norm
         else:
             raise ValueError("Not supported normalization function: " + self.args.normalizer)
 

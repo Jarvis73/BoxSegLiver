@@ -21,8 +21,6 @@ Test for image_ops.py
 import unittest
 import tensorflow as tf
 from pathlib import Path
-import matplotlib
-matplotlib.use("qt5Agg")
 import matplotlib.pyplot as plt
 
 from utils import image_ops
@@ -30,7 +28,7 @@ from utils import mhd_kits
 
 
 class TestImageOps(unittest.TestCase):
-    def setUp(self):
+    def init_image(self):
         data_path = Path(__file__).parent.parent / "data/LiTS/Samples"
         _, self.image = mhd_kits.mhd_reader(data_path / "origin/T001.mhd")
         _, self.label = mhd_kits.mhd_reader(data_path / "mask/T001_m.mhd")
@@ -41,12 +39,14 @@ class TestImageOps(unittest.TestCase):
         self.sess = tf.Session()
 
     def test_adjust_window_width_level(self):
+        self.init_image()
         output = image_ops.adjust_window_width_level(self.image_input, 450, 25)
         output_array = self.sess.run(output)
         plt.imshow(output_array[0, ..., 0], cmap="gray")
         plt.show()
 
     def test_random_zoom_in_dim3(self):
+        self.init_image()
         output = image_ops.adjust_window_width_level(self.image_input, 450, 25)
         output_image, output_label = image_ops.random_zoom_in(output, self.label_input,
                                                               seed_scale=None, seed_shift=None)
@@ -58,6 +58,7 @@ class TestImageOps(unittest.TestCase):
         plt.show()
 
     def test_random_zoom_in_dim4(self):
+        self.init_image()
         output = image_ops.adjust_window_width_level(self.image_input, 450, 25)
         output_image, output_label = image_ops.random_zoom_in(output[None, ...], self.label_input[None, ...],
                                                               seed_scale=None, seed_shift=None)
@@ -67,3 +68,18 @@ class TestImageOps(unittest.TestCase):
         plt.subplot(122)
         plt.imshow(output_array[1][0], cmap="gray")
         plt.show()
+
+    def test_create_spatial_guide_2d(self):
+        shape = tf.convert_to_tensor([512, 512], dtype=tf.int32)
+        center = tf.convert_to_tensor([[[50, 50], [250, 350], [350, 350]],
+                                       [[100, 100], [-1000, -1000], [-1000, -1000]]], dtype=tf.float32)
+        stddev = tf.convert_to_tensor([[[10, 10], [20, 60], [60, 60]],
+                                       [[40, 40], [-0.001, -0.001], [-0.001, -0.001]]], dtype=tf.float32)
+        x = image_ops.create_spatial_guide_2d(shape, center, stddev)
+
+        with tf.Session() as sess:
+            res = sess.run(x)
+            print(res.shape)
+            print(res[1, 256, 256, 0])
+            plt.imshow(res[1, ..., 0], cmap="gray")
+            plt.show()

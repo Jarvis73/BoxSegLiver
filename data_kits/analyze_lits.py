@@ -14,11 +14,17 @@
 #
 # =================================================================================
 
+import platform
 import numpy as np
 from pathlib import Path
 import scipy.ndimage as ndi
 import matplotlib.pyplot as plt
+import pandas as pd
+import collections
 
+if __name__ == "__main__":
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent))
 from data_kits import analysis_kits
 from utils import nii_kits
 from utils import misc
@@ -26,12 +32,21 @@ import loss_metrics as metric_kits
 from utils import array_kits
 
 
-LiTS_ROOTS = [Path("D:\DataSet\LiTS\Training_Batch_1"),
-              Path("D:\DataSet\LiTS\Training_Batch_2")]
+if "Windows" in platform.system():
+    LiTS_ROOTS = [Path(r"D:\DataSet\LiTS\Training_Batch_1"),
+                  Path(r"D:\DataSet\LiTS\Training_Batch_2")]
+elif "Linux" in platform.system():
+    LiTS_ROOTS = [Path(__file__).parent.parent / "data/LiTS/Training_Batch_1",
+                  Path(__file__).parent.parent / "data/LiTS/Training_Batch_2"]
+else:
+    raise NotImplementedError("Not supported operating system!")
 
 
 def dump_all_liver_tumor_hist():
-    save_dir = Path("D:\DataSet\LiTS\hist")
+    if "Windows" in platform.system():
+        save_dir = Path(r"D:\DataSet\LiTS\hist")
+    elif "Linux" in platform.system():
+        save_dir = Path(__file__).parent.parent / "data/LiTS/hist"
     for lits in LiTS_ROOTS:
         for image_path in lits.glob("volume-*.nii"):
             print(image_path)
@@ -132,12 +147,44 @@ def check_np_hist(num=10, xrng=(-200, 250), bins=100, yrng=(0, 0.02)):
     plt.show()
 
 
+def dump_all_tumor_bbox():
+    save_file = Path(__file__).parent.parent / "data/LiTS/tumor_summary.csv"
+    disc = ndi.generate_binary_structure(3, connectivity=1)
+
+    info = collections.defaultdict(list)
+    for lits in LiTS_ROOTS:
+        for mask_path in sorted(lits.glob("segmentation-*.nii")):
+            hdr, mask = nii_kits.nii_reader(mask_path)
+            sx, sy, sz = hdr["srow_x"][0], hdr["srow_y"][1], hdr["srow_z"][2]
+            voxel = abs(sx * sy * sz)
+            mask = array_kits.merge_labels(mask, [0, 2])
+            labeled, num_obj = ndi.label(mask, disc)
+            objs = ndi.find_objects(labeled)
+            for i, obj in enumerate(objs):
+                bbox = array_kits.slices_to_bbox(obj)
+                area = np.sum(labeled == i + 1) * voxel
+                info["PID"].append(mask_path.name)
+                info["TID"].append(i)
+                info["min_x"].append(bbox[2])
+                info["min_y"].append(bbox[1])
+                info["min_z"].append(bbox[0])
+                info["max_x"].append(bbox[5])
+                info["max_y"].append(bbox[4])
+                info["max_z"].append(bbox[3])
+                info["area/cc"].append(area)
+                info["num_slices"].append(bbox[3] - bbox[0])
+                print(mask_path.name, i, bbox, area)
+
+    pd.DataFrame(data=info).to_csv(str(save_file))
+
+
 def main():
     # dump_all_liver_tumor_hist()
     # dump_all_tumor_det_metrics()
     # check_tumor_hist()
     # dump_all_tumor_hist()
-    check_np_hist()
+    # check_np_hist()
+    dump_all_tumor_bbox()
 
 
 if __name__ == "__main__":

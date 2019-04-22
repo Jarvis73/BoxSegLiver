@@ -51,7 +51,7 @@ class UNet(base.BaseNet):
                             weights_regularizer=default_w_regu,
                             weights_initializer=default_w_init,
                             biases_regularizer=default_b_regu) as scope:
-            if self.args.without_bn:
+            if self.args.without_norm:
                 return scope
             normalizer, params = self._get_normalization()
             with slim.arg_scope([slim.conv2d],

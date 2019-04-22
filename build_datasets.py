@@ -49,8 +49,13 @@ def main():
     #                                        folds_file="k_folds.txt")
 
     # Histogram
+    # build_lits_liver.convert_to_histogram_dataset("trainval", keep_only_liver=False, seed=1234,
+    #                                               bins=100, xrng=(-200, 250),
+    #                                               folds_file="k_folds.txt")
+
+    # Histogram v2
     build_lits_liver.convert_to_histogram_dataset("trainval", keep_only_liver=False, seed=1234,
-                                                  bins=100, xrng=(-200, 250),
+                                                  bins=100, xrng=(-100, 250),
                                                   folds_file="k_folds.txt")
 
 

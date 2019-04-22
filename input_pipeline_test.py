@@ -64,6 +64,10 @@ def add_arguments(parser):
                        action="store_true",
                        required=False, help="Evaluate when training in 2D slices or 3D volume."
                                             "Default in 2D slices")
+    group.add_argument("--num_gpus",
+                       type=int,
+                       default=1,
+                       required=False, help="Number of gpus to run this model")
 
 
 class CheckInputPipeline(object):
@@ -73,7 +77,7 @@ class CheckInputPipeline(object):
         record1_3d = Path(__file__).parent / "data/LiTS/records/sample-bbox-3D-3-of-5.tfrecord"
         record2_3d = Path(__file__).parent / "data/LiTS/records/sample-bbox-3D-2-of-5.tfrecord"
         self.records = [str(record1), str(record2)]
-        self.records_3d = [str(record1_3d), str(record2_3d)]
+        # self.records_3d = [str(record1_3d), str(record2_3d)]
         self.records_3d = [str(Path(__file__).parent / "data/LiTS/records/trainval-bbox-3D-3-of-5.tfrecord")]
         self.records_hist_3d = [str(Path(__file__).parent / "data/LiTS/records/hist-100--200_250-3D-3-of-5.tfrecord")]
 
@@ -197,65 +201,12 @@ class CheckInputPipeline(object):
             plt.imshow(labels[0], cmap="gray")
             plt.show()
 
-    def test_get_image_boxes_dataset(self):
-        sys.argv.extend([
-            "--mode", "train",
-            "--input_group", "3",
-            "--only_tumor",
-            "--filter_size", "20",
-            "--cls_branch",
-        ])
-        self.args = self.parser.parse_args()
-        self.args.batch_size = 1
-        print(self.args)
-
-        boxes = [
-            str(Path(__file__).parent / "data/LiTS/records/cls-0tp-1-of-5.tfrecord"),
-            str(Path(__file__).parent / "data/LiTS/records/cls-0tp-2-of-5.tfrecord")
-        ]
-        dataset = input_pipeline.get_2d_images_and_bboxes_dataset_for_train(self.records, boxes, self.args)
-        inputs = dataset.make_one_shot_iterator().get_next("Inputs")
-        cnt = 0
-        cnt2 = -1
-        while True:
-            features, labels = self.sess.run(inputs)
-            print(features["images"].shape)
-            print(features["names"][0])
-            b = np.array(features["gt_boxes"][0][0])
-            print(features["gt_boxes"])
-            print(features["im_info"])
-            print(labels.shape)
-            # print(features["images"].max(), features["images"].min())
-            # print(labels.max(), labels.min())
-            if cnt2 < 0:
-                cnt2 = features["bboxes"][0][2] + 1
-            for i in range(self.args.batch_size):
-                plt.subplot(231)
-                plt.imshow(features["images"][i, ..., 0], cmap="gray")
-                plt.subplot(232)
-                plt.imshow(features["images"][i, ..., 1], cmap="gray")
-                plt.title("{}".format(cnt2))
-                plt.plot([b[1], b[3], b[3], b[1], b[1]], [b[0], b[0], b[2], b[2], b[0]])
-                plt.subplot(233)
-                plt.imshow(features["images"][i, ..., 2], cmap="gray")
-                plt.subplot(234)
-                plt.imshow(labels[i], cmap="gray")
-                plt.plot([b[1], b[3], b[3], b[1], b[1]], [b[0], b[0], b[2], b[2], b[0]])
-                plt.show()
-                cnt2 += 1
-                plt.pause(3)
-                plt.close()
-            # if cnt > 16:
-            #     break
-            cnt += 1
-
     def test_get_multi_records_dataset_for_eval(self):
         sys.argv.extend([
             "--mode", "train",
             "--input_group", "3",
             # "--only_tumor",
             "--eval_3d",
-            "--eval_skip_num", "9"
         ])
         self.args = self.parser.parse_args()
         print(self.args)
@@ -271,6 +222,7 @@ class CheckInputPipeline(object):
             print(features["names"][0])
             # print(features["id"])
             print(labels.shape)
+            break
             # print(features["images"].max(), features["images"].min())
             # print(labels.max(), labels.min())
             # if cnt2 < 0:
@@ -289,25 +241,6 @@ class CheckInputPipeline(object):
             #     cnt2 += 1
             #     plt.pause(1)
             # cnt += 1
-
-    def test_gt_boxes(self):
-        sys.argv.extend([
-            "--mode", "eval",
-        ])
-        self.args = self.parser.parse_args()
-        print(self.args)
-
-        inputs = input_pipeline.get_gt_boxes(self.records_3d)
-
-        bboxes = []
-        while True:
-            try:
-                features = self.sess.run(inputs)
-                bboxes.extend(features["gt_boxes"])
-            except tf.errors.OutOfRangeError:
-                break
-
-        gt_boxes = np.array(bboxes)
 
 
 if __name__ == "__main__":

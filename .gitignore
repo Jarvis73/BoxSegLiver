@@ -118,3 +118,4 @@ model_dir/
 run_scripts/*
 !run_scripts/004_triplet.sh
 !run_scripts/005_triplet_sg_wd.sh
+!run_scripts/016_osmn_in_noise.sh

@@ -94,14 +94,19 @@ def main(argv):
 
         params = {"args": args}
         params.update(models.get_model_params(args))
-        params.update(solver.get_solver_params(args))
+        params.update(solver.get_solver_params(args,
+                                               warm_up=args.lr_warm_up,
+                                               slow_start_step=args.slow_start_step,
+                                               slow_start_learning_rate=args.slow_start_lr))
         if not args.train_without_eval:
             params.update(custom_evaluator.get_eval_params(evaluator="Volume" if args.eval_3d else "Slice",
                                                            eval_steps=args.eval_steps,
                                                            primary_metric=args.primary_metric,
-                                                           secondary_metric=args.secondary_metric))
+                                                           secondary_metric=args.secondary_metric,
+                                                           use_sg_reduce_fp=False))
 
-        estimator = CustomEstimator(models.model_fn, args.model_dir, run_config, params)
+        estimator = CustomEstimator(models.model_fn, args.model_dir, run_config, params,
+                                    args.warm_start_from)
 
         steps, max_steps = ((args.num_of_steps, None)
                             if args.num_of_steps > 0 else (None, args.num_of_total_steps))
@@ -121,10 +126,13 @@ def main(argv):
 
         params = {"args": args}
         params.update(models.get_model_params(args))
+        eval_params = custom_evaluator.get_eval_params(evaluator="Volume" if args.eval_3d else "Slice",
+                                                       eval_steps=args.eval_steps,
+                                                       use_sg_reduce_fp=True)
 
         estimator = CustomEstimator(models.model_fn, args.model_dir, run_config, params)
 
-        evaluator = EvaluateVolume(estimator) if args.eval_3d else EvaluateSlice(estimator)
+        evaluator = eval_params["evaluator"](estimator, **eval_params["eval_kwargs"])
         estimator.evaluate(evaluator,
                            input_pipeline_osmn.input_fn,
                            checkpoint_path=args.ckpt_path,

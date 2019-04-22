@@ -14,11 +14,12 @@
 #
 # =================================================================================
 
+import math
 import random
 import functools
 import numpy as np
 import scipy.ndimage as ndi
-from medpy import metric as mtr
+from medpy import metric as mtr     # pip install medpy
 
 WARNING_ONCE = False
 
@@ -127,9 +128,11 @@ def merge_labels(masks, merges):
     """
     Convert multi-class labels to specific classes
 
+    Return int8 image.
+
     Support n-dim image
     """
-    t_masks = np.zeros_like(masks, dtype=np.int8)  # use int8 to save memory
+    t_masks = np.zeros_like(masks, dtype=np.uint8)  # use uint8 to save memory
     for i, m_list in enumerate(merges):
         if isinstance(m_list, int):
             t_masks[np.where(masks == m_list)] = i
@@ -142,6 +145,9 @@ def merge_labels(masks, merges):
 
 
 def bbox_to_slices(bbox):
+    """
+    bbox: (x1, y1, x2, y2) or (x1, y1, z1, x2, y2, z2)
+    """
     if not isinstance(bbox, (list, tuple, np.ndarray)):
         raise TypeError("`bbox` must be an iterable object, got {}"
                         .format(type(bbox)))
@@ -155,6 +161,21 @@ def bbox_to_slices(bbox):
     ndim = len(bbox) // 2
     slices = [slice(bbox[d], bbox[d + ndim] + 1) for d in reversed(range(ndim))]
     return tuple(slices)
+
+
+def slices_to_bbox(slices):
+    """
+
+    Parameters
+    ----------
+    slices: list of slice
+
+    Returns
+    -------
+    bbox: [start1, start2, ..., stop1, stop2, ...]
+
+    """
+    return [x.start for x in slices] + [x.stop for x in slices]
 
 
 def bbox_to_shape(bbox):
@@ -220,7 +241,7 @@ def extract_region(mask, align=1, padding=0, min_bbox_shape=None):
 
     Returns
     -------
-    post_bbox: final bounding box
+    post_bbox: final bounding box, (x1, y1, x2, y2) or (x1, y1, z1, x2, y2, z2)
 
     Notes
     -----
@@ -325,7 +346,7 @@ def get_largest_component(inputs, rank, connectivity=1):
     return merge_labels(labeled_res, [-1, int(arg_min[-1]) + 1])
 
 
-def compute_robust_moments(binary_image, isotropic=False):
+def compute_robust_moments(binary_image, isotropic=False, index=None):
     """
     Compute robust center and standard deviation of a binary image(0: background, 1: foreground).
 
@@ -337,6 +358,8 @@ def compute_robust_moments(binary_image, isotropic=False):
         Input a image
     isotropic: boolean
         Compute isotropic standard deviation or not.
+    index: str
+        "xy" or "ij", default is "xy"
 
     Returns
     -------
@@ -351,8 +374,8 @@ def compute_robust_moments(binary_image, isotropic=False):
 
     """
     ndim = binary_image.ndim
-    index = np.nonzero(binary_image)
-    points = np.asarray(index).astype(np.float32)
+    coords = np.nonzero(binary_image)
+    points = np.asarray(coords).astype(np.float32)
     if points.shape[1] == 0:
         return np.array([-1.0] * ndim, dtype=np.float32), np.array([-1.0] * ndim, dtype=np.float32)
     points = np.transpose(points)
@@ -369,7 +392,12 @@ def compute_robust_moments(binary_image, isotropic=False):
         mad = np.median(diff, axis=0)
     std_dev = 1.4826 * mad
     std_dev = np.maximum(std_dev, [5.0] * ndim)
-    return center, std_dev
+    if not index or index == "xy":
+        return center, std_dev
+    elif index == "ij":
+        return center[::-1], std_dev[::-1]
+    else:
+        raise ValueError("Wrong index value `{}`, must be one of [xy, ij]".format(index))
 
 
 def create_gaussian_distribution(shape, center, stddev):
@@ -382,7 +410,7 @@ def create_gaussian_distribution(shape, center, stddev):
 
 
 def get_gd_image_single_obj(labels, center_perturb=0.2, stddev_perturb=0.4, blank_prob=0,
-                            partial=False, partial_slice="first"):
+                            partial=False, partial_slice="first", only_moments=False):
     """
     Get gaussian distribution image with some perturbation. All points assigned 1 are considered
     to be the same object.
@@ -403,6 +431,8 @@ def get_gd_image_single_obj(labels, center_perturb=0.2, stddev_perturb=0.4, blan
         For test mode. If true only first slice has spatial guide for each tumor
     partial_slice: str
         Which slice to annotate spatial guide when partial is True. ["first", "middle"] are supported.
+    only_moments: bool
+        Only return moments
 
     Returns
     -------
@@ -422,7 +452,7 @@ def get_gd_image_single_obj(labels, center_perturb=0.2, stddev_perturb=0.4, blan
         # return a blank gd image
         return np.zeros(labels.shape)
 
-    idx = 0
+    idx = -1
     if partial:
         indices = np.where(np.count_nonzero(labels, axis=(1, 2)) > 0)[0]
         if partial_slice == "first":
@@ -441,6 +471,8 @@ def get_gd_image_single_obj(labels, center_perturb=0.2, stddev_perturb=0.4, blan
     center_p = center_p_ratio * std + center
     std_p_ratio = np.random.uniform(1.0 / (1 + stddev_perturb), 1.0 + stddev_perturb, obj_ndim)
     std_p = std_p_ratio * std
+    if only_moments:
+        return idx, center_p, std_p
 
     cur_gd = create_gaussian_distribution(obj_lab.shape, center_p, std_p)
 
@@ -524,11 +556,14 @@ def get_gd_image_multi_objs(labels,
     # Label image and find all objects
     disc = ndi.generate_binary_structure(ndim, connectivity=connectivity)
     labeled_image, num_obj = ndi.label(obj_labels, structure=disc)
-    obj_images = [labeled_image == n + 1 for n in range(num_obj)]
-    
+
+    def gen_obj_image():
+        for n in range(num_obj):
+            yield labeled_image == n + 1
+
     # Compute moments for each object
     gds, stds = [], []
-    for obj_image in obj_images:
+    for obj_image in gen_obj_image():
         gd, _, std = get_gd_image_single_obj(obj_image, center_perturb, stddev_perturb, blank_prob,
                                              partial, partial_slice)
         gds.append(gd)
@@ -558,11 +593,96 @@ def get_gd_image_multi_objs(labels,
 
     if ret_bbox:
         bboxes = []
-        for obj_image in obj_images:
+        for obj_image in gen_obj_image():
             bboxes.append(bbox_from_mask(obj_image, 1, **kwargs))
         return merged_gd, bboxes
 
     return merged_gd
+
+
+def get_moments_multi_objs(labels,
+                           obj_value=1,
+                           # center_perturb=0.,
+                           # stddev_perturb=0.,
+                           blank_prob=0,
+                           connectivity=1,
+                           partial=False,
+                           # with_fake_guides=False,
+                           # fake_rate=1.0,
+                           # max_fakes=4,
+                           # fake_range_value=0,
+                           partial_slice="first", **kwargs):
+    """
+    Get objects' moments with some perturbation. Only connected points assigned 1
+    are considered to be the same object.
+
+    Only support 2D and 3D array.
+    """
+    global WARNING_ONCE
+
+    labels = np.asarray(labels, dtype=np.uint8)
+    if not np.any(labels):
+        # return a blank gd image
+        return np.zeros(labels.shape)
+
+    obj_labels = merge_labels(labels, [0, obj_value])
+
+    def gen_obj_image():
+        for slicer in slicers:
+            yield labeled_image[slicer], slices_to_bbox(slicer)
+
+    ndim = labels.ndim
+    if ndim == 2:
+        shape_xy = np.asarray(labels.shape)[::-1]
+        # Label image and find all objects
+        disc = ndi.generate_binary_structure(2, connectivity=connectivity)
+        labeled_image, num_obj = ndi.label(obj_labels, structure=disc)
+        slicers = ndi.find_objects(labeled_image)
+        # Compute moments for each object
+        ctr_std = []
+        for obj_image, bb in gen_obj_image():
+            _, ctr, std = get_gd_image_single_obj(obj_image, 0., 0., blank_prob,
+                                                  partial=partial,
+                                                  partial_slice=partial_slice,
+                                                  only_moments=True)
+            # [x, y, x, y]
+            ctr_std.append(np.concatenate(((ctr + np.array(bb[1::-1])) / shape_xy,
+                                           std / shape_xy), axis=0))
+        aligned_ctr_std = np.asarray(ctr_std, np.float32).reshape(-1, 4)
+    elif ndim == 3:
+        shape_xy = np.asarray(labels.shape[1:])[::-1]
+        # Label image and find all objects
+        disc = ndi.generate_binary_structure(3, connectivity=connectivity)
+        labeled_image, num_obj = ndi.label(obj_labels, structure=disc)
+        slicers = ndi.find_objects(labeled_image)
+        # Compute moments for each object
+        indices = []
+        ctr_std = []
+        for obj_image, bb in gen_obj_image():
+            idx, ctr, std = get_gd_image_single_obj(obj_image, 0., 0., blank_prob,
+                                                    partial=partial,
+                                                    partial_slice=partial_slice,
+                                                    only_moments=True)
+            # [x, y, x, y]
+            ctr_std.append(np.concatenate(((ctr + np.array(bb[2:0:-1])) / shape_xy,
+                                           std / shape_xy), axis=0))
+            indices.append(idx + bb[0])
+        ctr_std = np.asarray(ctr_std, np.float32).reshape(-1, 4)
+
+        middle_slice_id = np.bincount(indices, minlength=labels.shape[0])
+        aligned_ctr_std = np.empty(shape=(labels.shape[0], middle_slice_id.max(), 4), dtype=np.float32)
+        aligned_ctr_std[:, :, 0:2] = -2  # center
+        aligned_ctr_std[:, :, 2:4] = 0.00001  # stddev
+
+        books = np.zeros((labels.shape[0]), dtype=np.int32)
+        for i, ind in enumerate(indices):
+            if ind != -1:
+                aligned_ctr_std[ind, books[ind]] = ctr_std[i]
+                books[ind] += 1
+    else:
+        raise ValueError("`labels` must be a 2D/3D array")
+
+    return aligned_ctr_std
 
 
 def aug_window_width_level(image, ww, wl, rand=False, norm_scale=1.0, normalize=False):
@@ -779,3 +899,135 @@ def find_tp_and_fp(result, reference, connectivity=1):
         tp_lists.append([x.start for x in slice_] + [x.stop for x in slice_])
 
     return fp_lists, tp_lists
+
+
+def reduce_fp_with_guide(reference, result, guide="first"):
+    disc = ndi.generate_binary_structure(3, connectivity=1)
+    labeled_result, num_res = ndi.label(result, structure=disc)
+    labeled_reference, num_ref = ndi.label(reference, structure=disc)
+
+    def gen_obj_ref():
+        for n in range(num_ref):
+            yield labeled_reference == n + 1
+
+    guided_objs = []
+    for obj_ref in gen_obj_ref():
+        indices = np.where(np.count_nonzero(obj_ref, axis=(1, 2)) > 0)[0]
+        if guide == "first":
+            # if len(indices) >= 3:
+            #     idx = indices[1]
+            # else:
+            idx = indices[0]
+        else:  # guide == "middle"
+            idx = indices[(len(indices) - 1) // 2]
+        obj_lab = np.clip(obj_ref[idx], 0, 1)
+        # index = np.nonzero(obj_lab)
+        # points = np.asarray(index)
+        # points = np.transpose(points)
+        # center = np.median(points, axis=0).astype(np.int32)  # (h, w)
+        # # Check if the centroid of guide is located in labeled_result or not
+        # val = labeled_result[idx, center[0], center[1]]
+        # if val > 0:
+        #     guided_objs.append(val)
+        all_found = np.unique(obj_lab * labeled_result[idx])
+        if all_found[0] == 0:
+            all_found = all_found[1:]
+        guided_objs.extend(all_found)
+
+    for i in range(1, num_res + 1):
+        if i not in guided_objs:
+            labeled_result[labeled_result == i] = 0     # Remove not guided objects
+
+    return np.clip(labeled_result, 0, 1)
+
+
+def xiaolinwu_line(x0, y0, x1, y1):
+    if x0 == x1 and y0 == y1:
+        raise ValueError("Must be different points, but the same ({}) vs ({})"
+                         .format(x0, y0))
+
+    xs, ys = [], []
+
+    steep = abs(y1 - y0) > abs(x1 - x0)
+
+    if steep:
+        x0, y0 = y0, x0
+        x1, y1 = y1, x1
+
+    forward = True
+    if x0 > x1:
+        forward = False
+        x0, x1 = x1, x0
+        y0, y1 = y1, y0
+
+    dx, dy = x1 - x0, y1 - y0
+    gradient = 1. * dy / dx
+    if dx == 0:
+        gradient = 1.
+
+    # handle first endpoint
+    xend = round(x0)
+    yend = y0 + gradient * (xend - x0)
+    xpxl1 = xend    # use in main loop
+    ypxl1 = math.floor(yend)
+    if steep:
+        xs.append(ypxl1)
+        ys.append(xpxl1)
+    else:
+        xs.append(xpxl1)
+        ys.append(ypxl1)
+    intery = yend + gradient    # first y-intersection for the main loop
+
+    # handle second endpoint
+    xend = round(x1)
+    yend = y1 + gradient * (xend - x1)
+    xpxl2 = xend    # use in main loop
+    ypxl2 = math.floor(yend)
+
+    # main loop
+    if steep:
+        for x in range(xpxl1 + 1, xpxl2):
+            xs.append(math.floor(intery))
+            ys.append(x)
+            intery += gradient
+        xs.append(ypxl2)
+        ys.append(xpxl2)
+    else:
+        for x in range(xpxl1 + 1, xpxl2):
+            xs.append(x)
+            ys.append(math.floor(intery))
+            intery += gradient
+        xs.append(xpxl2)
+        ys.append(ypxl2)
+
+    return xs, ys, forward
+
+
+if __name__ == "__main__":
+    from utils import nii_kits
+    # from loss_metrics import metric_3d
+    # p1 = r"D:\documents\MLearning\MultiOrganDetection\core\MedicalImageSegmentation\model_dir" \
+    #      r"\016_osmn_in_noise\prediction\prediction-125.nii.gz"
+    # p2 = r"D:\DataSet\LiTS\Training_Batch_2\segmentation-125.nii"
+    # _, res = nii_kits.nii_reader(p1)
+    # _, ref = nii_kits.nii_reader(p2)
+    # res = merge_labels(res, [0, 2])
+    # ref = merge_labels(ref, [0, 2])
+    # dice = metric_3d(res, ref, required=["Dice"])["Dice"]
+    # print(dice)
+    # new_res = reduce_fp_with_guide(ref, res, guide="first")
+    # new_dice = metric_3d(new_res, ref, required=["Dice"])["Dice"]
+    # print(new_dice)
+    import time
+
+    p2 = r"D:\DataSet\LiTS\Training_Batch_2\segmentation-93.nii"
+    _, ref = nii_kits.nii_reader(p2)
+    ref = merge_labels(ref, [0, 2])
+    t1 = time.time()
+    ctr_stds1 = get_moments_multi_objs(ref, partial_slice="middle")
+    t2 = time.time()
+    t3 = time.time()
+    ctr_stds2 = get_moments_multi_objs_v2(ref, partial_slice="middle")
+    t4 = time.time()
+    print(t2 - t1, t4 - t3)
+    print(np.all(ctr_stds1 == ctr_stds2))

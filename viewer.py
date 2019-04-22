@@ -70,10 +70,10 @@ class SegViewerAdapter(object):
         self.meta, self.gt = reader(ori_file)
         self.pred_ = reader(pred_file)[1].astype(np.int8)
         self.mask_ = reader(lab_file)[1].astype(np.int8)
+        self.shape = self.gt.shape
         if self.liver_range is not None:
             self.bb = self.liver_range[ori_file.name.split(".")[0]][0]
-            ranges = slice(self.bb[2], self.bb[5] + 1)
-            self.shape = self.gt.shape
+            ranges = slice(self.get_min_idx(), self.get_max_idx() + 1)
             self.gt = self.gt[ranges]
             self.pred_ = self.pred_[ranges]
             self.mask_ = self.mask_[ranges]
@@ -99,10 +99,10 @@ class SegViewerAdapter(object):
         return self.shape[ges - 1]
 
     def get_min_idx(self, ges=1):
-        return self.bb[3 - ges]
+        return max(self.bb[3 - ges] - 2, 0)
 
     def get_max_idx(self, ges=1):
-        return self.bb[6 - ges]
+        return min(self.bb[6 - ges] + 2, self.shape[0] - 1)
 
     def real_ind(self, ind, ges=1):
         if self.gt is None:
@@ -132,7 +132,7 @@ class SegViewerAdapter(object):
         return slices
 
     def resized_image(self, im1, im2, ges, ind):
-        spacing = [self.meta["srow_y"][2], self.meta["srow_y"][1], self.meta["srow_x"][0]]
+        spacing = [abs(self.meta["srow_z"][2]), abs(self.meta["srow_y"][1]), abs(self.meta["srow_x"][0])]
         if ges == 1:
             image, mask = im1[ind], im2[ind]
             return image, mask
@@ -178,7 +178,7 @@ class SegViewerAdapter(object):
                 if self.liver_range is not None:
                     rng = self.liver_range[path.name.replace("prediction", "volume").split(".")[0]][0]
                     self.table.append((name, "{}/{}".format(rng[5] - rng[2] + 1,
-                                                                 hdr.get_data_shape()[-1])))
+                                                            hdr.get_data_shape()[-1])))
                 else:
                     self.table.append((name, "{}".format(hdr.get_data_shape()[-1])))
 
@@ -212,7 +212,7 @@ class SegViewerAdapter(object):
 
 def main():
     adapter = SegViewerAdapter(
-        Path(__file__).parent / "model_dir/001_tumor_unet_only/prediction",
+        Path(__file__).parent / "model_dir/016_osmn_in_noise/prediction",
         ["D:/DataSet/LiTS/Training_Batch_1", "D:/DataSet/LiTS/Training_Batch_2"],
         Path("D:/DataSet/LiTS/liver_bbox_nii.pkl")
     )

@@ -18,6 +18,7 @@ import os
 import copy
 import json
 import numpy as np
+import pandas as pd
 from pathlib import Path
 
 from tensorflow.contrib.distribute.python import values
@@ -41,6 +42,7 @@ from custom_evaluator_base import EvaluateBase
 from utils.summary_kits import summary_scalar
 from utils.array_kits import get_gd_image_multi_objs
 from config import CustomKeys
+from custom_evaluator import TumorManager
 
 
 class IteratorStringHandleHook(session_run_hook.SessionRunHook):
@@ -263,15 +265,33 @@ class FeedGuideHook(session_run_hook.SessionRunHook):
         self.bbox = None
         self.img_reader = data_ops.ImageReader()
         self.model_dir = model_dir
+        self.cbn = False
+        self.id = 0     # ID(indices) of slices in a CT volume
+
+        # load interactive information: z_min, z_max
+        tumor_path = Path(__file__).parent / "data/LiTS/tumor_summary.csv"
+        tumors_info = pd.read_csv(str(tumor_path))
+        self.t_mgr = TumorManager(tumors_info)
 
     def before_run(self, run_context):
         if self.first:
             self.features_val, self.labels_val = run_context.session.run(
                 [self.features, self.labels])
             self.first = False
-            self.guides.append(self.features_val["images"][0, ..., -1])
             self.cur_case = self.features_val["names"][0].decode("utf-8")
             self.bbox = self.features_val["bboxes"][0]
+            if "sp_guide" in self.features_val:
+                self.cbn = True
+                # self.guides.append(self.features_val["sp_guide"][0, ..., 0])
+                self.t_mgr.name = self.cur_case
+                self.t_mgr.set_bbox(self.bbox, shape=self.features_val["images"].shape[1:-1])
+                # Change features_val["sp_guide"] from moments to image
+                self.features_val["sp_guide"] = self.t_mgr.get_guide_image(
+                    self.features_val["sp_guide"][0], new_id=self.id)
+                self.id += 1
+                self.guides.append(self.features_val["sp_guide"][0, ..., 0])
+            else:
+                self.guides.append(self.features_val["images"][0, ..., -1])
 
         feed_dict = {value: self.features_val[key] for key, value in self.features_ph.items()}
         feed_dict[self.labels_ph] = self.labels_val
@@ -286,22 +306,52 @@ class FeedGuideHook(session_run_hook.SessionRunHook):
                 [self.features, self.labels])
         except errors_impl.OutOfRangeError:
             self._save_guide()
+            self.guides.clear()
             return run_context.request_stop()
         else:
             new_case = self.features_val["names"][0].decode("utf-8")
             if self.cur_case != new_case:
                 # Finish a case
                 self._save_guide()
+                self.guides.clear()
                 # Update states with next case
                 self.cur_case = new_case
                 self.bbox = self.features_val["bboxes"][0]
+                # Reinitialize TumorManager
+                need_rev = self.cur_case.endswith("rev")
+                self.id = self.id - 1 if need_rev else 0
+                self.t_mgr.reset(direction=-1 if need_rev else 1)
+                self.t_mgr.name = self.cur_case
+                self.t_mgr.set_bbox(self.bbox, shape=self.features_val["images"].shape[1:-1])
+                self.features_val["sp_guide"] = self.t_mgr.get_guide_image(
+                    self.features_val["sp_guide"][0], new_id=self.id)
+                if self.t_mgr.direction == 1:
+                    self.id += 1
+                else:
+                    self.id -= 1
             else:
                 # Update guide with last prediction
-                self.features_val["images"][0, ..., -1] = np.maximum(
-                    self.features_val["images"][0, ..., -1],
-                    get_gd_image_multi_objs(predictions["TumorPred"][0, ..., 0],
-                                            center_perturb=0., stddev_perturb=0.))
-            self.guides.append(self.features_val["images"][0, ..., -1])
+                self.t_mgr.check_pred(predictions["TumorPred"][0, ..., 0])
+                if self.cbn:
+                    # self.features_val["sp_guide"][0, ..., 0] = np.maximum(
+                    #     self.features_val["sp_guide"][0, ..., 0],
+                    #     get_gd_image_multi_objs(corrective_tumor,
+                    #                             center_perturb=0., stddev_perturb=0.))
+                    self.features_val["sp_guide"] = self.t_mgr.get_guide_image(
+                        self.features_val["sp_guide"][0], self.id)
+                    if self.t_mgr.direction == 1:
+                        self.id += 1
+                    else:
+                        self.id -= 1
+                else:
+                    self.features_val["images"][0, ..., -1] = np.maximum(
+                        self.features_val["images"][0, ..., -1],
+                        get_gd_image_multi_objs(self.t_mgr.pred,
+                                                center_perturb=0., stddev_perturb=0.))
+            if self.cbn:
+                self.guides.append(self.features_val["sp_guide"][0, ..., 0])
+            else:
+                self.guides.append(self.features_val["images"][0, ..., -1])
 
     def _save_guide(self):
         from utils import array_kits as arr_ops
@@ -333,7 +383,6 @@ class FeedGuideHook(session_run_hook.SessionRunHook):
         img_array = np.pad(img_array, pad_with, mode="constant", constant_values=0)
 
         self.img_reader.save(save_path, img_array, fmt=cur_case.suffix[1:])
-        self.guides.clear()
 
 
 class LogLearningRateHook(session_run_hook.SessionRunHook):

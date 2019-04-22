@@ -23,7 +23,7 @@ from pathlib import Path
 import loss_metrics as metric_ops
 import utils.array_kits as arr_ops
 import data_kits.build_data as data_ops
-from custom_estimator import CustomEstimator
+# from custom_estimator import CustomEstimator
 from custom_evaluator_base import EvaluateBase
 from utils.timer import Timer
 
@@ -78,6 +78,7 @@ def get_eval_params(evaluator="Volume",
                     eval_steps=2500,
                     largest=True,
                     merge_tumor_to_liver=True,
+                    use_sg_reduce_fp=False,
                     primary_metric=None,
                     secondary_metric=None):
     if evaluator not in ["Volume", "Slice"]:
@@ -85,7 +86,9 @@ def get_eval_params(evaluator="Volume",
     return {
         "evaluator": eval("Evaluate" + evaluator),
         "eval_steps": eval_steps,
-        "eval_kwargs": {"merge_tumor_to_liver": merge_tumor_to_liver, "largest": largest},
+        "eval_kwargs": {"merge_tumor_to_liver": merge_tumor_to_liver,
+                        "largest": largest,
+                        "use_sg_reduce_fp": use_sg_reduce_fp},
         "primary_metric": primary_metric,
         "secondary_metric": secondary_metric
     }
@@ -107,14 +110,21 @@ class EvaluateVolume(EvaluateBase):
             * merge_tumor_to_liver: bool, if `Tumor` and `Liver` in predictions (default True)
             * largest: bool, get largest component for liver, if `Liver` in predictions (default True)
         """
-        if not isinstance(model, CustomEstimator):
-            raise TypeError("model need a custom_estimator.CustomEstimator instance")
+        # if not isinstance(model, CustomEstimator):
+        #     raise TypeError("model need a custom_estimator.CustomEstimator instance")
         super(EvaluateVolume, self).__init__(model, **kwargs)
 
         self.img_reader = data_ops.ImageReader()
 
         self.merge_tumor_to_liver = kwargs.get("merge_tumor_to_liver", True)
         self.largest = kwargs.get("largest", True)
+        self.use_sg_reduce_fp = kwargs.get("use_sg_reduce_fp", False)
+        if self.merge_tumor_to_liver:
+            tf.logging.info("Enable --> merge_tumor_to_liver")
+        if self.largest:
+            tf.logging.info("Enable --> largest")
+        if self.use_sg_reduce_fp:
+            tf.logging.info("Enable --> use_sg_reduce_fp")
         self._timer = Timer()
 
     @property
@@ -137,9 +147,6 @@ class EvaluateVolume(EvaluateBase):
         logits3d = defaultdict(list)
         labels3d = defaultdict(list)
         # bg_masks3d = list()
-        # cls_acc = list()
-        # cls_pos = list()
-        # cls_rec = list()
         self.clear_metrics()
 
         pad = -1
@@ -163,10 +170,8 @@ class EvaluateVolume(EvaluateBase):
                 for c, cls in enumerate(self.classes):
                     logits3d[cls].append(np.squeeze(pred[cls + "Pred"], axis=-1))
                     labels3d[cls].append(pred["Labels_{}".format(c)])
+                # self.maybe_append(labels3d["SpGuide"], pred, "SpGuide")
                 # self.maybe_append(bg_masks3d, pred, "BgMasks")
-                # self.maybe_append(cls_acc, pred, "ClsAcc")
-                # self.maybe_append(cls_pos, pred, "ClsPos")
-                # self.maybe_append(cls_rec, pred, "ClsRec")
             elif cur_case + ".rev" == new_case:
                 # Append reversed batch to another collections
                 for c, cls in enumerate(self.classes):
@@ -190,10 +195,8 @@ class EvaluateVolume(EvaluateBase):
                     if cls + "_rev" in logits3d:
                         logits3d[cls + "_rev"].clear()
 
+                # self.maybe_append(labels3d["SpGuide"], pred, "SpGuide", clear=True)
                 # self.maybe_append(bg_masks3d, pred, "BgMasks", clear=True)
-                # self.maybe_append(cls_acc, pred, "ClsAcc", clear=True)
-                # self.maybe_append(cls_pos, pred, "ClsPos", clear=True)
-                # self.maybe_append(cls_rec, pred, "ClsRec", clear=True)
 
                 if cases is not None and self._timer.calls >= cases:
                     break
@@ -328,9 +331,11 @@ class EvaluateVolume(EvaluateBase):
                 # Remove false positives outside liver region
                 logits3d["Tumor"] *= logits3d["Liver"].astype(logits3d["Tumor"].dtype)
 
-        # Remove false positives outside liver region
-        # if livers3d is not None and "Tumor" in logits3d:
-        #     logits3d["Tumor"] *= livers3d.astype(logits3d["Tumor"].dtype)
+        # Remove false positives with spatial guide
+        if self.use_sg_reduce_fp:
+            logits3d["Tumor"] = arr_ops.reduce_fp_with_guide(np.squeeze(labels3d["Tumor"], axis=-1),
+                                                             logits3d["Tumor"],
+                                                             guide=self.params["args"].guide)
 
         # Calculate 3D metrics
         cur_pairs = {}
@@ -383,8 +388,8 @@ class EvaluateSlice(EvaluateBase):
             * merge_tumor_to_liver: bool, if `Tumor` and `Liver` in predictions (default True)
             * largest: bool, get largest component for liver, if `Liver` in predictions (default True)
         """
-        if not isinstance(model, CustomEstimator):
-            raise TypeError("model need a custom_estimator.CustomEstimator instance")
+        # if not isinstance(model, CustomEstimator):
+        #     raise TypeError("model need a custom_estimator.CustomEstimator instance")
         super(EvaluateSlice, self).__init__(model, **kwargs)
 
     @property
@@ -481,3 +486,360 @@ def _compare(cur_result,
         else:
             return False
     return False
+
+
+class TumorManager(object):
+    def __init__(self, tumor_info):
+        self._tumor_info = tumor_info
+        self._name = None
+        self._bbox = None
+        self._id = None
+        self.direction = 1  # 1 for "forward", -1 for "backward"
+        self.disc = ndi.generate_binary_structure(2, connectivity=1)
+        self.guides = None
+        self.pred = None
+        self.backup = defaultdict(list)
+        self.debug = False
+
+    @property
+    def info(self):
+        return self._tumor_info
+
+    @property
+    def name(self):
+        return self._name
+
+    @name.setter
+    def name(self, new_name):
+        self._name = new_name
+        self._name_id = int(Path(new_name).name.split(".")[0].split("-")[1])
+        self.total_tumors = self._tumor_info[self._tumor_info["PID"] ==
+                                             "segmentation-{}.nii".format(self._name_id)]
+        self.total_tumors = self.total_tumors.iloc[:, range(2, 8)].values
+        self.total_tumors[:, [3, 4, 5]] -= 1    # [) --> []
+        self.total_tumors_yx = self.total_tumors[:, [1, 0, 4, 3]]  # [y1, x1, y2, x2]
+        self.total_tumors_z = self.total_tumors[:, [2, 5]]          # range: [z1, z2]
+        del self.total_tumors
+
+    @property
+    def bbox(self):
+        return self._bbox
+
+    def set_bbox(self, new_bbox, shape):
+        """
+        new_bbox: make sure (x1, y1, z1, x2, y2, z2)
+        """
+        self._bbox = np.asarray(new_bbox)   # []
+        self.shape = np.asarray(shape)
+        scale = self.shape / np.array([self._bbox[4] - self._bbox[1] + 1,
+                                       self._bbox[3] - self._bbox[0] + 1])
+        self.total_tumors_yx = (self.total_tumors_yx - self._bbox[[1, 0, 1, 0]]) * np.tile(scale, [2])
+        self.total_tumors_z -= self._bbox[[2, 2]]
+
+    @property
+    def id(self):
+        """ slice id in CT """
+        return self._id
+
+    def _set_id(self, new_id):
+        if self._name is None or self._bbox is None:
+            raise ValueError("Please set name and bbox first")
+        self._id = new_id
+
+    def clear_backup(self):
+        for key in self.backup:
+            self.backup[key].clear()
+
+    def append_backup(self, center, stddev, zi):
+        self.backup["centers"].append(center)
+        self.backup["stddevs"].append(stddev)
+        self.backup["zi"].append(zi)
+
+    def reset(self, direction=1):
+        self._name = None
+        self._bbox = None
+        self._id = None
+        self.direction = direction
+        self.guides = None
+        self.pred = None
+        self.clear_backup()
+
+    def print(self, *args, **kwargs):
+        if self.debug:
+            print(*args, **kwargs)
+
+    def set_guide_info(self, guide, new_id):
+        """
+        Decide whether to finish a tumor or not.
+        Of course making this decision with only guide is enough.
+
+        Parameters
+        ----------
+        guide: Tensor
+            with shape [n, 4]
+        new_id: int
+            Index number of current slice in a CT volume.
+        """
+        self._set_id(new_id)
+
+        select = np.where(guide[:, 0] >= 0)[0]
+        self.centers_yx = np.round(guide[select, 1::-1] * self.shape).astype(np.int32)
+        self.stddevs_yx = np.round(guide[select, :1:-1] * self.shape).astype(np.int32)
+        # print(guide)
+        # Indices for self.total_tumor_z
+        self.zi = np.array([self.determine_z_min_max(i, ctr, std)
+                            for i, (ctr, std) in enumerate(zip(self.centers_yx, self.stddevs_yx))],
+                           dtype=np.int32)
+        self.print("{} New Guide: {}".format(new_id + self._bbox[2], self.zi.shape[0]), end="")
+        if self.backup["zi"]:
+            # TODO(ZJW): Maybe we should remove the same objects from centers_ys and centers_backup.
+            #            For example, two or more adjacent slices are provided guides.
+            self.centers_yx = np.concatenate(
+                (self.centers_yx, np.asarray(self.backup["centers"], np.int32)), axis=0)
+            self.stddevs_yx = np.concatenate(
+                (self.stddevs_yx, np.asarray(self.backup["stddevs"], np.int32)), axis=0)
+            self.zi = np.concatenate(
+                (self.zi, np.asarray(self.backup["zi"], np.int32)), axis=0)
+        self.print("  Last Guide: {}".format(len(self.backup["zi"])))
+
+    def get_guide_image(self, guide, new_id):
+        self.set_guide_info(guide, new_id)
+
+        if len(self.centers_yx) > 0:
+            self.guides = arr_ops.create_gaussian_distribution(self.shape,
+                                                               self.centers_yx[0, ::-1],
+                                                               self.stddevs_yx[0, ::-1])
+            for i in range(1, len(self.centers_yx)):
+                self.guides = np.maximum(self.guides, arr_ops.create_gaussian_distribution(
+                    self.shape, self.centers_yx[i, ::-1], self.stddevs_yx[i, ::-1]))
+        else:
+            self.guides = np.zeros(self.shape, dtype=np.float32)
+
+        if self.pred is None:
+            return self.guides[None, ..., None]
+        else:
+            self.guides = np.maximum(
+                self.guides, arr_ops.get_gd_image_multi_objs(
+                    self.pred, center_perturb=0., stddev_perturb=0.))
+            return self.guides[None, ..., None]
+
+    def check_pred(self, pred, filter_thresh=0.15):
+        """
+        Remove those predicted tumors who are out of range.
+        Apply supervisor to predicted tumors.
+
+        Make sure `pred` is binary
+
+        self.pred which is created in this function will be used for generating next guide.
+        So don't use `self.pred` as real prediction, because we will also remove those ended
+        in current slice from self.pred.
+
+        TODO(ZJW): adjust filter_thresh 0.35 ?
+        """
+        if self.guides is None:
+            raise ValueError("previous_guide is None")
+        if np.sum(pred) == 0:
+            return pred
+
+        self.clear_backup()
+
+        labeled_objs, n_objs = ndi.label(pred, self.disc)
+        slicers = ndi.find_objects(labeled_objs)
+        # Decide whether reaching the end of the tumor or not
+        for i, slicer in zip(range(n_objs), slicers):
+            res_obj = labeled_objs == i + 1
+            res_obj_slicer = res_obj[slicer]
+            # 1. Filter wrong tumors(no corresponding guide)
+            mask_guide_by_res = res_obj_slicer * self.guides[slicer]
+            # print(np.max(mask_guide_by_res))
+            if np.max(mask_guide_by_res) < filter_thresh:
+                self.print("Remove")
+                pred[slicer] -= res_obj_slicer   # Faster than labeled_objs[res_obj] = 0
+                continue
+            # 2. Match res_obj to guide
+            res_peak_pos = list(np.unravel_index(mask_guide_by_res.argmax(), mask_guide_by_res.shape))
+            res_peak_pos[0] += slicer[0].start
+            res_peak_pos[1] += slicer[1].start
+            #   2.1. Check whether res_peak is just a guide center
+            found = -1
+            for j, center in enumerate(self.centers_yx):
+                if res_peak_pos[0] == center[0] and res_peak_pos[1] == center[1]:
+                    found = j   # res_peak is just a center
+                    break
+            #   2.2. From the nearest guide center, check that whether it is the corresponding guide.
+            #        Rule: Image(guide) values along the line from res_obj's peak to its corresponding
+            #        guide center must be monotonously increasing.
+            if found < 0:   # gradient ascent from res_peak to center
+                # compute distances between res_obj_peak and every guide center
+                distances = np.sum((self.centers_yx - res_peak_pos) ** 2, axis=1)
+                order = np.argsort(distances)
+                for j in order:
+                    ctr = self.centers_yx[j]
+                    if self.ascent_line(self.guides, res_peak_pos[1], res_peak_pos[0], ctr[1], ctr[0]):
+                        # Found
+                        found = j
+                        break
+            if found < 0:
+                raise ValueError("Can not find corresponding guide!")
+            # 3. Check z range and stop finished tumors(remove from next guide image)
+            if (self.direction == 1 and self._id >= self.total_tumors_z[self.zi[found]][1]) or \
+                    (self.direction == -1 and self._id <= self.total_tumors_z[self.zi[found]][0]):
+                # if self.direction == -1:
+                #     print("End {} vs {}, {}".format(self._id, self.total_tumors_z[self.zi[found]][0],
+                #                                     self._bbox[2]))
+                # if self.direction == 1:
+                #     print("End {} vs {}, {}".format(self._id, self.total_tumors_z[self.zi[found]][1],
+                #                                     self._bbox[2]))
+                pred[slicer] -= res_obj_slicer
+                continue
+            # 4. Compute moments. Save moments of tumors for next slice
+            ctr, std = arr_ops.compute_robust_moments(res_obj_slicer, index="ij")
+            ctr[0] += slicer[0].start
+            ctr[1] += slicer[1].start
+            self.append_backup(ctr, std, self.zi[found])
+            # print(ctr, std, self.zi[found])
+
+        self.pred = pred
+
+    @staticmethod
+    def ascent_line(img, x0, y0, x1, y1):
+        # Find points along this line
+        xs, ys, forward = arr_ops.xiaolinwu_line(x0, y0, x1, y1)
+        ascent = True
+        pre = img[ys[0], xs[0]] if forward else img[ys[-1], xs[-1]]
+        xs, ys = (xs, ys) if forward else (reversed(xs[:-1]), reversed(ys[:-1]))
+        for x, y in zip(xs, ys):
+            cur = img[y, x]
+            if cur >= pre:
+                pre = cur
+                continue
+            else:
+                ascent = False
+                break
+        return ascent
+
+    def determine_z_min_max(self, idx, center, stddev):
+        _ = stddev  # Unused
+        diff = self.total_tumors_yx - np.tile(center, [2])
+        sign = np.all(diff[:, 0:2] * diff[:, 2:4] <= 0, axis=1)
+        select = np.where(sign)[0]
+        if len(select) == 0:
+            nn_dist = np.mean(np.abs(diff), axis=1)
+            nn_idx = np.argmin(nn_dist)
+            if nn_dist[nn_idx] < 2.:
+                return nn_idx
+            else:
+                print("#" * 50)
+                print(nn_idx, nn_dist[nn_idx])
+                print(self._id, idx, center)
+                print(self._bbox)
+                print(self.total_tumors_yx)
+                print("#" * 50)
+                raise ValueError
+        elif len(select) == 1:
+            return select[0]
+        else:
+            tumor_centers = (self.total_tumors_yx[select, 0:2] + self.total_tumors_yx[select, 2:4]) / 2
+            distance = np.sum((tumor_centers - center) ** 2, axis=1)
+            new_sel = np.argmin(distance)
+            return select[new_sel]
+
+
+if __name__ == "__main__":
+    import pandas as pd
+    import input_pipeline_osmn
+    import matplotlib.pyplot as plt
+    from utils import nii_kits
+
+    tumor_path = Path(__file__).parent / "data/LiTS/tumor_summary.csv"
+    tumors_info = pd.read_csv(str(tumor_path))
+
+    class Foo(object):
+        pass
+
+    args = Foo()
+    args.input_group = 3
+    args.eval_skip_num = 20
+    args.batch_size = 1
+    args.num_gpus = 1
+    args.guide = "middle"
+    args.resize_for_batch = True
+    args.im_height = 256
+    args.im_width = 256
+    args.hist_scale = 1.0
+    args.w_width = 450
+    args.w_level = 50
+
+    n = 0
+    dataset = input_pipeline_osmn.get_3d_multi_records_dataset_for_eval(
+        [r"D:\documents\MLearning\MultiOrganDetection\core\MedicalImageSegmentation"
+         r"\data\LiTS\records\trainval-bbox-3D-3-of-5.tfrecord"],
+        [r"D:\documents\MLearning\MultiOrganDetection\core\MedicalImageSegmentation"
+         r"\data\LiTS\records\hist-100--200_250-3D-3-of-5.tfrecord"],
+        mode="eval",
+        args=args
+    ).skip(n).make_one_shot_iterator().get_next()
+
+    def run(mgr):
+        _, temp = nii_kits.nii_reader(Path(__file__).parent / "model_dir/016_osmn_in_noise"
+                                                              "/prediction/prediction-113.nii.gz")
+        temp = arr_ops.merge_labels(temp, [0, 2])
+        temp = temp[arr_ops.bbox_to_slices(mgr.bbox)]
+        temp = ndi.zoom(temp, [1, mgr.shape[0] / temp.shape[1], mgr.shape[1] / temp.shape[2]],
+                        order=0)[n:]
+        for x in np.concatenate((temp, np.flip(temp, axis=0)), axis=0):
+            yield x
+
+    sess = tf.Session()
+    features_val, labels_val = sess.run(dataset)
+    # print(features_val["names"], np.clip(labels_val - 1, 0, 1).sum(), features_val["sp_guide"])
+    # features_val, labels_val = sess.run(dataset)
+    # print(features_val["names"], np.clip(labels_val - 1, 0, 1).sum(), features_val["sp_guide"])
+
+    t_mgr = TumorManager(tumors_info)
+    t_mgr.name = features_val["names"][0].decode("utf-8")
+    z0 = features_val["bboxes"][0][2]
+    t_mgr.set_bbox(features_val["bboxes"][0], shape=features_val["images"].shape[1:-1])
+    features_val["sp_guide"] = t_mgr.get_guide_image(features_val["sp_guide"][0], new_id=n)
+    run_gen = run(t_mgr)
+
+    fig, ax = plt.subplots(1, 2)
+    init = next(run_gen)
+    t_mgr.check_pred(init)
+    init = init.copy()
+    init[0, 0] = 1
+    init2 = features_val["sp_guide"][0, ..., 0]
+    init2[0, 0] = 1
+    spg_handle = ax[0].imshow(init2, cmap="gray")
+    img_handle = ax[1].imshow(init, cmap="gray")
+    text = plt.title("{}".format(n + z0))
+    n += 1
+
+    cur_name = features_val["names"][0]
+
+    def key_press_event(event):
+        global n, features_val, labels_val, pred, cur_name
+        if event.key == "down":
+            features_val, labels_val = sess.run(dataset)
+            new_name = features_val["names"][0]
+            if new_name != cur_name:
+                print(new_name.decode("utf-8"))
+                cur_name = new_name
+                n = n - 1
+                t_mgr.reset(-1)
+                t_mgr.name = cur_name.decode("utf-8")
+                t_mgr.set_bbox(features_val["bboxes"][0], features_val["images"].shape[1:-1])
+            features_val["sp_guide"] = t_mgr.get_guide_image(features_val["sp_guide"][0], new_id=n)
+            pred = next(run_gen)
+            t_mgr.check_pred(pred)
+            spg_handle.set_data(features_val["sp_guide"][0, ..., 0])
+            img_handle.set_data(pred)
+            text.set_text("{}".format(n + z0))
+            if t_mgr.direction == 1:
+                n += 1
+            else:
+                n -= 1
+            fig.canvas.draw()
+
+    fig.canvas.mpl_connect("key_press_event", key_press_event)
+    plt.show()

@@ -78,6 +78,17 @@ python main.py --help
 ```
 * other parameters...
 
+### 3. How to train/eval a OSMNUNet model with your data ?
+
+**A. Create `tumor_summary.csv` by running `./data_kits/analyze_lits.py`
+
+**B. Mostly train/eval routine is the same with UNet, but some details are different. Please check
+  `./run_scripts/016_osmn_in_noise.sh` for details. Notice that the entry becomes `main_osmn.py`.
+  * For training with single gpu: `./run_scripts/xxx.sh train 0`
+  * For training with multiple gpus: `./run_scripts/xxx.sh train 0,1`
+  * For evaluating with single gpu: `./run_scripts/xxx.sh eval 0 --use_fewer_guide --guide middle`
+  * For evaluating with multiple gpus: not supported!
+
 
 ## Need implemented
 
@@ -93,12 +104,10 @@ python main.py --help
 - [ ] Multi-GPU Evaluation/Prediction
 
 - [x] UNet
-- [x] AtrousUNet
-- [x] DiscrimUNet
 - [ ] Attention UNet
 - [x] OSMN
 
-- [ ] Weighted examples
+- [ ] Balance dataset
 - [ ] Pre-trained backbone
 - [x] Spatial guide
-- [x] Classifier for Gaussian distribution
+- [x] Gaussian distribution

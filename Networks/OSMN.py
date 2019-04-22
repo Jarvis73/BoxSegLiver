@@ -32,18 +32,41 @@ def _check_size_type(size):
 
 
 def _density_modulator(density_hist, mod_early_conv, density_channels, init_channels,
-                       scope=None, is_training=False):
+                       scope=None, is_training=False, with_conv=False, conv_init_num_outs=64):
     with tf.variable_scope(scope, "mod_density", [density_hist]):
         n_modulator_param = init_channels * (mod_early_conv + 2 + 4 + 8 + 16) * 2
 
-        net = slim.fully_connected(density_hist, density_channels, scope="fc1")
-        net = slim.dropout(net, 0.5, is_training=is_training, scope="dropout1")
-        net = slim.fully_connected(net, density_channels, scope="fc2")
-        net = slim.dropout(net, 0.5, is_training=is_training, scope="dropout2")
-        modulator_params = slim.fully_connected(net, n_modulator_param,
-                                                weights_initializer=tf.zeros_initializer(),
-                                                biases_initializer=tf.ones_initializer(),
-                                                activation_fn=None, normalizer_fn=None, scope="fc3")
+        net = density_hist
+        if with_conv:
+            net = tf.expand_dims(net, axis=-1)
+            net = slim.repeat(net, 2, slim.conv1d, conv_init_num_outs, 3, scope="conv1")
+            net = tf.layers.max_pooling1d(net, 2, 2, padding="same")
+            net = slim.repeat(net, 2, slim.conv1d, conv_init_num_outs * 2, 3, scope="conv2")
+            net = tf.layers.max_pooling1d(net, 2, 2, padding="same")
+            net = slim.repeat(net, 3, slim.conv1d, conv_init_num_outs * 4, 3, scope="conv3")
+            net = tf.layers.max_pooling1d(net, 2, 2, padding="same")
+            net = slim.repeat(net, 3, slim.conv1d, conv_init_num_outs * 8, 3, scope="conv4")
+            net = tf.layers.max_pooling1d(net, 2, 2, padding="same")
+            net = slim.repeat(net, 3, slim.conv1d, conv_init_num_outs * 16, 3, scope="conv5")
+            net = tf.layers.max_pooling1d(net, 2, 2, padding="same")
+            net = slim.conv1d(net, density_channels, 7, padding="VALID", scope="fc6")
+            net = slim.dropout(net, 0.5, is_training=is_training, scope="dropout1")
+            net = slim.conv1d(net, density_channels, 1, scope="fc7")
+            net = slim.dropout(net, 0.5, is_training=is_training, scope="dropout2")
+            modulator_params = slim.conv1d(net, n_modulator_param, 1,
+                                           weights_initializer=tf.zeros_initializer(),
+                                           biases_initializer=tf.ones_initializer(),
+                                           activation_fn=None, normalizer_fn=None, scope="fc8")
+            modulator_params = tf.squeeze(modulator_params, axis=1)
+        else:
+            net = slim.fully_connected(density_hist, density_channels, scope="fc1")
+            net = slim.dropout(net, 0.5, is_training=is_training, scope="dropout1")
+            net = slim.fully_connected(net, density_channels, scope="fc2")
+            net = slim.dropout(net, 0.5, is_training=is_training, scope="dropout2")
+            modulator_params = slim.fully_connected(net, n_modulator_param,
+                                                    weights_initializer=tf.zeros_initializer(),
+                                                    biases_initializer=tf.ones_initializer(),
+                                                    activation_fn=None, normalizer_fn=None, scope="fc3")
         return modulator_params
 
 
@@ -74,12 +97,15 @@ def modulated_conv_block(self, net, repeat, channels, dilation=1, scope_id=0, de
     with tf.variable_scope("down_conv{}".format(scope_id)):
         for i in range(repeat):
             with tf.variable_scope("mod_conv{}".format(i + 1)):
-                if density_modulation or spatial_modulation or self.args.without_bn:
+                if density_modulation or spatial_modulation or self.args.without_norm:
                     net = slim.conv2d(net, channels, 3, rate=dilation, activation_fn=None)
                 else:
-                    batch_norm_params = {"scale": True, "is_training": self.is_training}
+                    norm_params = {}
+                    if self.args.normalizer == "batch_norm":
+                        norm_params.update({"scale": True, "is_training": self.is_training})
                     net = slim.conv2d(net, channels, 3, rate=dilation, activation_fn=None,
-                                      normalizer_fn=slim.batch_norm, normalizer_params=batch_norm_params)
+                                      normalizer_fn=self._get_normalization()[0],
+                                      normalizer_params=norm_params)
                 if density_modulation:
                     den_params = tf.slice(density_modulation_params, [0, density_mod_id], [-1, channels],
                                           name="de_params")
@@ -118,7 +144,7 @@ class OSMNUNet(base.BaseNet):
                             biases_regularizer=default_b_regu):
             with slim.arg_scope([slim.avg_pool2d, slim.max_pool2d],
                                 padding="SAME") as scope:
-                if self.args.without_bn:
+                if self.args.without_norm:
                     return scope
                 normalizer, params = self._get_normalization()
                 with slim.arg_scope([slim.conv2d],
@@ -143,25 +169,32 @@ class OSMNUNet(base.BaseNet):
         use_density_modulator = kwargs.get("use_density_modulator", True)
         use_spatial_modulator = kwargs.get("use_spatial_modulator", True)
         density_channels = kwargs.get("density_channels", 1024)
+        with_conv = kwargs.get("with_conv", False)
+        conv_init_num_outs = kwargs.get("conv_init_num_outs", 64)
 
         with tf.variable_scope(self.name, "UNet"):
             # density modulator
             density_modulation_params = _density_modulator(density_hists, mod_early_conv, density_channels,
-                                                           out_channels, is_training=self.is_training)
+                                                           out_channels, is_training=self.is_training,
+                                                           with_conv=with_conv,
+                                                           conv_init_num_outs=conv_init_num_outs)
             num_mod_layers = [2, 2, 2, 2, 2]
-            batch_norm_params = {
-                'decay': 0.99,
+            norm_params = {
                 'scale': True,
                 'epsilon': 0.001,
-                'is_training': self.is_training
             }
+            if self.args.normalizer == "batch_norm":
+                norm_params.update({
+                    'decay': 0.99,
+                    'is_training': self.is_training
+                })
 
             # spatial modulator
             with tf.variable_scope("mod_sp"):
                 with slim.arg_scope([slim.conv2d],
                                     activation_fn=tf.nn.relu,
-                                    normalizer_fn=slim.batch_norm,
-                                    normalizer_params=batch_norm_params,
+                                    normalizer_fn=self._get_normalization()[0],
+                                    normalizer_params=norm_params,
                                     padding="SAME"):
                     ds_mask = sp_guide
                     if mod_early_conv:
@@ -178,18 +211,21 @@ class OSMNUNet(base.BaseNet):
                     conv5_att = slim.conv2d(ds_mask, 1024 * num_mod_layers[4], 1, scope="conv5")
 
             def encode_arg_scope():
-                if self.args.without_bn:
+                if self.args.without_norm:
                     return slim.current_arg_scope()
                 else:
-                    encode_bn_params = {
-                        'decay': 0.99,
+                    encode_norm_params = {
                         'center': False,  # Replace with spatial guide
                         'scale': False,  # Replace with density guide
-                        'is_training': self.is_training
                     }
+                    if self.args.normalizer == "batch_norm":
+                        encode_norm_params.update({
+                            'decay': 0.99,
+                            'is_training': self.is_training
+                        })
                     with slim.arg_scope([slim.conv2d],
-                                        normalizer_fn=slim.batch_norm,
-                                        normalizer_params=encode_bn_params) as scope:
+                                        normalizer_fn=self._get_normalization()[0],
+                                        normalizer_params=encode_norm_params) as scope:
                         return scope
 
             # encoder
@@ -256,7 +292,7 @@ class OSMNUNet(base.BaseNet):
 
                 net_1r = slim.conv2d_transpose(net_2r, net_2r.get_shape()[-1] // 2, 2, 2, scope="up1")
                 net_1r = tf.concat((net_1, net_1r), axis=-1)
-                net_1r = slim.repeat(net_1r, 2, slim.conv2d, out_channels * 8, 3, scope="up_conv1")
+                net_1r = slim.repeat(net_1r, 2, slim.conv2d, out_channels * 1, 3, scope="up_conv1")
 
             # final
             with slim.arg_scope([slim.conv2d],
