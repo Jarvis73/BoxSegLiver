@@ -15,13 +15,14 @@
 # =================================================================================
 
 import tensorflow as tf
+import tensorflow_estimator as tfes
 import tensorflow.contrib.slim as slim
 
 import loss_metrics as losses
 from Networks import base
 from utils import distribution_utils
 
-ModeKeys = tf.estimator.ModeKeys
+ModeKeys = tfes.estimator.ModeKeys
 metrics = losses
 
 

@@ -153,7 +153,7 @@ def weighted_sparse_softmax_cross_entropy(logits, labels, w_type, name=None, **k
         weights = _compute_weights(w_type, one_hot_labels, **kwargs)
         # if "livers" in kwargs:
         #     loss_mask = kwargs.pop("livers")
-        #     weights = tf.to_float(loss_mask) * weights
+        #     weights = tf.cast(loss_mask, tf.float32) * weights
         return tf.losses.sparse_softmax_cross_entropy(labels, logits, weights)
 
 

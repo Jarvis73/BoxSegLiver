@@ -21,21 +21,16 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
-from tensorflow.contrib.distribute.python import values
+from tensorflow.python.distribute import values
 from tensorflow.python.data.ops import iterator_ops
 from tensorflow.python.framework import ops
-# from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import errors_impl
-# from tensorflow.python.framework import meta_graph
-# from tensorflow.python.ops import array_ops
-# from tensorflow.python.ops import state_ops
 from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.training import training_util
 from tensorflow.python.training import session_run_hook
 from tensorflow.python.training import basic_session_run_hooks
 from tensorflow.python.training import saver as saver_lib
 from tensorflow.python.training.summary_io import SummaryWriterCache
-# from tensorflow.core.protobuf import config_pb2
 
 import data_kits.build_data as data_ops
 from custom_evaluator_base import EvaluateBase
@@ -53,8 +48,8 @@ class IteratorStringHandleHook(session_run_hook.SessionRunHook):
                 isinstance(eval_iterator, iterator_ops.Iterator):
             self._train_iterator = train_iterator
             self._eval_iterator = eval_iterator
-        elif isinstance(train_iterator, values.PerDeviceDataIterator) and \
-                isinstance(eval_iterator, values.PerDeviceDataIterator):
+        elif isinstance(train_iterator, values.PerReplicaDataIterator) and \
+                isinstance(eval_iterator, values.PerReplicaDataIterator):
             self._train_iterator = train_iterator._iterator
             self._eval_iterator = eval_iterator._iterator
         else:
@@ -202,14 +197,14 @@ class BestCheckpointSaverHook(session_run_hook.SessionRunHook):
         if result is None:
             result = self._better_result
 
-        tags, values = [], []
+        tags, values_ = [], []
         for key, value in result.items():
             if key == ops.GraphKeys.GLOBAL_STEP:
                 continue
             tags.append(self._summary_tag.format(key))
-            values.append(value)
+            values_.append(value)
 
-        summary_scalar(self._summary_writer, step, tags, values)
+        summary_scalar(self._summary_writer, step, tags, values_)
 
     def _get_result_for_json_dump(self):
         res = {}

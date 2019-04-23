@@ -17,13 +17,14 @@
 import copy
 import yaml  # conda install -c conda-forge pyyaml
 import tensorflow as tf
+import tensorflow_estimator as tfes
 from pathlib import Path
 from tensorflow.python import pywrap_tensorflow as pt
 
 from Networks.UNet import UNet
 from Networks.OSMN import OSMNUNet
 
-ModeKeys = tf.estimator.ModeKeys
+ModeKeys = tfes.estimator.ModeKeys
 
 # Available models
 MODEL_ZOO = [
@@ -87,7 +88,7 @@ def get_model_params(args):
             args.model_config = args.model + ".yml"
         model_config_path = Path(__file__).parent / "Networks" / args.model_config
         with model_config_path.open() as f:
-            params["model_kwargs"] = yaml.load(f)
+            params["model_kwargs"] = yaml.load(f, Loader=yaml.Loader)
 
     return params
 
@@ -200,4 +201,4 @@ def model_fn(features, labels, mode, params):
     init_fn = init_partial_model(model, args)
     kwargs["scaffold"] = tf.train.Scaffold(init_fn=init_fn)
 
-    return tf.estimator.EstimatorSpec(mode=mode, **kwargs)
+    return tfes.estimator.EstimatorSpec(mode=mode, **kwargs)
