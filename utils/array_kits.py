@@ -685,6 +685,39 @@ def get_moments_multi_objs(labels,
     return aligned_ctr_std
 
 
+def get_guide_image(mask, obj_val=None, guide="first", tile_guide=False):
+    if len(mask.shape) != 3:
+        raise ValueError("`mask` must be 3D array")
+
+    if not np.any(mask):
+        # return a blank gd image
+        return mask.copy()
+
+    if obj_val is not None:
+        mask = merge_labels(mask, [0, obj_val])
+    disc = ndi.generate_binary_structure(3, connectivity=1)
+    labeled_image, n_objs = ndi.label(mask, structure=disc)
+    slicers = ndi.find_objects(labeled_image)
+
+    def gen_obj_image():
+        for slicer in slicers:
+            yield labeled_image[slicer], slices_to_bbox(slicer)
+
+    for obj_img, bb in gen_obj_image():
+        if guide == "first":
+            idx = 0
+        else:  # partial_slice == "middle"
+            # The case of labels == 0 is excluded, and here len(indices) >= 1 is satisfied.
+            idx = (obj_img.shape[0] - 1) // 2
+        if tile_guide:
+            obj_img[np.arange(obj_img.shape[0]) != idx] = obj_img[[idx]]
+        else:
+            obj_img[np.arange(obj_img.shape[0]) != idx] = 0
+
+    guide_image = np.clip(labeled_image, 0, 1)
+    return guide_image
+
+
 def aug_window_width_level(image, ww, wl, rand=False, norm_scale=1.0, normalize=False):
 
     def randu():

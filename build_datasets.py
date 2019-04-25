@@ -51,12 +51,21 @@ def main():
     # Histogram
     # build_lits_liver.convert_to_histogram_dataset("trainval", keep_only_liver=False, seed=1234,
     #                                               bins=100, xrng=(-200, 250),
-    #                                               folds_file="k_folds.txt")
+    #                                               folds_file="k_folds.txt", guide=None, hist_scale="total")
+    # build_lits_liver.convert_to_histogram_dataset("trainval", keep_only_liver=False, seed=1234,
+    #                                               bins=100, xrng=(-200, 250), prefix="guide-hist",
+    #                                               folds_file="k_folds.txt", guide="middle", hist_scale="total")
+
+    build_lits_liver.convert_to_histogram_dataset("trainval", keep_only_liver=False, seed=1234,
+                                                  align=(16, 16, 1), padding=(25, 25, 2),
+                                                  bins=100, xrng=(-200, 250), prefix="slice-hist",
+                                                  folds_file="k_folds.txt", guide="middle", hist_scale="slice")
 
     # Histogram v2
-    build_lits_liver.convert_to_histogram_dataset("trainval", keep_only_liver=False, seed=1234,
-                                                  bins=100, xrng=(-100, 250),
-                                                  folds_file="k_folds.txt")
+    # build_lits_liver.convert_to_histogram_dataset("trainval", keep_only_liver=False, seed=1234,
+    #                                               bins=100, xrng=(-100, 250),
+    #                                               folds_file="k_folds.txt", guide=None, hist_scale="total")
+
 
 
 if __name__ == "__main__":

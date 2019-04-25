@@ -110,6 +110,7 @@ venv.bak/
 
 # project settings
 data/LiTS/*
+data/*.json
 !data/LiTS/trainval.txt
 !data/LiTS/k_folds.txt
 logs/
@@ -119,3 +120,7 @@ run_scripts/*
 !run_scripts/004_triplet.sh
 !run_scripts/005_triplet_sg_wd.sh
 !run_scripts/016_osmn_in_noise.sh
+!data/dataset_example.json
+images/
+notebooks/
+grabcut.py

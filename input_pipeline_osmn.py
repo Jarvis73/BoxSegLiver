@@ -784,6 +784,6 @@ def get_3d_multi_records_dataset_for_eval(image_filenames, hist_filenames, mode,
                .flat_map(flat_fn)
                .apply(tf.data.experimental.map_and_batch(augment_fn, bs,
                                                          num_parallel_batches=1))
-               .prefetch(buffer_size=contrib_data.AUTOTUNE))
+               .prefetch(buffer_size=200))
 
     return dataset

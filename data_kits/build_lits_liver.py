@@ -352,6 +352,7 @@ def convert_to_liver_bbox_group(dataset,
         print("Total #tumor slices: {}".format(len(tumor_slices)))
 
 
+# Deprecated
 def dump_fp_bbox_from_prediction(label_dirs, pred_dir):
     pred_dir = Path(pred_dir)
     save_path = pred_dir.parent / "bboxes-{}.pkl".format(pred_dir.parent.name)
@@ -381,6 +382,7 @@ def dump_fp_bbox_from_prediction(label_dirs, pred_dir):
         pickle.dump(all_bboxes, f, pickle.HIGHEST_PROTOCOL)
 
 
+# Deprecated
 def convert_to_tp_dataset(dataset,
                           k_split=5,
                           folds_file="k_folds.txt",
@@ -426,6 +428,7 @@ def convert_to_tp_dataset(dataset,
             print()
 
 
+# Deprecated
 def convert_to_classify_dataset(dataset,
                                 pred_dir,
                                 prefix,
@@ -502,14 +505,14 @@ def hist_to_examples(label_reader, liver_hist_array, tumor_hist_array, split=Fal
         yield tf.train.Example(features=tf.train.Features(feature=feature_dict))
 
 
-def convert_to_histogram_dataset(dataset,
-                                 keep_only_liver,
-                                 k_split=5,
-                                 seed=None,
-                                 prefix="hist",
-                                 folds_file="k_folds.txt",
-                                 bins=100,
-                                 xrng=(-200, 250)):
+def convert_to_histogram_dataset_deprecated(dataset,
+                                            keep_only_liver,
+                                            k_split=5,
+                                            seed=None,
+                                            prefix="hist",
+                                            folds_file="k_folds.txt",
+                                            bins=100,
+                                            xrng=(-200, 250)):
     file_names = get_lits_list(dataset, keep_only_liver)
     num_images = len(file_names)
 
@@ -551,6 +554,7 @@ def convert_to_histogram_dataset(dataset,
                 liver, tumor = images[labels == 1], images[labels == 2]
                 val1, _ = np.histogram(liver.flat, bins=bins, range=xrng, density=True)
                 val2, _ = np.histogram(tumor.flat, bins=bins, range=xrng, density=True)
+                # Convert float64 to float32
                 val1_total = np.tile(val1[None, :].astype(np.float32), [len(label_reader.indices), 1])
                 val2_total = np.tile(val2[None, :].astype(np.float32), [len(label_reader.indices), 1])
 
@@ -563,3 +567,124 @@ def convert_to_histogram_dataset(dataset,
                 counter += 1
             print()
 
+
+def convert_to_histogram_dataset(dataset,
+                                 keep_only_liver,
+                                 k_split=5,
+                                 seed=None,
+                                 align=1,
+                                 padding=0,
+                                 min_bbox_shape=None,
+                                 prefix="hist",
+                                 folds_file="k_folds.txt",
+                                 bins=100,
+                                 xrng=(-200, 250),
+                                 guide=None,
+                                 hist_scale="total"):
+    np.warnings.filterwarnings('ignore')
+    if guide is not None and guide not in ["first", "middle"]:
+        raise ValueError("`guide` must be None or chosen from [first, middle]")
+    if hist_scale not in ["total", "slice"]:
+        raise ValueError("`hist_scale` must be chosen from [total, slice]")
+
+    file_names = get_lits_list(dataset, keep_only_liver)
+    num_images = len(file_names)
+
+    k_folds = read_or_create_k_folds(Path(__file__).parent.parent / "data/LiTS/{}".format(folds_file),
+                                     file_names, k_split, seed)
+    LiTS_records = _get_lits_records_dir()
+
+    image_reader = SubVolumeReader(np.int16, extend_channel=False)
+    label_reader = SubVolumeReader(np.uint8, extend_channel=False)  # use uint8 to save space
+
+    # Convert each split
+    counter = 1
+    for i, fold in enumerate(k_folds):
+        output_filename_2d = LiTS_records / "{}-{}-{}_{}-2D-{}-of-{}.tfrecord"\
+            .format(prefix, bins, xrng[0], xrng[1], i + 1, k_split)
+        output_filename_3d = LiTS_records / "{}-{}-{}_{}-3D-{}-of-{}.tfrecord"\
+            .format(prefix, bins, xrng[0], xrng[1], i + 1, k_split)
+        output_filename_2d_guide = LiTS_records / "{}-guide-{}-{}_{}-2D-{}-of-{}.tfrecord" \
+            .format(prefix, bins, xrng[0], xrng[1], i + 1, k_split)
+        output_filename_3d_guide = LiTS_records / "{}-guide-{}-{}_{}-3D-{}-of-{}.tfrecord" \
+            .format(prefix, bins, xrng[0], xrng[1], i + 1, k_split)
+        print("Write to {} and {}".format(str(output_filename_2d), str(output_filename_3d)))
+        with tf.io.TFRecordWriter(str(output_filename_2d)) as writer_2d, \
+                tf.io.TFRecordWriter(str(output_filename_3d)) as writer_3d, \
+                tf.io.TFRecordWriter(str(output_filename_2d_guide)) as writer_2d_guide, \
+                tf.io.TFRecordWriter(str(output_filename_3d_guide)) as writer_3d_guide:
+            for j, image_name in enumerate(fold):
+                print("\r>> Converting fold {}, {}/{}, {}/{}"
+                      .format(i + 1, j + 1, len(fold), counter, num_images), end="")
+
+                # Read image
+                image_file = LiTS_Dir / image_name
+                seg_file = image_file.parent / image_file.name.replace("volume", "segmentation")
+
+                label_reader.read(seg_file)
+                bbox = array_kits.extract_region(np.squeeze(label_reader.image()), align, padding, min_bbox_shape)
+                label_reader.bbox = bbox.tolist()
+                image_reader.read(image_file)
+                image_reader.bbox = bbox.tolist()
+                print(" {}".format(image_reader.shape), end="")
+                if not np.all(np.array(image_reader.shape)[:3] % align[::-1] == 0):
+                    raise ValueError("{}: box {} shape {}".format(image_file.stem, bbox, image_reader.shape))
+
+                if image_reader.shape != label_reader.shape:
+                    raise RuntimeError("Shape mismatched between image and label: {} vs {}".format(
+                        image_reader.shape, label_reader.shape))
+
+                images = image_reader.image()
+                labels = label_reader.image()
+                if hist_scale == "total":
+                    liver = images[labels >= 1]
+                    tumor = images[labels == 2]
+                    val1, _ = np.histogram(liver, bins=bins, range=xrng, density=True)
+                    val2, _ = np.histogram(tumor, bins=bins, range=xrng, density=True)
+                    # Convert float64 to float32
+                    val1_total = np.tile(val1[None, :].astype(np.float32), [len(label_reader.indices), 1])
+                    val2_total = np.tile(val2[None, :].astype(np.float32), [len(label_reader.indices), 1])
+
+                    if guide is not None:
+                        guide_image = array_kits.get_guide_image(
+                            labels, obj_val=2, guide=guide, tile_guide=True)
+                        tumor_guide = images[guide_image == 1]
+                        val3, _ = np.histogram(tumor_guide, bins=bins, range=xrng, density=True)
+                        # Convert float64 to float32
+                        val3_total = np.tile(val3[None, :].astype(np.float32), [len(label_reader.indices), 1])
+                else:   # "slice"
+                    liver_slice_hists, tumor_slice_hists = [], []
+                    for k in range(images.shape[0]):
+                        val1, _ = np.histogram(images[k][labels[k] >= 1], bins=bins, range=xrng, density=True)
+                        val2, _ = np.histogram(images[k][labels[k] == 2], bins=bins, range=xrng, density=True)
+                        # Convert float64 to float32
+                        liver_slice_hists.append(val1.astype(np.float32))
+                        tumor_slice_hists.append(val2.astype(np.float32))
+                    val1_total = np.nan_to_num(np.array(liver_slice_hists))
+                    val2_total = np.nan_to_num(np.array(tumor_slice_hists))
+
+                    tumor_guide_slice_hists = []
+                    if guide is not None:
+                        tumor_labels = array_kits.get_guide_image(
+                            labels, obj_val=2, guide=guide, tile_guide=True) * 2
+                        for k in range(images.shape[0]):
+                            val3, _ = np.histogram(images[k][tumor_labels[k] >= 1],
+                                                   bins=bins, range=xrng, density=True)
+                            # Convert float64 to float32
+                            tumor_guide_slice_hists.append(val3.astype(np.float32))
+                        val3_total = np.nan_to_num(np.array(tumor_guide_slice_hists))
+
+                # Convert 2D slices to example
+                for example in hist_to_examples(label_reader, val1_total, val2_total, split=True):
+                    writer_2d.write(example.SerializeToString())
+                # Convert 3D slices to example
+                for example in hist_to_examples(label_reader, val1_total, val2_total, split=False):
+                    writer_3d.write(example.SerializeToString())
+                if guide is not None:
+                    for example in hist_to_examples(label_reader, val1_total, val3_total, split=True):
+                        writer_2d_guide.write(example.SerializeToString())
+                    for example in hist_to_examples(label_reader, val1_total, val3_total, split=False):
+                        writer_3d_guide.write(example.SerializeToString())
+
+                counter += 1
+            print()

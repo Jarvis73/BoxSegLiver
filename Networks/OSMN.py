@@ -174,10 +174,11 @@ class OSMNUNet(base.BaseNet):
 
         with tf.variable_scope(self.name, "UNet"):
             # density modulator
-            density_modulation_params = _density_modulator(density_hists, mod_early_conv, density_channels,
-                                                           out_channels, is_training=self.is_training,
-                                                           with_conv=with_conv,
-                                                           conv_init_num_outs=conv_init_num_outs)
+            density_modulation_params = (_density_modulator(density_hists, mod_early_conv, density_channels,
+                                                            out_channels, is_training=self.is_training,
+                                                            with_conv=with_conv,
+                                                            conv_init_num_outs=conv_init_num_outs)
+                                         if use_density_modulator else None)
             num_mod_layers = [2, 2, 2, 2, 2]
             norm_params = {
                 'scale': True,
@@ -215,8 +216,8 @@ class OSMNUNet(base.BaseNet):
                     return slim.current_arg_scope()
                 else:
                     encode_norm_params = {
-                        'center': False,  # Replace with spatial guide
-                        'scale': False,  # Replace with density guide
+                        'center': False if use_spatial_modulator else True,  # Replace with spatial guide
+                        'scale': False if use_density_modulator else True,  # Replace with density guide
                     }
                     if self.args.normalizer == "batch_norm":
                         encode_norm_params.update({
