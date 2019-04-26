@@ -140,7 +140,8 @@ def merge_labels(masks, merges):
             for m_digit in m_list:
                 t_masks[np.where(masks == m_digit)] = i
         else:
-            raise ValueError("Only integer or list is accepted, but got %r(type %s) in merges[%d]" % (m_list, type(m_list), i))
+            raise ValueError("Only integer or list is accepted, but got {}(type {}) in merges[{}]"
+                             .format(m_list, type(m_list), i))
     return t_masks
 
 
@@ -602,16 +603,10 @@ def get_gd_image_multi_objs(labels,
 
 def get_moments_multi_objs(labels,
                            obj_value=1,
-                           # center_perturb=0.,
-                           # stddev_perturb=0.,
                            blank_prob=0,
                            connectivity=1,
                            partial=False,
-                           # with_fake_guides=False,
-                           # fake_rate=1.0,
-                           # max_fakes=4,
-                           # fake_range_value=0,
-                           partial_slice="first", **kwargs):
+                           partial_slice="first"):
     """
     Get objects' moments with some perturbation. Only connected points assigned 1
     are considered to be the same object.
@@ -1034,33 +1029,3 @@ def xiaolinwu_line(x0, y0, x1, y1):
         ys.append(ypxl2)
 
     return xs, ys, forward
-
-
-if __name__ == "__main__":
-    from utils import nii_kits
-    # from loss_metrics import metric_3d
-    # p1 = r"D:\documents\MLearning\MultiOrganDetection\core\MedicalImageSegmentation\model_dir" \
-    #      r"\016_osmn_in_noise\prediction\prediction-125.nii.gz"
-    # p2 = r"D:\DataSet\LiTS\Training_Batch_2\segmentation-125.nii"
-    # _, res = nii_kits.nii_reader(p1)
-    # _, ref = nii_kits.nii_reader(p2)
-    # res = merge_labels(res, [0, 2])
-    # ref = merge_labels(ref, [0, 2])
-    # dice = metric_3d(res, ref, required=["Dice"])["Dice"]
-    # print(dice)
-    # new_res = reduce_fp_with_guide(ref, res, guide="first")
-    # new_dice = metric_3d(new_res, ref, required=["Dice"])["Dice"]
-    # print(new_dice)
-    import time
-
-    p2 = r"D:\DataSet\LiTS\Training_Batch_2\segmentation-93.nii"
-    _, ref = nii_kits.nii_reader(p2)
-    ref = merge_labels(ref, [0, 2])
-    t1 = time.time()
-    ctr_stds1 = get_moments_multi_objs(ref, partial_slice="middle")
-    t2 = time.time()
-    t3 = time.time()
-    ctr_stds2 = get_moments_multi_objs_v2(ref, partial_slice="middle")
-    t4 = time.time()
-    print(t2 - t1, t4 - t3)
-    print(np.all(ctr_stds1 == ctr_stds2))

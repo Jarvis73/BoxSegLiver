@@ -15,12 +15,13 @@
 # =================================================================================
 
 import tensorflow as tf
+import tensorflow_estimator as tfes
 import tensorflow.contrib.slim as slim
 from tensorflow.python.ops import init_ops
 
 import loss_metrics as metrics
 
-ModeKeys = tf.estimator.ModeKeys
+ModeKeys = tfes.estimator.ModeKeys
 
 
 class BaseNet(object):

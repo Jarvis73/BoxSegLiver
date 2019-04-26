@@ -14,7 +14,12 @@
 # ==============================================================================
 """Helper functions for running models in a distributed setting."""
 
+import functools
+
+from tensorflow.python.distribute import distribute_lib
+from tensorflow.python.distribute import values
 from tensorflow.contrib import distribute
+from tensorflow.contrib.distribute.python import mirrored_strategy
 
 
 def get_distribution_strategy(distribution_strategy="default",
@@ -83,13 +88,12 @@ def get_distribution_strategy(distribution_strategy="default",
         else:
             devices = ["device:GPU:%d" % i for i in range(num_gpus)]
         if all_reduce_alg:
-            return distribute.MirroredStrategy(
+            return ModifiedMirroredStrategy(
                 devices=devices,
-                cross_tower_ops=distribute.AllReduceCrossTowerOps(
-                    all_reduce_alg, num_packs=2),
-                prefetch_on_device=False)
+                cross_tower_ops=distribute.AllReduceCrossDeviceOps(
+                    all_reduce_alg, num_packs=2))
         else:
-            return distribute.MirroredStrategy(devices=devices, prefetch_on_device=False)
+            return ModifiedMirroredStrategy(devices=devices)
 
     if distribution_strategy == "parameter_server":
         return distribute.ParameterServerStrategy()
@@ -126,3 +130,36 @@ def per_device_batch_size(batch_size, num_gpus):
                ).format(num_gpus, batch_size, batch_size - remainder)
         raise ValueError(err)
     return int(batch_size / num_gpus)
+
+
+class ModifiedMirroredExtended(mirrored_strategy.MirroredExtended):
+    def _distribute_dataset(self, dataset_fn):
+        if self._local_mode:
+            # Add argument: prefetch_on_device=False
+            return values.PerReplicaDataset(
+                self._call_dataset_fn(dataset_fn), self._devices, prefetch_on_device=False)
+        else:
+            return values.MultiWorkerDataset(
+                functools.partial(self._call_dataset_fn, dataset_fn),
+                self._worker_devices,
+                auto_shard=self._auto_shard_dataset)
+
+
+class ModifiedMirroredStrategy(distribute_lib.DistributionStrategy):
+    def __init__(self,
+                 devices=None,
+                 num_gpus=None,
+                 num_gpus_per_worker=None,
+                 cross_device_ops=None,
+                 auto_shard_dataset=False,
+                 cross_tower_ops=None):
+        assert not (cross_device_ops and cross_tower_ops)
+        if num_gpus is not None and num_gpus_per_worker is not None:
+            raise ValueError(
+                "You cannot specify both `num_gpus` and `num_gpus_per_worker`.")
+        if num_gpus is None:
+            num_gpus = num_gpus_per_worker
+        extended = ModifiedMirroredExtended(self, devices, num_gpus,
+                                            cross_device_ops or cross_tower_ops,
+                                            auto_shard_dataset)
+        super(ModifiedMirroredStrategy, self).__init__(extended)

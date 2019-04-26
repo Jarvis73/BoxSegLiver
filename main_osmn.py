@@ -15,7 +15,8 @@
 # =================================================================================
 
 import argparse
-import tensorflow as tf     # Tensorflow >= 1.12.0
+import tensorflow as tf     # Tensorflow >= 1.13.0
+import tensorflow_estimator as tfes
 from pathlib import Path
 from tensorflow.python.platform import tf_logging as logging
 
@@ -28,10 +29,9 @@ import custom_evaluator
 from utils.logger import create_logger
 from utils import distribution_utils
 from custom_estimator import CustomEstimator
-from custom_evaluator import EvaluateVolume, EvaluateSlice
 from custom_hooks import LogLearningRateHook
 
-ModeKeys = tf.estimator.ModeKeys
+ModeKeys = tfes.estimator.ModeKeys
 TF_RANDOM_SEED = 13579
 
 
@@ -78,11 +78,11 @@ def main(argv):
         num_gpus=args.num_gpus,
         num_workers=1,
         all_reduce_alg=args.all_reduce_alg
-    ) if args.num_gpus > 1 else None
+    )
 
     if args.mode == ModeKeys.TRAIN:
         log_step_count_steps = 500
-        run_config = tf.estimator.RunConfig(
+        run_config = tfes.estimator.RunConfig(
             train_distribute=distribution_strategy,
             tf_random_seed=TF_RANDOM_SEED,
             save_summary_steps=200,
@@ -119,7 +119,7 @@ def main(argv):
                         save_best_ckpt=args.save_best)
 
     elif args.mode == ModeKeys.EVAL:
-        run_config = tf.estimator.RunConfig(
+        run_config = tfes.estimator.RunConfig(
             tf_random_seed=TF_RANDOM_SEED,
             session_config=_get_session_config()
         )

@@ -25,7 +25,6 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("qt5Agg")
 import matplotlib.pyplot as plt
-import numpy as np
 
 import input_pipeline_osmn
 input_pipeline = input_pipeline_osmn

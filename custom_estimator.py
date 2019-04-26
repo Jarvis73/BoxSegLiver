@@ -23,28 +23,26 @@ from pathlib import Path
 
 from tensorflow.python.data import Dataset
 from tensorflow.python.data import Iterator
+from tensorflow.python.distribute import values
+from tensorflow.python.distribute import reduce_util
 from tensorflow.python.eager import context
-from tensorflow.python.estimator import estimator as estimator_lib
-from tensorflow.python.estimator import util as estimator_util
-from tensorflow.python.estimator import model_fn as model_fn_lib
-from tensorflow.python.platform import tf_logging as logging
-from tensorflow.python.training import training
-from tensorflow.python.training import training_util
-from tensorflow.python.training import warm_starting_util
-# from tensorflow.python.training import monitored_session
-from tensorflow.python.training import checkpoint_management
-from tensorflow.python.training import distribute as distribute_lib
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import random_seed
 from tensorflow.python.framework import errors_impl
+from tensorflow.python.platform import tf_logging as logging
+from tensorflow.python.training import training
+from tensorflow.python.training import training_util
+from tensorflow.python.training import warm_starting_util
+from tensorflow.python.training import checkpoint_management
+from tensorflow.python.training import distribute as distribute_lib
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import variable_scope
-from tensorflow.python.ops import variables
 from tensorflow.python.util import nest
 from tensorflow.python.util import function_utils
-# from tensorflow.python.ops import math_ops
-from tensorflow.contrib.distribute.python import values
+from tensorflow_estimator.python.estimator import estimator as estimator_lib
+from tensorflow_estimator.python.estimator import util as estimator_util
+from tensorflow_estimator.python.estimator import model_fn as model_fn_lib
 
 from custom_evaluator_base import EvaluateBase
 from custom_hooks import IteratorStringHandleHook
@@ -55,6 +53,7 @@ EVAL_WHILE_TRAIN = "eval_while_train"
 
 
 def _load_global_step_from_checkpoint_dir(checkpoint_dir):
+    # noinspection PyBroadException
     try:
         checkpoint_reader = training.NewCheckpointReader(
             training.latest_checkpoint(checkpoint_dir))
@@ -76,7 +75,7 @@ def _add_key_value(feed_dict, key, value):
 def _check_dataset_structure(result1, result2):
     if isinstance(result1, Dataset) and isinstance(result2, Dataset):
         ds1, ds2 = result1, result2
-    elif isinstance(result1, values.PerDeviceDataset) and isinstance(result2, values.PerDeviceDataset):
+    elif isinstance(result1, values.PerReplicaDataset) and isinstance(result2, values.PerReplicaDataset):
         ds1, ds2 = result1._dataset, result2._dataset
     else:
         raise TypeError("input_fn must return Dataset instance, but got ({} {})"
@@ -147,9 +146,10 @@ def parse_input_fn_result(train_with_eval, result, handler=None, only_iterator=F
                 raise ValueError("`result` should contains 2 Dataset instances, but got {}".format(len(result)))
             ds_prop = _check_dataset_structure(result[0], result[1])
 
-            train_iterator = result[0].make_one_shot_iterator()
+            train_iterator = result[0].make_initializable_iterator()
             eval_iterator = result[1].make_initializable_iterator()
-            input_hooks.append(estimator_util._DatasetInitializerHook(eval_iterator))
+            input_hooks.extend([estimator_util._DatasetInitializerHook(train_iterator),
+                                estimator_util._DatasetInitializerHook(eval_iterator)])
 
             iterator = Iterator.from_string_handle(handler, ds_prop.types, ds_prop.shapes, ds_prop.classes)
             if only_iterator:
@@ -548,7 +548,8 @@ class CustomEstimator(object):
 
     def _train_model(self, input_fn, hooks, saving_listeners, save_best_ckpt):
         if self._train_distribution:
-            return self._train_model_distributed(input_fn, hooks, saving_listeners, save_best_ckpt)
+            return self._train_model_distributed(self._train_distribution, input_fn, hooks,
+                                                 saving_listeners, save_best_ckpt)
         else:
             return self._train_model_default(input_fn, hooks, saving_listeners, save_best_ckpt)
 
@@ -592,7 +593,7 @@ class CustomEstimator(object):
                                                    global_step_tensor, saving_listeners,
                                                    save_best_ckpt)
 
-    def _train_model_distributed(self, input_fn, hooks, saving_listeners, save_best_ckpt):
+    def _train_model_distributed(self, strategy, input_fn, hooks, saving_listeners, save_best_ckpt):
         """Initiate training with `input_fn`, using `DistributionStrategies`.
 
         Args:
@@ -605,69 +606,62 @@ class CustomEstimator(object):
         Returns:
             Loss from training
         """
-        self._train_distribution.configure(self._session_config)
+        strategy.configure(self._session_config)
 
         worker_hooks = []
         with ops.Graph().as_default() as g:
             # We want to create the iterations variable outside the distribution scope
             # as that is just stored on the host and mainly used to drive the loop
             # and doesn't need to be a Mirrored/Device variable.
-            with self._train_distribution.scope():
+            with strategy.scope():
                 random_seed.set_random_seed(self._config.tf_random_seed)
 
                 if self._train_with_eval:
                     self.handler = array_ops.placeholder(dtypes.string, shape=(), name="Handler")
                     iterator, self.train_iterator, self.eval_iterator, input_hooks = (
-                        self._get_iterator_for_train_and_eval(input_fn, self.handler,
-                                                              self._train_distribution))
+                        self._get_iterator_for_train_and_eval(input_fn, self.handler, strategy))
                 else:
                     self.handler, self.train_iterator, self.eval_iterator = None, None, None
                     iterator, input_hooks = self._get_iterator_from_input_fn(
-                        input_fn, model_fn_lib.ModeKeys.TRAIN, self._train_distribution)
+                        input_fn, model_fn_lib.ModeKeys.TRAIN, strategy)
                 worker_hooks.extend(input_hooks)
                 global_step_tensor = self._create_and_assert_global_step(g)
                 # we want to add to the global collection in the main thread not the
                 # tower threads.
                 ops.add_to_collection(
                     training_util.GLOBAL_STEP_READ_KEY,
-                    self._train_distribution.read_var(global_step_tensor))
+                    strategy.read_var(global_step_tensor))
 
                 features, labels = estimator_util.parse_iterator_result(
-                    per_device_dataset(iterator, self._train_distribution._devices))
-                grouped_estimator_spec = self._train_distribution.call_for_each_tower(
+                    per_device_dataset(iterator, strategy.extended._devices))
+                grouped_estimator_spec = strategy.call_for_each_replica(
                     self._call_model_fn,
-                    features,
-                    labels,
-                    model_fn_lib.ModeKeys.TRAIN,
-                    self.config)
-                loss = self._train_distribution.unwrap(
-                    self._train_distribution.reduce(
-                        distribute_lib.get_loss_reduction(),
-                        grouped_estimator_spec.loss,
-                        destinations="/device:CPU:0"))[0]
+                    args=(features,
+                          labels,
+                          model_fn_lib.ModeKeys.TRAIN,
+                          self.config))
+                loss = strategy.reduce(distribute_lib.get_loss_reduction(),
+                                       grouped_estimator_spec.loss)
                 distributed_train_op = grouped_estimator_spec.train_op
+
                 predictions = {}
                 for key, val in grouped_estimator_spec.predictions.items():
                     if key == "GlobalStep":
-                        predictions["GlobalStep"] = self._train_distribution.unwrap(val)[0]
+                        predictions["GlobalStep"] = strategy.unwrap(val)[0]
                     elif "/" in key:
-                            predictions[key] = self._train_distribution.unwrap(
-                                self._train_distribution.reduce(variables.VariableAggregation.MEAN,
-                                                                val,
-                                                                destinations="device:GPU:0"))[0]
+                        predictions[key] = strategy.reduce(reduce_util.ReduceOp.MEAN, val)
                     else:
-                        predictions[key] = array_ops.concat(self._train_distribution.unwrap(val),
-                                                            axis=0)
+                        predictions[key] = array_ops.concat(strategy.unwrap(val), axis=0)
 
                 scaffold = estimator_lib._combine_distributed_scaffold(
-                    grouped_estimator_spec.scaffold, self._train_distribution)
+                    grouped_estimator_spec.scaffold, strategy)
 
                 # add a test for unwrapping per_device_hooks.
                 def get_hooks_from_the_first_device(per_device_hooks):
                     # In tensorflow-1.12 Estimator, Next line is self._distribution.unwrap()
                     # but self._distribution is not defined, which maybe a bug?
                     return [
-                        self._train_distribution.unwrap(per_device_hook)[0]
+                        strategy.unwrap(per_device_hook)[0]
                         for per_device_hook in per_device_hooks
                     ]
 
@@ -677,13 +671,13 @@ class CustomEstimator(object):
                     grouped_estimator_spec.training_chief_hooks)
                 worker_hooks.append(
                     estimator_util.StrategyInitFinalizeHook(
-                        self._train_distribution.initialize,
-                        self._train_distribution.finalize))
+                        strategy.initialize,
+                        strategy.finalize))
 
                 estimator_spec = model_fn_lib.EstimatorSpec(
                     mode=grouped_estimator_spec.mode,
                     loss=loss,
-                    train_op=self._train_distribution.group(distributed_train_op),
+                    train_op=strategy.group(distributed_train_op),
                     predictions=predictions,
                     training_hooks=training_hooks,
                     training_chief_hooks=training_chief_hooks,

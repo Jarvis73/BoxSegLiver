@@ -16,6 +16,7 @@
 
 import numpy as np
 import tensorflow as tf
+import tensorflow_estimator as tfes
 from functools import partial
 from pathlib import Path
 from tensorflow.python.platform import tf_logging as logging
@@ -26,7 +27,7 @@ from utils import array_kits
 from utils import distribution_utils
 
 Dataset = tf.data.Dataset
-ModeKeys = tf.estimator.ModeKeys
+ModeKeys = tfes.estimator.ModeKeys
 
 # number for debug, None for training
 SEED_FILE = np.random.randint(10000)    # 3456
@@ -264,7 +265,7 @@ def filter_slices(*example_proto, args=None, strategy="empty", **kwargs):
 
             label = tf.decode_raw(features["segmentation/encoded"], tf.uint8, name="DecodeMask")
             if args.only_tumor:
-                obj_label = tf.clip_by_value(tf.to_int32(label) - 1, 0, 1)
+                obj_label = tf.clip_by_value(tf.cast(label, tf.int32) - 1, 0, 1)
             else:
                 obj_label = label
             num_dense = tf.count_nonzero(obj_label)
@@ -295,10 +296,10 @@ def parse_2d_example_proto(example_proto, mode, args):
         with tf.name_scope(PREPROCESS):
             image = tf.decode_raw(features["image/encoded"], tf.int16, name="DecodeImage")
             image = tf.reshape(image, features["image/shape"], name="ReshapeImage")
-            image = tf.to_float(image)
+            image = tf.cast(image, tf.float32)
             label = tf.decode_raw(features["segmentation/encoded"], tf.uint8, name="DecodeMask")
             label = tf.reshape(label, features["segmentation/shape"], name="ReshapeMask")
-            label = tf.to_int32(label)
+            label = tf.cast(label, tf.int32)
 
             if mode == "train":
                 image = image_ops.random_adjust_window_width_level(image, args.w_width, args.w_level)
@@ -337,10 +338,10 @@ def parse_3d_example_proto(example_proto, args):
 
         image = tf.decode_raw(features["image/encoded"], tf.int16, name="DecodeImage")
         image = tf.reshape(image, features["image/shape"], name="ReshapeImage")
-        image = tf.to_float(image)
+        image = tf.cast(image, tf.float32)
         label = tf.decode_raw(features["segmentation/encoded"], tf.uint8, name="DecodeMask")
         label = tf.reshape(label, features["segmentation/shape"], name="ReshapeMask")
-        label = tf.to_int32(label)
+        label = tf.cast(label, tf.int32)
 
     with tf.name_scope(PREPROCESS):
         # image shape [depth, height, width, channel]
