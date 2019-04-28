@@ -102,8 +102,7 @@ def main(argv):
             params.update(custom_evaluator.get_eval_params(evaluator="Volume" if args.eval_3d else "Slice",
                                                            eval_steps=args.eval_steps,
                                                            primary_metric=args.primary_metric,
-                                                           secondary_metric=args.secondary_metric,
-                                                           use_sg_reduce_fp=False))
+                                                           secondary_metric=args.secondary_metric))
 
         estimator = CustomEstimator(models.model_fn, args.model_dir, run_config, params,
                                     args.warm_start_from)
@@ -127,8 +126,7 @@ def main(argv):
         params = {"args": args}
         params.update(models.get_model_params(args))
         eval_params = custom_evaluator.get_eval_params(evaluator="Volume" if args.eval_3d else "Slice",
-                                                       eval_steps=args.eval_steps,
-                                                       use_sg_reduce_fp=True)
+                                                       eval_steps=args.eval_steps)
 
         estimator = CustomEstimator(models.model_fn, args.model_dir, run_config, params)
 
