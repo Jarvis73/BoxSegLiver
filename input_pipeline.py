@@ -42,6 +42,10 @@ SHUFFLE_BUFFER_SIZE = 1000
 # Preprocess name scope
 PREPROCESS = "Preprocess/"
 
+# Global proportion, unused
+# [364, 7856, 5646]
+# GLOBAL_WEIGHTS = 5646 / 7856 / 2 = 0.36
+
 
 def add_arguments(parser):
     group = parser.add_argument_group(title="Input Pipeline Arguments")
@@ -143,6 +147,9 @@ def add_arguments(parser):
                        action="store_true",
                        required=False, help="Add cases' weights to loss for balancing dataset. If set, "
                                             "'extra/weights' will be parsed from example proto")
+    group.add_argument("--liver_sample_weights",
+                       type=float,
+                       required=False, help="Use unified case weights")
 
 
 def _collect_datasets(datasets):
@@ -244,6 +251,10 @@ def filter_slices(*example_proto, args=None, strategy="empty", **kwargs):
             if args.case_weights:
                 cond2 = tf.less(tf.random.uniform((), dtype=tf.float32), features["extra/weights"])
                 return tf.logical_and(cond1, cond2)
+            elif args.liver_sample_weights:
+                cond2 = tf.equal(tf.reduce_max(label), 2)
+                cond3 = tf.less(tf.random.uniform((), dtype=tf.float32), args.liver_sample_weights)
+                return tf.logical_and(cond1, tf.logical_or(cond2, cond3))
 
         return cond1
 

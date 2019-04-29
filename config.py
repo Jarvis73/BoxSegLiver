@@ -57,8 +57,11 @@ def add_arguments(parser):
     group.add_argument("--save_predict",
                        action="store_true",
                        required=False, help="Save prediction to file")
+    group.add_argument("--warm_start_from",
+                       type=str,
+                       required=False, help="Warm start the model from a checkpoint")
 
-    group = parser.add_argument_group(title="Distribution Arguments")
+    group = parser.add_argument_group(title="Device Arguments")
     group.add_argument("--distribution_strategy",
                        type=str,
                        default="off",
@@ -74,9 +77,10 @@ def add_arguments(parser):
                        default="",
                        choices=["", "hierarchical_copy", "nccl"],
                        required=False, help="Specify which algorithm to use when performing all-reduce")
-    group.add_argument("--warm_start_from",
-                       type=str,
-                       required=False, help="Warm start the model from a checkpoint")
+    group.add_argument("--device_mem_frac",
+                       type=float,
+                       default=0.,
+                       required=False, help="Used for per_process_gpu_memory_fraction")
 
 
 def check_args(args, parser):

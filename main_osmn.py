@@ -32,7 +32,7 @@ from custom_estimator import CustomEstimator
 from custom_hooks import LogLearningRateHook
 
 ModeKeys = tfes.estimator.ModeKeys
-TF_RANDOM_SEED = 13579
+TF_RANDOM_SEED = None
 
 
 def _get_arguments(argv):
@@ -51,9 +51,12 @@ def _get_arguments(argv):
     return args
 
 
-def _get_session_config():
-    sess_cfg = tf.ConfigProto(allow_soft_placement=True)
-    sess_cfg.gpu_options.allow_growth = True
+def _get_session_config(args):
+    if args.device_mem_frac > 0:
+        gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=args.device_mem_frac)
+    else:
+        gpu_options = tf.GPUOptions(allow_growth=True)
+    sess_cfg = tf.ConfigProto(allow_soft_placement=True, gpu_options=gpu_options)
     return sess_cfg
 
 
@@ -73,12 +76,14 @@ def main(argv):
     _custom_tf_logger(args)
     logging.info(args)
 
+    session_config = _get_session_config(args)
+
     distribution_strategy = distribution_utils.get_distribution_strategy(
         distribution_strategy=args.distribution_strategy,
         num_gpus=args.num_gpus,
         num_workers=1,
-        all_reduce_alg=args.all_reduce_alg
-    )
+        all_reduce_alg=args.all_reduce_alg,
+        session_config=session_config)
 
     if args.mode == ModeKeys.TRAIN:
         log_step_count_steps = 500
@@ -87,7 +92,7 @@ def main(argv):
             tf_random_seed=TF_RANDOM_SEED,
             save_summary_steps=200,
             save_checkpoints_steps=5000,
-            session_config=_get_session_config(),
+            session_config=session_config,
             keep_checkpoint_max=1,
             log_step_count_steps=log_step_count_steps,
         )

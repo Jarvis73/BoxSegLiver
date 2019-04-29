@@ -42,6 +42,10 @@ SHUFFLE_BUFFER_SIZE = 160
 # Preprocess name scope
 PREPROCESS = "Preprocess/"
 
+# Global proportion, unused
+# [364, 7856, 5646]
+# GLOBAL_WEIGHTS = 5646 / 7856 / 2 = 0.36
+
 
 def add_arguments(parser):
     group = parser.add_argument_group(title="Input Pipeline Arguments")
@@ -150,6 +154,9 @@ def add_arguments(parser):
                        action="store_true",
                        required=False, help="Add cases' weights to loss for balancing dataset. If set, "
                                             "'extra/weights' will be parsed from example proto")
+    group.add_argument("--liver_sample_weights",
+                       type=float,
+                       required=False, help="Use unified case weights")
     group.add_argument("--hist_scale",
                        type=float,
                        default=20.0,
@@ -274,6 +281,10 @@ def filter_slices(*example_proto, args=None, strategy="empty", **kwargs):
             if args.case_weights:
                 cond2 = tf.less(tf.random.uniform((), dtype=tf.float32), features["extra/weights"])
                 return tf.logical_and(cond1, cond2)
+            elif args.liver_sample_weights:
+                cond2 = tf.equal(tf.reduce_max(label), 2)
+                cond3 = tf.less(tf.random.uniform((), dtype=tf.float32), args.liver_sample_weights)
+                return tf.logical_and(cond1, tf.logical_or(cond2, cond3))
 
         return cond1
 
@@ -356,14 +367,6 @@ def parse_3d_example_proto(example_proto, args):
         image = tf.concat((image, zero_float), axis=0)
         label = tf.concat((label, zero_int64), axis=0)
 
-        # if args.only_tumor:
-        #     # Remove background
-        #     liver = tf.expand_dims(tf.clip_by_value(label, 0, 1), axis=-1)
-        #     liver = image_ops.binary_dilation2d(liver, iterations=10)
-        #     liver = tf.cast(liver, image.dtype)
-        #
-        #     image = image * liver
-
         ret_features = {"images": image,
                         "names": features["image/name"],
                         "pads": pad}
@@ -423,23 +426,7 @@ def data_augmentation(features, labels, args):
             fake_range_value=1)[..., None]
         return guide_image.astype(np.float32)
 
-    # def _wrap_get_moments_multi_objs(mask_):
-    #     guide_moments = array_kits.get_moments_multi_objs(
-    #         mask_,
-    #         obj_value=2,
-    #         partial_slice=args.guide)
-    #     return guide_moments.astype(np.float32)
-
     with tf.name_scope(PREPROCESS):
-        # liver = tf.ones_like(features["images"], features["images"].dtype)
-        # if args.only_tumor:
-        #     # Assert images.shape == labels.shape
-        #     liver = tf.clip_by_value(labels, 0, 1)
-        #     liver = tf.squeeze(image_ops.binary_dilation2d(tf.expand_dims(liver, axis=0),
-        #                                                    iterations=10), axis=0)
-        #     liver = tf.cast(liver, features["images"].dtype)
-        #     labels = labels[..., args.input_group // 2]
-
         with tf.name_scope("Augmentation/"):
             if args.noise:
                 # apply liver mask before flip and zoom
@@ -467,7 +454,8 @@ def data_augmentation(features, labels, args):
             features["sp_guide"] = guide
 
             if args.hist_noise:
-                features["density_hists"] += tf.random.normal(tf.shape(features["density_hists"])) * args.hist_noise_scale
+                features["density_hists"] += (tf.random.normal(tf.shape(features["density_hists"])) *
+                                              args.hist_noise_scale)
 
         if args.resize_for_batch:
             logging.info("Train: Resize image to {} x {}".format(args.im_height, args.im_width))
@@ -483,13 +471,6 @@ def data_augmentation(features, labels, args):
                                                       [args.im_height, args.im_width])
             labels = tf.squeeze(labels, axis=(0, -1))
 
-        # if args.only_tumor:
-        #     logging.info("Train: Clip label to [0, 1]")
-        #     if args.eval_3d:
-        #         # For train/eval dataset handlers compatible
-        #         features["livers"] = labels     # Wrong value but doesn't matter, we will not use it.
-        #     labels = tf.clip_by_value(labels - 1, 0, 1)
-
     return features, labels
 
 
@@ -501,32 +482,17 @@ def data_processing_eval_while_train(features, labels, args):
             [h, w, c] --> only tumor
     """
     def _wrap_get_gd_image_multi_objs(mask_):
+        # [h, w, 1]
         guide_image = array_kits.get_gd_image_multi_objs(
             mask_,
             obj_value=2,
-            center_perturb=args.center_perturb,
-            stddev_perturb=args.stddev_perturb,
             partial=False,
-            with_fake_guides=args.use_fake_guide,
-            fake_rate=args.fake_rate,
-            fake_range_value=1)[..., None]
+            with_fake_guides=False)[..., None]
         return guide_image.astype(np.float32)
 
-    # liver = tf.ones_like(features["images"], features["images"].dtype)
-    # if args.only_tumor and not args.eval_3d:
-    #     # Assert images.shape == labels.shape
-    #     # When eval_3d, image will be masked in parse_3d_examples_proto()
-    #     liver = tf.clip_by_value(labels, 0, 1)
-    #     liver = tf.squeeze(image_ops.binary_dilation2d(tf.expand_dims(liver, axis=0),
-    #                                                    iterations=10), axis=0)
-    #     liver = tf.cast(liver, features["images"].dtype)
-    #     labels = labels[..., args.input_group // 2]
-    # features["images"] *= liver
-
-    if not args.eval_3d:
-        logging.info("Eval WT: Add spatial guide")
-        guide = tf.py_func(_wrap_get_gd_image_multi_objs, [labels], tf.float32)
-        features["sp_guide"] = guide
+    logging.info("Eval WT: Add spatial guide")
+    guide = tf.py_func(_wrap_get_gd_image_multi_objs, [labels], tf.float32)
+    features["sp_guide"] = guide
 
     if args.resize_for_batch:
         logging.info("Eval WT: Resize image to {} x {}".format(args.im_height, args.im_width))
@@ -543,12 +509,6 @@ def data_processing_eval_while_train(features, labels, args):
                                                       [args.im_height, args.im_width])
             labels = tf.squeeze(labels, axis=(0, -1))
 
-    # if args.only_tumor:
-    #     logging.info("Eval WT: Clip label to [0, 1]")
-    #     if args.eval_3d:
-    #         features["livers"] = tf.clip_by_value(labels, 0, 1)
-    #     labels = tf.clip_by_value(labels - 1, 0, 1)
-
     return features, labels
 
 
@@ -559,17 +519,6 @@ def data_processing_eval(features, labels, args):
         image = tf.image.resize_bilinear(tf.expand_dims(features["images"], axis=0),
                                          [args.im_height, args.im_width])
         features["images"] = tf.squeeze(image, axis=0)
-        # logging.info("Eval: Resize guide to {} x {}".format(args.im_height, args.im_width))
-        # guide = tf.image.resize_bilinear(tf.expand_dims(features["sp_guide"], axis=0),
-        #                                  [args.im_height, args.im_width])
-        # features["sp_guide"] = tf.squeeze(guide, axis=0)
-        # Label isn't need resize
-
-    # if args.only_tumor:
-    #     logging.info("Eval: Clip label to [0, 1]")
-    #     # Add livers
-    #     features["livers"] = tf.clip_by_value(labels, 0, 1)
-    #     labels = tf.clip_by_value(labels - 1, 0, 1)
 
     return features, labels
 
@@ -635,25 +584,13 @@ def get_2d_multi_records_dataset_for_eval(image_filenames, hist_filenames, mode,
     return dataset
 
 
-def _before_flat_fn(features, labels, mode, args):
-    """ 3D
+def _before_flat_fn_eval(features, labels, args):
+    """ 3D & eval
     images: [d, h, w, c]
     labels: [d, h, w]
 
     Single channel with guide is deprecated!
     """
-    def _wrap_get_gd_image_multi_objs(mask):
-        # [d, h, w, 1]
-        guide_image = array_kits.get_gd_image_multi_objs(
-            mask,
-            obj_value=2,
-            center_perturb=0.,
-            stddev_perturb=0.,
-            partial=args.use_fewer_guide,
-            with_fake_guides=False,
-            partial_slice=args.guide)[..., None]
-        return guide_image.astype(np.float32)
-
     def _wrap_get_moments_multi_objs(mask):
         # [d, n, 4]
         guide_moments = array_kits.get_moments_multi_objs(
@@ -663,10 +600,7 @@ def _before_flat_fn(features, labels, mode, args):
             partial_slice=args.guide)
         return guide_moments.astype(np.float32)
 
-    if mode == "eval_while_train":
-        features["sp_guide"] = tf.py_func(_wrap_get_gd_image_multi_objs, [labels], tf.float32)
-    else:   # eval
-        features["sp_guide"] = tf.py_func(_wrap_get_moments_multi_objs, [labels], tf.float32)
+    features["sp_guide"] = tf.py_func(_wrap_get_moments_multi_objs, [labels], tf.float32)
 
     return features, labels
 
@@ -680,23 +614,24 @@ def _flat_map_fn(x, y, mode, args):
     names = Dataset.from_tensors(x["names"]).repeat(repeat_times)
     pads = Dataset.from_tensors(x["pads"]).repeat(repeat_times)
     hists = Dataset.from_tensor_slices(x["density_hists"])
-    sp_guides = Dataset.from_tensor_slices(x["sp_guide"])
 
-    def map_fn(image, label, name, pad, hist, sp_guide, *ex_args):
+    def map_fn(image, label, name, pad, hist, *ex_args):
         features = {"images": image,
                     "names": name,
                     "pads": pad,
-                    "density_hists": hist,
-                    "sp_guide": sp_guide}
+                    "density_hists": hist}
         for i, ex_arg in enumerate(ex_args):
             features[ex_arg_keys[i]] = ex_arg
         return features, label
 
-    zip_list = [images, labels, names, pads, hists, sp_guides]
+    zip_list = [images, labels, names, pads, hists]
     ex_arg_keys = []
     if args.resize_for_batch:
         zip_list.append(Dataset.from_tensors(x["bboxes"]).repeat(repeat_times))
         ex_arg_keys.append("bboxes")
+    if mode == "eval":
+        zip_list.append(Dataset.from_tensor_slices(x["sp_guide"]))
+        ex_arg_keys.append("sp_guide")
 
     return Dataset.zip(tuple(zip_list)).map(map_fn)
 
@@ -720,7 +655,6 @@ def _flat_map_fn_multi_channels(x, y, mode, args):
         names = Dataset.from_tensors(x["names"]).repeat(repeat_times)
         pads = Dataset.from_tensors(x["pads"]).repeat(repeat_times)
         hists = Dataset.from_tensor_slices(x["density_hists"])
-        sp_guides = Dataset.from_tensor_slices(x["sp_guide"])
     else:   # "middle"
         images = Dataset.from_tensor_slices(tf.concat((image_multi_channels,
                                                        tf.reverse(image_multi_channels, [0])), axis=0))
@@ -732,21 +666,24 @@ def _flat_map_fn_multi_channels(x, y, mode, args):
         pads = Dataset.from_tensors(x["pads"]).repeat(repeat_times * 2)
         hists = Dataset.from_tensor_slices(tf.concat((x["density_hists"],
                                                       tf.reverse(x["density_hists"], [0])), axis=0))
-        sp_guides = Dataset.from_tensor_slices(tf.concat((x["sp_guide"], tf.reverse(x["sp_guide"], [0])), axis=0))
 
-    concat_list = (images, labels, names, pads, hists, sp_guides)
+    concat_list = (images, labels, names, pads, hists)
     ex_arg_keys = []
     if args.resize_for_batch:
         bboxes = Dataset.from_tensors(x["bboxes"]).repeat(repeat_times * (1 if args.guide != "middle" else 2))
         concat_list += (bboxes,)
         ex_arg_keys.append("bboxes")
+    if mode == "eval":
+        sp_guides = (Dataset.from_tensor_slices(x["sp_guide"]) if args.guide != "middle" else
+                     Dataset.from_tensor_slices(tf.concat((x["sp_guide"], tf.reverse(x["sp_guide"], [0])), axis=0)))
+        concat_list += (sp_guides,)
+        ex_arg_keys.append("sp_guide")
 
-    def map_fn(image, label, name, pad, hist, sp_guide, *ex_args):
+    def map_fn(image, label, name, pad, hist, *ex_args):
         features = {"images": image,
                     "names": name,
                     "pads": pad,
-                    "density_hists": hist,
-                    "sp_guide": sp_guide}
+                    "density_hists": hist}
         for i, ex_arg in enumerate(ex_args):
             features[ex_arg_keys[i]] = ex_arg
         return features, label
@@ -766,7 +703,8 @@ def get_3d_multi_records_dataset_for_eval(image_filenames, hist_filenames, mode,
         features, labels = parse_3d_example_proto(examples[0], args=args)
         hists = parse_hist_example_proto(examples[1], nd=3, args=args, pad=features["pads"])
         features["density_hists"] = hists["hists"]
-        return _before_flat_fn(features, labels, mode=mode, args=args)
+        return ((features, labels) if mode == "eval_while_train" else
+                _before_flat_fn_eval(features, labels, args=args))
 
     if len(image_filenames) != len(hist_filenames):
         raise ValueError("Image and bbox shape mismatch: {} vs {}"
