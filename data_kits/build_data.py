@@ -23,7 +23,6 @@ from utils.nii_kits import nii_reader, nii_writer
 # noinspection PyUnresolvedReferences
 from utils.mhd_kits import mhd_reader, mhd_writer
 
-
 FORMATS = [
     "mhd",
     "nii"
@@ -42,6 +41,7 @@ class ImageReader(object):
         extend an extra channel dimension or not.
         Typically, True for image and False for label.
     """
+
     def __init__(self, image_type=np.int16, extend_channel=False):
         self._format = "mhd"
         self._type = image_type
@@ -117,6 +117,23 @@ class ImageReader(object):
             else:
                 return np.stack(slices, axis=-1)
 
+    def image_crop(self, idx=None):
+        if idx is None:
+            return self._decode
+        if isinstance(idx, (int, np.int32, np.int64)):
+            return self._decode[idx]
+        elif isinstance(idx, (list, tuple)):
+            slices = []
+            for i in idx:
+                if i < 0 or i >= self.shape[0]:
+                    slices.append(np.zeros(self.shape[1:], dtype=self._decode.dtype))
+                else:
+                    slices.append(self._decode[i])
+            if self._extend_channel:
+                return np.concatenate(slices, axis=-1)
+            else:
+                return np.stack(slices, axis=-1)
+
     def read(self, file_name, idx=None):
         self._filename = file_name
         self._check_format(str(file_name).split(".")[1])
@@ -149,6 +166,9 @@ class ImageReader(object):
                 img_array = np.fliplr(img_array)
         self._writer(save_path, img_array, meta_info=meta)
 
+    def transpose(self, dims):
+        self._decode = self._decode.transpose(dims)
+
     class Header(object):
         def __init__(self, header, fmt):
             self.header = header
@@ -173,6 +193,7 @@ class SubVolumeReader(ImageReader):
     """
     Add `bbox` attribute: [x1, y1, z1, ..., x2, y2, z2]
     """
+
     def __init__(self, image_type=np.int16, extend_channel=False):
         super(SubVolumeReader, self).__init__(image_type, extend_channel)
         self._bbox = []
@@ -197,8 +218,8 @@ class SubVolumeReader(ImageReader):
     def _clip_image(self):
         ndim = self._decode.ndim - 1 if self._extend_channel else self._decode.ndim
         if len(self._bbox) // 2 != ndim:
-                raise ValueError("Mismatched dimensions: self.bbox({}) vs self.image({})"
-                                 .format(len(self._bbox) // 2, ndim))
+            raise ValueError("Mismatched dimensions: self.bbox({}) vs self.image({})"
+                             .format(len(self._bbox) // 2, ndim))
 
         self._decode = self._decode[array_kits.bbox_to_slices(self._bbox) +
                                     ((slice(None, None),) if self._extend_channel else ())]
@@ -269,6 +290,7 @@ def _bytes_list_feature(values):
     A TF-Feature
 
     """
+
     def to_bytes(value):
         if isinstance(value, str):
             return value.encode()
@@ -297,7 +319,7 @@ def _check_extra_info_type(extra_info):
         tag = "_".join(p[:-1])
         if p[-1] == "split":
             extra_split[tag] = val
-        else:   # origin
+        else:  # origin
             extra_origin[tag] = val
 
     return extra_split, extra_origin
@@ -371,10 +393,8 @@ def image_to_examples(image_reader,
             if not mask_image:
                 slices = image_reader.data(indices)
             else:
-                slices = (image_reader.image(indices) *
-                          np.clip(label_reader.image(indices), 0, 1)
+                slices = (image_reader.image(indices) * np.clip(label_reader.image(indices), 0, 1)
                           .astype(image_reader.image().dtype)).tobytes()
-
             feature_dict = {
                 "image/encoded": _bytes_list_feature(slices),
                 "image/name": _bytes_list_feature(image_reader.name),
@@ -394,6 +414,93 @@ def image_to_examples(image_reader,
                 feature_dict["extra/{}".format(key)] = _float_list_feature(val[idx])
 
             yield tf.train.Example(features=tf.train.Features(feature=feature_dict))
+    else:
+        feature_dict = {
+            "image/encoded": _bytes_list_feature(image_reader.data()),
+            "image/name": _bytes_list_feature(image_reader.name),
+            "image/format": _bytes_list_feature(image_reader.format),
+            "image/shape": _int64_list_feature(image_reader.shape),
+            "segmentation/encoded": _bytes_list_feature(label_reader.data()),
+            "segmentation/name": _bytes_list_feature(label_reader.name),
+            "segmentation/format": _bytes_list_feature(label_reader.format),
+            "segmentation/shape": _int64_list_feature(label_reader.shape)
+        }
+
+        for key, val in extra_str_origin.items():
+            feature_dict["extra/{}".format(key)] = _bytes_list_feature(val)
+        for key, val in extra_int_origin.items():
+            feature_dict["extra/{}".format(key)] = _int64_list_feature(val)
+        for key, val in extra_float_origin.items():
+            feature_dict["extra/{}".format(key)] = _float_list_feature(val)
+
+        yield tf.train.Example(features=tf.train.Features(feature=feature_dict))
+
+
+def image_to_copy_examples(image_reader, label_reader, split=False, extra_str_info=None, extra_int_info=None,
+                           group="triplet", group_label=False, mask_image=False, extra_float_info=None, copy_number=5):
+    if group not in ["none", "triplet", "quintuplet"]:
+        raise ValueError("group must be one of [none, triplet, quintuplet], got {}".format(group))
+
+    if image_reader.name is None:
+        raise RuntimeError("ImageReader need call `read()` first.")
+    extra_str_split, extra_str_origin = _check_extra_info_type(extra_str_info)
+    extra_int_split, extra_int_origin = _check_extra_info_type(extra_int_info)
+    extra_float_split, extra_float_origin = _check_extra_info_type(extra_float_info)
+
+    if split:
+        num_slices = image_reader.shape[0]
+        for extra_list in extra_str_split.values():
+            assert num_slices == len(extra_list), "Length not equal: {} vs {}".format(num_slices, len(extra_list))
+        for extra_list in extra_int_split.values():
+            assert num_slices == len(extra_list), "Length not equal: {} vs {}".format(num_slices, len(extra_list))
+        for extra_list in extra_float_split.values():
+            assert num_slices == len(extra_list), "Length not equal: {} vs {}".format(num_slices, len(extra_list))
+
+        for idx in range(num_slices):
+            for offset_index in range(copy_number):
+                if group == "triplet":
+                    indices = (idx - 1, idx, idx + 1)
+                elif group == "quintuplet":
+                    indices = (idx - 2, idx - 1, idx, idx + 1, idx + 2)
+                else:
+                    indices = idx
+                if not mask_image:
+                    slices = np.array(image_reader.image(indices))
+                    slices_label = np.array(label_reader.image(indices))
+                else:
+                    slices = np.array((image_reader.image(indices) * np.clip(label_reader.image(indices), 0, 1)
+                                       .astype(image_reader.image().dtype)))
+                    slices_label = np.array(label_reader.image(indices))
+                padding = slices.shape[1] % copy_number
+                target_self_height = (slices.shape[1] + padding) // copy_number
+                slices = np.pad(slices, ((0, 0), (0, padding), (0, 0)), 'constant')
+                slices = slices[0:slices.shape[0], offset_index * target_self_height:target_self_height * 2]
+                slices_bytes = slices.tobytes()
+                slices_label = np.pad(slices_label, ((0, 0), (0, padding), (0, 0)), 'constant')
+                slices_label = slices_label[0:slices_label.shape[0],
+                               offset_index * target_self_height:target_self_height * 2]
+                slices_label = slices_label.tobytes()
+                feature_dict = {
+                    "image/encoded": _bytes_list_feature(slices_bytes),
+                    "image/name": _bytes_list_feature(image_reader.name),
+                    "image/format": _bytes_list_feature(image_reader.format),
+                    "image/shape": _int64_list_feature(slices.shape),
+                    "segmentation/encoded": _bytes_list_feature(slices_label),
+                    "segmentation/name": _bytes_list_feature(label_reader.name),
+                    "segmentation/format": _bytes_list_feature(label_reader.format),
+                    "segmentation/shape": _int64_list_feature(slices.shape),
+                    "extra/number": _int64_list_feature(idx),
+                    "extra/offset_height": _int64_list_feature(offset_index * target_self_height),
+                    "extra/target_height": _int64_list_feature(target_self_height),
+                }
+                for key, val in extra_str_split.items():
+                    feature_dict["extra/{}".format(key)] = _bytes_list_feature(val[idx])
+                # for key, val in extra_int_split.items():
+                #     feature_dict["extra/{}".format(key)] = _int64_list_feature(val[idx])
+                for key, val in extra_float_split.items():
+                    feature_dict["extra/{}".format(key)] = _float_list_feature(val[idx])
+
+                yield tf.train.Example(features=tf.train.Features(feature=feature_dict))
     else:
         feature_dict = {
             "image/encoded": _bytes_list_feature(image_reader.data()),

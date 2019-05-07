@@ -14,7 +14,7 @@
 #
 # =================================================================================
 
-from data_kits import build_lits_liver
+from data_kits import build_lits_liver, build_body
 
 
 def main():
@@ -28,7 +28,7 @@ def main():
 
     # Liver and tumor --> triplet as input
     # build_lits_liver.convert_to_liver_bbox_group("trainval", keep_only_liver=False, seed=1234,
-    #                                              align=(16, 16, 1), padding=(25, 25, 2),
+    #                                              align=(, 16, 1), padding=(25, 25, 2),
     #                                              prefix="bbox-triplet", group="triplet")
 
     # Only tumor --> triplet as input
@@ -56,16 +56,18 @@ def main():
     #                                               bins=100, xrng=(-200, 250), prefix="guide-hist",
     #                                               folds_file="k_folds.txt", guide="middle", hist_scale="total")
 
-    build_lits_liver.convert_to_histogram_dataset("trainval", keep_only_liver=False, seed=1234,
-                                                  align=(16, 16, 1), padding=(25, 25, 2),
-                                                  bins=100, xrng=(-200, 250), prefix="slice-hist",
-                                                  folds_file="k_folds.txt", guide="middle", hist_scale="slice")
+    # build_lits_liver.convert_to_histogram_dataset("trainval", keep_only_liver=False, seed=1234,
+    #                                               align=(16, 16, 1), padding=(25, 25, 2),
+    #                                               bins=100, xrng=(-200, 250), prefix="slice-hist",
+    #                                               folds_file="k_folds.txt", guide="middle", hist_scale="slice")
 
     # Histogram v2
     # build_lits_liver.convert_to_histogram_dataset("trainval", keep_only_liver=False, seed=1234,
     #                                               bins=100, xrng=(-100, 250),
     #                                               folds_file="k_folds.txt", guide=None, hist_scale="total")
 
+    #                                               folds_file="k_folds.txt")
+    build_body.convert_to_liver("trainval", seed=1234)
 
 
 if __name__ == "__main__":

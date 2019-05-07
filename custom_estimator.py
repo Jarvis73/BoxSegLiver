@@ -399,11 +399,9 @@ class CustomEstimator(object):
         pred_feed_dict = self._params["model_instances"][0].get_eval_feed_dict()
         if self._train_with_eval:
             pred_feed_dict = _add_key_value(pred_feed_dict, self.handler, self.dataset_handle_hook.eval_handle)
-
         try:
             # Initialize evaluation iterator
             session.run(self.eval_iterator.initializer)
-
             counter = 0
             while True:
                 if steps and counter >= steps:
@@ -777,7 +775,7 @@ class CustomEstimator(object):
             self.dataset_handle_hook = IteratorStringHandleHook(self.train_iterator,
                                                                 self.eval_iterator)
             worker_hooks.append(self.dataset_handle_hook)
-            self._predict_keys = estimator_spec.predictions
+            self._p = estimator_spec.predictions
 
         if save_best_ckpt:
             EvaluatorCls = self._params.get("evaluator", None)
