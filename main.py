@@ -15,7 +15,8 @@
 # =================================================================================
 
 import argparse
-import tensorflow as tf     # Tensorflow >= 1.12.0
+import tensorflow as tf     # Tensorflow >= 1.13.0
+import tensorflow_estimator as tfes
 from pathlib import Path
 from tensorflow.python.platform import tf_logging as logging
 
@@ -28,10 +29,9 @@ import custom_evaluator
 from utils.logger import create_logger
 from utils import distribution_utils
 from custom_estimator import CustomEstimator
-from custom_evaluator import EvaluateVolume, EvaluateSlice
 from custom_hooks import LogLearningRateHook
 
-ModeKeys = tf.estimator.ModeKeys
+ModeKeys = tfes.estimator.ModeKeys
 TF_RANDOM_SEED = None
 
 
@@ -51,9 +51,12 @@ def _get_arguments(argv):
     return args
 
 
-def _get_session_config():
-    sess_cfg = tf.ConfigProto(allow_soft_placement=True)
-    sess_cfg.gpu_options.allow_growth = True
+def _get_session_config(args):
+    if args.device_mem_frac > 0:
+        gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=args.device_mem_frac)
+    else:
+        gpu_options = tf.GPUOptions(allow_growth=True)
+    sess_cfg = tf.ConfigProto(allow_soft_placement=True, gpu_options=gpu_options)
     return sess_cfg
 
 
@@ -73,21 +76,23 @@ def main(argv):
     _custom_tf_logger(args)
     logging.info(args)
 
+    session_config = _get_session_config(args)
+
     distribution_strategy = distribution_utils.get_distribution_strategy(
         distribution_strategy=args.distribution_strategy,
         num_gpus=args.num_gpus,
         num_workers=1,
-        all_reduce_alg=args.all_reduce_alg
-    ) if args.num_gpus > 1 else None
+        all_reduce_alg=args.all_reduce_alg,
+        session_config=session_config)
 
     if args.mode == ModeKeys.TRAIN:
         log_step_count_steps = 500
-        run_config = tf.estimator.RunConfig(
+        run_config = tfes.estimator.RunConfig(
             train_distribute=distribution_strategy,
             tf_random_seed=TF_RANDOM_SEED,
             save_summary_steps=200,
             save_checkpoints_steps=5000,
-            session_config=_get_session_config(),
+            session_config=session_config,
             keep_checkpoint_max=1,
             log_step_count_steps=log_step_count_steps,
         )
@@ -102,8 +107,7 @@ def main(argv):
             params.update(custom_evaluator.get_eval_params(evaluator="Volume" if args.eval_3d else "Slice",
                                                            eval_steps=args.eval_steps,
                                                            primary_metric=args.primary_metric,
-                                                           secondary_metric=args.secondary_metric,
-                                                           use_sg_reduce_fp=False))
+                                                           secondary_metric=args.secondary_metric))
 
         estimator = CustomEstimator(models.model_fn, args.model_dir, run_config, params,
                                     args.warm_start_from)
@@ -119,7 +123,7 @@ def main(argv):
                         save_best_ckpt=args.save_best)
 
     elif args.mode == ModeKeys.EVAL:
-        run_config = tf.estimator.RunConfig(
+        run_config = tfes.estimator.RunConfig(
             tf_random_seed=TF_RANDOM_SEED,
             session_config=_get_session_config()
         )
@@ -127,8 +131,7 @@ def main(argv):
         params = {"args": args}
         params.update(models.get_model_params(args))
         eval_params = custom_evaluator.get_eval_params(evaluator="Volume" if args.eval_3d else "Slice",
-                                                       eval_steps=args.eval_steps,
-                                                       use_sg_reduce_fp=True)
+                                                       eval_steps=args.eval_steps)
 
         estimator = CustomEstimator(models.model_fn, args.model_dir, run_config, params)
 

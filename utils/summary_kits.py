@@ -6,7 +6,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 
-def summary_scalar(writer, iter, tags, values):
+def summary_scalar(writer, iter_, tags, values):
     """ Summary a scalar in tensorboard manually.
 
     Params
@@ -35,12 +35,12 @@ def summary_scalar(writer, iter, tags, values):
         all_value.append(tf.Summary.Value(tag=tag, simple_value=value))
 
     summary_value = tf.Summary(value=all_value)
-    writer.add_summary(summary_value, int(iter))
+    writer.add_summary(summary_value, int(iter_))
 
     return
 
 
-def summary_image(writer, iter, tag, images, max_outputs=3):
+def summary_image(writer, iter_, tag, images, max_outputs=3):
     """ Summary a batch images in tensorboard manually.
 
     Params
@@ -63,6 +63,6 @@ def summary_image(writer, iter, tag, images, max_outputs=3):
             break
 
     summary_value = tf.Summary(value=all_value)
-    writer.add_summary(summary_value, int(iter))
+    writer.add_summary(summary_value, int(iter_))
 
     return

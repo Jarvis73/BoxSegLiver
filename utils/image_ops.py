@@ -82,7 +82,7 @@ def random_adjust_window_width_level(image, w_width, w_level, seed1=None, seed2=
     A randomly window-width-level-adjusted tensor of the same shape as `image` with float32 type.
 
     """
-    with tf.name_scope(None, 'random_adjust_wwl', [image, w_width, w_level, seed1, seed2]):
+    with tf.name_scope(name, 'random_adjust_wwl', [image, w_width, w_level, seed1, seed2]):
         rd_width = tf.random_uniform([], -50, 50, seed=seed1)
         rd_level = tf.random_uniform([], -15, 15, seed=seed2)
         new_width = tf.add(float(w_width), rd_width, name="rw_width")
@@ -119,7 +119,7 @@ def random_zoom_in(image, label=None, max_scale=1.5, seed_scale=None, seed_shift
         if image_shape.ndims == 3 or image_shape.ndims is None:
             rd_scale = tf.random_uniform([2], 1, max_scale, seed=seed_scale)
             shape = tf.shape(image)
-            size = tf.to_int32(tf.to_float(shape[:-1]) * rd_scale)
+            size = tf.cast(tf.cast(shape[:-1], tf.float32) * rd_scale, tf.int32)
             expanded_image = tf.expand_dims(image, axis=0)
             central_zoom_in_image = tf.image.resize_bilinear(expanded_image, size)
             central_zoom_in_image = tf.squeeze(central_zoom_in_image, axis=0)
@@ -134,20 +134,20 @@ def random_zoom_in(image, label=None, max_scale=1.5, seed_scale=None, seed_shift
                 # Zoom in also with label
                 expanded_label = tf.expand_dims(tf.expand_dims(label, 0), -1)
                 central_zoom_in_label = tf.image.resize_nearest_neighbor(expanded_label, size)
-                central_zoom_in_label = tf.to_float(tf.squeeze(central_zoom_in_label, axis=0))
+                central_zoom_in_label = tf.cast(tf.squeeze(central_zoom_in_label, axis=0), tf.float32)
 
                 combined = tf.concat(axis=-1, values=[central_zoom_in_image, central_zoom_in_label])
                 new_shape = tf.concat([shape[:-1], [shape[-1] + 1]], axis=0)
                 cropped_combined = tf.image.random_crop(combined, new_shape, seed=seed)
                 cropped_image = cropped_combined[..., :-1]
-                cropped_label = tf.to_int32(cropped_combined[..., -1])
+                cropped_label = tf.cast(cropped_combined[..., -1], tf.int32)
             else:
                 cropped_image = tf.image.random_crop(central_zoom_in_image, shape, seed=seed)
 
         elif image_shape.ndims == 4:
             rd_scale = tf.random_uniform([2], 1, max_scale, seed=seed_scale)
             shape = tf.shape(image)
-            size = tf.to_int32(tf.to_float(shape[1:-1]) * rd_scale)
+            size = tf.cast(tf.cast(shape[1:-1], tf.float32) * rd_scale, tf.int32)
             central_zoom_in_image = tf.image.resize_bilinear(image, size)
             seed = random.randint(0, 2147482647) if seed_shift is None else seed_shift
 
@@ -160,13 +160,13 @@ def random_zoom_in(image, label=None, max_scale=1.5, seed_scale=None, seed_shift
                 # Zoom in also with label
                 extended_label = tf.expand_dims(label, axis=-1)
                 central_zoom_in_label = tf.image.resize_nearest_neighbor(extended_label, size)
-                central_zoom_in_label = tf.to_float(central_zoom_in_label)
+                central_zoom_in_label = tf.cast(central_zoom_in_label, tf.float32)
 
                 combined = tf.concat(axis=-1, values=[central_zoom_in_image, central_zoom_in_label])
                 new_shape = tf.concat([shape[:-1], [shape[-1] + 1]], axis=0)
                 cropped_combined = tf.image.random_crop(combined, new_shape, seed=seed)
                 cropped_image = cropped_combined[..., :-1]
-                cropped_label = tf.to_int32(cropped_combined[..., -1])
+                cropped_label = tf.cast(cropped_combined[..., -1], tf.int32)
             else:
                 cropped_image = tf.image.random_crop(central_zoom_in_image, shape, seed=seed)
         else:
@@ -331,7 +331,7 @@ def create_spatial_guide_2d(shape, center, stddev):
     coords = tf.tile(tf.expand_dims(tf.expand_dims(
         tf.stack(tf.meshgrid(y, x, indexing="ij"), axis=-1), axis=0), axis=0),
         multiples=tf.concat((tf.shape(center)[:2], [1, 1, 1]), axis=0))    # [bs, n, h, w, 2]
-    coords = tf.to_float(coords)
+    coords = tf.cast(coords, tf.float32)
     print(coords)
     center = tf.expand_dims(tf.expand_dims(center, axis=-2), axis=-2)     # [bs, n, 1, 1, 2]
     stddev = tf.expand_dims(tf.expand_dims(stddev, axis=-2), axis=-2)     # [bs, n, 1, 1, 2]

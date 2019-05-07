@@ -23,7 +23,6 @@ from pathlib import Path
 import loss_metrics as metric_ops
 import utils.array_kits as arr_ops
 import data_kits.build_data as data_ops
-# from custom_estimator import CustomEstimator
 from custom_evaluator_base import EvaluateBase
 from utils.timer import Timer
 
@@ -156,26 +155,26 @@ class EvaluateVolume(EvaluateBase):
 
         self._timer.reset()
         self._timer.tic()
-        for pred in predicts:
-            new_case = pred["Names"][0].decode("utf-8")     # decode bytes string
+        for predict in predicts:
+            new_case = predict["Names"][0].decode("utf-8")     # decode bytes string
             cur_case = cur_case or new_case
-            pad = pad if pad != -1 else pred["Pads"][0]
-            if "Bboxes" in pred:
-                bbox = bbox if bbox is not None else pred["Bboxes"][0]
-            if "GlobalStep" in pred:
-                global_step = global_step if global_step is not None else pred["GlobalStep"]
+            pad = pad if pad != -1 else predict["Pads"][0]
+            if "Bboxes" in predict:
+                bbox = bbox if bbox is not None else predict["Bboxes"][0]
+            if "GlobalStep" in predict:
+                global_step = global_step if global_step is not None else predict["GlobalStep"]
 
             if cur_case == new_case:
                 # Append batch to collections
                 for c, cls in enumerate(self.classes):
-                    logits3d[cls].append(np.squeeze(pred[cls + "Pred"], axis=-1))
-                    labels3d[cls].append(pred["Labels_{}".format(c)])
+                    logits3d[cls].append(np.squeeze(predict[cls + "Pred"], axis=-1))
+                    labels3d[cls].append(predict["Labels_{}".format(c)])
                 # self.maybe_append(labels3d["SpGuide"], pred, "SpGuide")
                 # self.maybe_append(bg_masks3d, pred, "BgMasks")
             elif cur_case + ".rev" == new_case:
                 # Append reversed batch to another collections
                 for c, cls in enumerate(self.classes):
-                    logits3d[cls + "_rev"].append(np.squeeze(pred[cls + "Pred"], axis=-1))
+                    logits3d[cls + "_rev"].append(np.squeeze(predict[cls + "Pred"], axis=-1))
             else:
                 result = self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox, save)
                 # result = self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox, save,
@@ -190,8 +189,8 @@ class EvaluateVolume(EvaluateBase):
                 for c, cls in enumerate(self.classes):
                     logits3d[cls].clear()
                     labels3d[cls].clear()
-                    logits3d[cls].append(np.squeeze(pred[cls + "Pred"], axis=-1))
-                    labels3d[cls].append(pred["Labels_{}".format(c)])
+                    logits3d[cls].append(np.squeeze(predict[cls + "Pred"], axis=-1))
+                    labels3d[cls].append(predict["Labels_{}".format(c)])
                     if cls + "_rev" in logits3d:
                         logits3d[cls + "_rev"].clear()
 
@@ -203,9 +202,9 @@ class EvaluateVolume(EvaluateBase):
 
                 # Reset
                 cur_case = new_case
-                pad = pred["Pads"][0]
-                if "Bboxes" in pred:
-                    bbox = pred["Bboxes"][0]
+                pad = predict["Pads"][0]
+                if "Bboxes" in predict:
+                    bbox = predict["Bboxes"][0]
                 self._timer.tic()
 
         if cases is None or (self._timer.calls < cases):
@@ -371,8 +370,8 @@ class EvaluateVolume(EvaluateBase):
                             .format(str(save_path.relative_to(save_path.parent.parent.parent))))
         return cur_pairs
 
-    def compare(self, *args, **kwargs):
-        return _compare(*args, **kwargs)
+    def compare(self, *args_, **kwargs):
+        return _compare(*args_, **kwargs)
 
 
 class EvaluateSlice(EvaluateBase):
@@ -402,8 +401,8 @@ class EvaluateSlice(EvaluateBase):
         predict_gen = self.model.predict_with_session(session, predicts, yield_single_examples=False)
 
         self.clear_metrics()
-        for pred in predict_gen:
-            self.append_metrics(pred)
+        for predict in predict_gen:
+            self.append_metrics(predict)
 
         results = {key: np.mean(values) for key, values in self._metric_values.items()}
         display_str = ""
@@ -432,9 +431,9 @@ class EvaluateSlice(EvaluateBase):
                                                         checkpoint_path, yield_single_examples=True)
 
         self.clear_metrics()
-        for i, pred in enumerate(predict_gen):
+        for i, pred_ in enumerate(predict_gen):
             print("\rEval {} examples ...".format(i + 1), end="")
-            self.append_metrics(pred)
+            self.append_metrics(pred_)
         print()
         self.save_metrics("metrics_2d.txt", self.model.model_dir)
 
@@ -447,8 +446,8 @@ class EvaluateSlice(EvaluateBase):
 
         return results
 
-    def compare(self, *args, **kwargs):
-        return _compare(*args, **kwargs)
+    def compare(self, *args_, **kwargs):
+        return _compare(*args_, **kwargs)
 
 
 def _compare(cur_result,
@@ -564,9 +563,9 @@ class TumorManager(object):
         self.pred = None
         self.clear_backup()
 
-    def print(self, *args, **kwargs):
+    def print(self, *args_, **kwargs):
         if self.debug:
-            print(*args, **kwargs)
+            print(*args_, **kwargs)
 
     def set_guide_info(self, guide, new_id):
         """
@@ -623,7 +622,7 @@ class TumorManager(object):
                     self.pred, center_perturb=0., stddev_perturb=0.))
             return self.guides[None, ..., None]
 
-    def check_pred(self, pred, filter_thresh=0.15):
+    def check_pred(self, predict, filter_thresh=0.15):
         """
         Remove those predicted tumors who are out of range.
         Apply supervisor to predicted tumors.
@@ -638,12 +637,12 @@ class TumorManager(object):
         """
         if self.guides is None:
             raise ValueError("previous_guide is None")
-        if np.sum(pred) == 0:
-            return pred
+        if np.sum(predict) == 0:
+            return predict
 
         self.clear_backup()
 
-        labeled_objs, n_objs = ndi.label(pred, self.disc)
+        labeled_objs, n_objs = ndi.label(predict, self.disc)
         slicers = ndi.find_objects(labeled_objs)
         # Decide whether reaching the end of the tumor or not
         for i, slicer in zip(range(n_objs), slicers):
@@ -654,7 +653,7 @@ class TumorManager(object):
             # print(np.max(mask_guide_by_res))
             if np.max(mask_guide_by_res) < filter_thresh:
                 self.print("Remove")
-                pred[slicer] -= res_obj_slicer   # Faster than labeled_objs[res_obj] = 0
+                predict[slicer] -= res_obj_slicer   # Faster than labeled_objs[res_obj] = 0
                 continue
             # 2. Match res_obj to guide
             res_peak_pos = list(np.unravel_index(mask_guide_by_res.argmax(), mask_guide_by_res.shape))
@@ -690,7 +689,7 @@ class TumorManager(object):
                 # if self.direction == 1:
                 #     print("End {} vs {}, {}".format(self._id, self.total_tumors_z[self.zi[found]][1],
                 #                                     self._bbox[2]))
-                pred[slicer] -= res_obj_slicer
+                predict[slicer] -= res_obj_slicer
                 continue
             # 4. Compute moments. Save moments of tumors for next slice
             ctr, std = arr_ops.compute_robust_moments(res_obj_slicer, index="ij")
@@ -699,7 +698,7 @@ class TumorManager(object):
             self.append_backup(ctr, std, self.zi[found])
             # print(ctr, std, self.zi[found])
 
-        self.pred = pred
+        self.pred = predict
 
     @staticmethod
     def ascent_line(img, x0, y0, x1, y1):

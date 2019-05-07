@@ -14,13 +14,21 @@
 # ==============================================================================
 """Helper functions for running models in a distributed setting."""
 
+import functools
+
+from tensorflow.python.distribute import device_util
+from tensorflow.python.distribute import distribute_lib
+from tensorflow.python.distribute import values
+from tensorflow.python.distribute import cross_device_ops as cross_device_ops_lib
 from tensorflow.contrib import distribute
+from tensorflow.contrib.distribute.python import mirrored_strategy
 
 
 def get_distribution_strategy(distribution_strategy="default",
                               num_gpus=0,
                               num_workers=1,
-                              all_reduce_alg=None):
+                              all_reduce_alg=None,
+                              session_config=None):
     """Return a DistributionStrategy for running the model.
 
     Args:
@@ -38,6 +46,7 @@ def get_distribution_strategy(distribution_strategy="default",
         tf.distribute.experimental.CollectiveCommunication when used with
         `multi_worker_mirrored`. If None, DistributionStrategy will choose based
         on device topology.
+      session_config: a tf.ConfigProto object passed to ModifiedMirroredStrategy
 
     Returns:
       tf.distribute.DistibutionStrategy object.
@@ -68,13 +77,10 @@ def get_distribution_strategy(distribution_strategy="default",
 
     if (distribution_strategy == "one_device" or
             (distribution_strategy == "default" and num_gpus <= 1)):
-        if num_gpus == 0:
-            return distribute.OneDeviceStrategy("device:CPU:0")
-        else:
-            if num_gpus > 1:
-                raise ValueError("`OneDeviceStrategy` can not be used for more than "
-                                 "one device.")
-            return distribute.OneDeviceStrategy("device:GPU:0")
+        if num_gpus > 1:
+            raise ValueError("`OneDeviceStrategy` can not be used for more than "
+                             "one device.")
+        return None
 
     if distribution_strategy in ("mirrored", "default"):
         if num_gpus == 0:
@@ -83,13 +89,13 @@ def get_distribution_strategy(distribution_strategy="default",
         else:
             devices = ["device:GPU:%d" % i for i in range(num_gpus)]
         if all_reduce_alg:
-            return distribute.MirroredStrategy(
+            return ModifiedMirroredStrategy(
                 devices=devices,
-                cross_tower_ops=distribute.AllReduceCrossTowerOps(
+                cross_tower_ops=distribute.AllReduceCrossDeviceOps(
                     all_reduce_alg, num_packs=2),
-                prefetch_on_device=False)
+                session_config=session_config)
         else:
-            return distribute.MirroredStrategy(devices=devices, prefetch_on_device=False)
+            return ModifiedMirroredStrategy(devices=devices, session_config=session_config)
 
     if distribution_strategy == "parameter_server":
         return distribute.ParameterServerStrategy()
@@ -126,3 +132,75 @@ def per_device_batch_size(batch_size, num_gpus):
                ).format(num_gpus, batch_size, batch_size - remainder)
         raise ValueError(err)
     return int(batch_size / num_gpus)
+
+
+class ModifiedMirroredExtended(mirrored_strategy.MirroredExtended):
+    def __init__(self,
+                 container_strategy,
+                 devices=None,
+                 num_gpus_per_worker=None,
+                 cross_device_ops=None,
+                 auto_shard_dataset=False,
+                 session_config=None):
+        self._zjw_session_config = session_config
+        super(ModifiedMirroredExtended, self).__init__(container_strategy,
+                                                       devices,
+                                                       num_gpus_per_worker,
+                                                       cross_device_ops,
+                                                       auto_shard_dataset)
+
+    def _initialize_local(self, devices):
+        """Initializes the object for local training.
+
+        ZJW - We modify this protected function for fixing a bug:
+            We must pass an argument `session_config` to cross_device_ops_lib.choose_the_best().
+            Otherwise, all the gpu memory will be allocated when calling device_lib.list_local_devices()
+            in choose_the_best().
+
+            Finally it's still a compromise because session config `allow_growth` turns to futility.
+        """
+        self._local_mode = True
+        assert devices, "Must specify at least one device."
+        assert len(set(devices)) == len(devices), (
+            "No duplicates allowed in `devices` argument.")
+        # TODO(josh11b): Require at least 2 devices?
+        self._devices = tuple(device_util.resolve(d) for d in devices)
+        self._canonical_device_set = set(self._devices)
+        self._device_index = values.PerReplica(
+            {d: i for i, d in enumerate(devices)})
+
+        self._inferred_cross_device_ops = cross_device_ops_lib.choose_the_best(
+            devices, session_config=self._zjw_session_config)
+
+    def _distribute_dataset(self, dataset_fn):
+        if self._local_mode:
+            # Add argument: prefetch_on_device=False
+            return values.PerReplicaDataset(
+                self._call_dataset_fn(dataset_fn), self._devices, prefetch_on_device=False)
+        else:
+            return values.MultiWorkerDataset(
+                functools.partial(self._call_dataset_fn, dataset_fn),
+                self._worker_devices,
+                auto_shard=self._auto_shard_dataset)
+
+
+class ModifiedMirroredStrategy(distribute_lib.DistributionStrategy):
+    def __init__(self,
+                 devices=None,
+                 num_gpus=None,
+                 num_gpus_per_worker=None,
+                 cross_device_ops=None,
+                 auto_shard_dataset=False,
+                 cross_tower_ops=None,
+                 session_config=None):
+        assert not (cross_device_ops and cross_tower_ops)
+        if num_gpus is not None and num_gpus_per_worker is not None:
+            raise ValueError(
+                "You cannot specify both `num_gpus` and `num_gpus_per_worker`.")
+        if num_gpus is None:
+            num_gpus = num_gpus_per_worker
+
+        extended = ModifiedMirroredExtended(self, devices, num_gpus,
+                                            cross_device_ops or cross_tower_ops,
+                                            auto_shard_dataset, session_config)
+        super(ModifiedMirroredStrategy, self).__init__(extended)

@@ -16,6 +16,7 @@
 
 import numpy as np
 import tensorflow as tf
+import tensorflow_estimator as tfes
 from functools import partial
 from pathlib import Path
 from tensorflow.python.platform import tf_logging as logging
@@ -26,7 +27,7 @@ from utils import array_kits
 from utils import distribution_utils
 
 Dataset = tf.data.Dataset
-ModeKeys = tf.estimator.ModeKeys
+ModeKeys = tfes.estimator.ModeKeys
 
 # number for debug, None for training
 SEED_FILE = np.random.randint(10000)    # 3456
@@ -40,6 +41,10 @@ SHUFFLE_BUFFER_SIZE = 1000
 
 # Preprocess name scope
 PREPROCESS = "Preprocess/"
+
+# Global proportion, unused
+# [364, 7856, 5646]
+# GLOBAL_WEIGHTS = 5646 / 7856 / 2 = 0.36
 
 
 def add_arguments(parser):
@@ -142,6 +147,9 @@ def add_arguments(parser):
                        action="store_true",
                        required=False, help="Add cases' weights to loss for balancing dataset. If set, "
                                             "'extra/weights' will be parsed from example proto")
+    group.add_argument("--liver_sample_weights",
+                       type=float,
+                       required=False, help="Use unified case weights")
 
 
 def _collect_datasets(datasets):
@@ -243,6 +251,10 @@ def filter_slices(*example_proto, args=None, strategy="empty", **kwargs):
             if args.case_weights:
                 cond2 = tf.less(tf.random.uniform((), dtype=tf.float32), features["extra/weights"])
                 return tf.logical_and(cond1, cond2)
+            elif args.liver_sample_weights:
+                cond2 = tf.equal(tf.reduce_max(label), 2)
+                cond3 = tf.less(tf.random.uniform((), dtype=tf.float32), args.liver_sample_weights)
+                return tf.logical_and(cond1, tf.logical_or(cond2, cond3))
 
         return cond1
 
@@ -281,10 +293,10 @@ def parse_2d_example_proto(example_proto, mode, args):
         with tf.name_scope(PREPROCESS):
             image = tf.decode_raw(features["image/encoded"], tf.int16, name="DecodeImage")
             image = tf.reshape(image, features["image/shape"], name="ReshapeImage")
-            image = tf.to_float(image)
+            image = tf.cast(image, tf.float32)
             label = tf.decode_raw(features["segmentation/encoded"], tf.uint8, name="DecodeMask")
             label = tf.reshape(label, features["segmentation/shape"], name="ReshapeMask")
-            label = tf.to_int32(label)
+            label = tf.cast(label, tf.int32)
             if len(args.classes) == 1:  # Only liver
                 label = tf.clip_by_value(label, 0, 1)
 
@@ -339,10 +351,10 @@ def parse_3d_example_proto(example_proto, args):
 
         image = tf.decode_raw(features["image/encoded"], tf.int16, name="DecodeImage")
         image = tf.reshape(image, features["image/shape"], name="ReshapeImage")
-        image = tf.to_float(image)
+        image = tf.cast(image, tf.float32)
         label = tf.decode_raw(features["segmentation/encoded"], tf.uint8, name="DecodeMask")
         label = tf.reshape(label, features["segmentation/shape"], name="ReshapeMask")
-        label = tf.to_int32(label)
+        label = tf.cast(label, tf.int32)
         if len(args.classes) == 1:  # Only liver
             label = tf.clip_by_value(label, 0, 1)
 
