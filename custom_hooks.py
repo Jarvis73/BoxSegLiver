@@ -118,11 +118,25 @@ class BestCheckpointSaverHook(session_run_hook.SessionRunHook):
         self._steps_per_run = 1
         self._need_save = False
 
+        self._save_every_interval = True
+        self._step_interval = 100000
+        self._last_step_in_get_saver = 0
+
         self._better_result = None
-        if self._get_best_result_dump_file().exists():
+
+        if not self._save_every_interval:
+            best_file = self._get_best_result_dump_file()
+        else:
+            saved_steps = [-1]
+            for x in self._get_best_result_dump_file(name="best_result_*", use_glob=True):
+                saved_steps.append(int(x.stem.split("_")[-1]))
+            max_saved_step = np.max(saved_steps)
+            best_file = self._get_best_result_dump_file(name="best_result_{}".format(max_saved_step))
+            self._last_step_in_get_saver = max_saved_step
+        if best_file.exists():
             with self._get_best_result_dump_file().open() as f:
                 self._better_result = json.load(f)
-            logging.info("Best result records loaded!")
+            logging.info("Best result records '{}' loaded!".format(str(best_file)))
 
     def _set_steps_per_run(self, steps_per_run):
         self._steps_per_run = steps_per_run
@@ -169,13 +183,18 @@ class BestCheckpointSaverHook(session_run_hook.SessionRunHook):
 
     def _evaluate(self, session, step):
         results = self._evaluator.evaluate_with_session(session)
+        if self._save_every_interval and (step // self._step_interval !=
+                                          self._last_step_in_get_saver // self._step_interval):
+            # Reset self._better_result for new interval.
+            self._better_result = None
 
         if not self._better_result or self._compare_fn(results, self._better_result):
             self._better_result = results
             self._need_save = True
 
         self._summary(step, results)
-        return self._save(session, step)
+        return (self._save_and_keep_per_steps(session, step)
+                if self._save_every_interval else self._save(session, step))
 
     def _save(self, session, step):
         """Saves the better checkpoint, returns should_stop."""
@@ -186,8 +205,27 @@ class BestCheckpointSaverHook(session_run_hook.SessionRunHook):
 
         # We must use a different latest_filename comparing with the default "checkpoint"
         self._get_saver().save(session, self._save_path, global_step=step,
+                               write_meta_graph=False,
                                latest_filename="checkpoint_best")
         with self._get_best_result_dump_file().open("w") as f:
+            json.dump(self._get_result_for_json_dump(), f)
+
+        should_stop = False
+        return should_stop
+
+    def _save_and_keep_per_steps(self, session, step):
+        """Saves the better checkpoint in each step interval, returns should_stop."""
+        if not self._need_save:
+            return False
+        self._need_save = False
+        logging.info("Saving (best) checkpoints for %d into %s.", step, self._save_path)
+
+        # We must use a different latest_filename comparing with the default "checkpoint"
+        end_point = (step // self._step_interval + 1) * self._step_interval
+        self._get_saver(step).save(session, self._save_path, global_step=step,
+                                   write_meta_graph=False,
+                                   latest_filename="checkpoint_best_{}".format(end_point))
+        with self._get_best_result_dump_file("best_result_{}".format(end_point)).open("w") as f:
             json.dump(self._get_result_for_json_dump(), f)
 
         should_stop = False
@@ -217,11 +255,16 @@ class BestCheckpointSaverHook(session_run_hook.SessionRunHook):
 
         return res
 
-    def _get_best_result_dump_file(self, name="best_result"):
+    def _get_best_result_dump_file(self, name="best_result", use_glob=False):
+        if use_glob:
+            return Path(self._save_path).parent.glob(name)
         return Path(self._save_path).parent / name
 
-    def _get_saver(self):
-        if self._saver is not None:
+    def _get_saver(self, step=None):
+        if self._saver is not None and (
+                step is None or (step // self._step_interval ==
+                                 self._last_step_in_get_saver // self._step_interval)):
+            self._last_step_in_get_saver = step
             return self._saver
 
         # Get saver from the SAVERS collection if present.
@@ -242,6 +285,7 @@ class BestCheckpointSaverHook(session_run_hook.SessionRunHook):
         # It is pity that parameter `max_to_keep` is saved to SaverDef and we cannot
         # change it in duplicate Saver
         self._saver = saver_lib.Saver(saver_def=savers[0].as_saver_def())
+        self._last_step_in_get_saver = step
         return self._saver
 
 

@@ -15,6 +15,7 @@
 # =================================================================================
 
 import tensorflow as tf
+from tensorflow.contrib import opt as contrib_opt
 
 from config import CustomKeys
 
@@ -70,7 +71,7 @@ def add_arguments(parser):
     group.add_argument("--optimizer",
                        type=str,
                        default="Adam",
-                       choices=["Adam", "Momentum"],
+                       choices=["Adam", "Momentum", "AdamW"],
                        required=False, help="Optimizer for training (default: %(default)s)")
     group.add_argument("--lr_warm_up",
                        action="store_true",
@@ -194,6 +195,11 @@ class Solver(object):
         elif self.optimizer == "momentum":
             optimizer_params = {"momentum": 0.9}
             optimizer = tf.train.MomentumOptimizer(learning_rate, **optimizer_params)
+        elif self.optimizer == "adamw":
+            optimizer_params = {"weight_decay": self._args.weight_decay_rate,
+                                "learning_rate": learning_rate,
+                                "beta1": 0.9, "beta2": 0.99}
+            optimizer = contrib_opt.AdamWOptimizer(**optimizer_params)
         else:
             raise ValueError("Not supported optimizer: " + self.optimizer)
 

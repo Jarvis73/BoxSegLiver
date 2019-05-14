@@ -56,7 +56,10 @@ def _get_session_config(args):
         gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=args.device_mem_frac)
     else:
         gpu_options = tf.GPUOptions(allow_growth=True)
-    sess_cfg = tf.ConfigProto(allow_soft_placement=True, gpu_options=gpu_options)
+    sess_cfg = tf.ConfigProto(allow_soft_placement=True, gpu_options=gpu_options,
+                              device_count={"CPU": 1},
+                              inter_op_parallelism_threads=1,
+                              intra_op_parallelism_threads=20)
     return sess_cfg
 
 
@@ -125,7 +128,7 @@ def main(argv):
     elif args.mode == ModeKeys.EVAL:
         run_config = tfes.estimator.RunConfig(
             tf_random_seed=TF_RANDOM_SEED,
-            session_config=_get_session_config()
+            session_config=_get_session_config(args)
         )
 
         params = {"args": args}
@@ -139,9 +142,10 @@ def main(argv):
         estimator.evaluate(evaluator,
                            input_pipeline.input_fn,
                            checkpoint_path=args.ckpt_path,
-                           latest_filename=("checkpoint_best" if not args.eval_final else None),
+                           latest_filename=(args.load_status_file if not args.eval_final else None),
                            cases=args.eval_num)
 
 
 if __name__ == "__main__":
     tf.app.run(main)
+    tfes.estimator.Estimator

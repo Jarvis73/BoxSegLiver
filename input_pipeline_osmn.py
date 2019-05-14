@@ -276,8 +276,12 @@ def filter_slices(*example_proto, args=None, strategy="empty", **kwargs):
             else:
                 obj_label = label
             num_dense = tf.count_nonzero(obj_label)
-
             cond1 = tf.greater_equal(num_dense, kwargs["size"])
+
+            tum_dense = tf.count_nonzero(tf.clip_by_value(tf.cast(label, tf.int32) - 1, 0, 1))
+            cond1 = tf.logical_and(cond1, tf.logical_or(tf.equal(tum_dense, 0),
+                                                        tf.greater_equal(tum_dense, kwargs["size"])))
+
             if args.case_weights:
                 cond2 = tf.less(tf.random.uniform((), dtype=tf.float32), features["extra/weights"])
                 return tf.logical_and(cond1, cond2)
@@ -320,10 +324,11 @@ def parse_2d_example_proto(example_proto, mode, args):
             ret_features = {"images": image,
                             "names": features["image/name"]}
 
-            if hasattr(args, "train_without_eval") and not args.train_without_eval:
-                ret_features["pads"] = tf.constant(0, dtype=tf.int64)
-            if args.resize_for_batch:
-                ret_features["bboxes"] = tf.constant([0] * 6, dtype=tf.int64)
+            if args.eval_3d:
+                if hasattr(args, "train_without_eval") and not args.train_without_eval:
+                    ret_features["pads"] = tf.constant(0, dtype=tf.int64)
+                if args.resize_for_batch:
+                    ret_features["bboxes"] = tf.constant([0] * 6, dtype=tf.int64)
             if args.case_weights:
                 ret_features["weights"] = features["extra/weights"]
             if mode == "eval" and not args.eval_3d:
@@ -427,50 +432,50 @@ def data_augmentation(features, labels, args):
         return guide_image.astype(np.float32)
 
     with tf.name_scope(PREPROCESS):
-        with tf.name_scope("Augmentation/"):
-            if args.noise:
-                # apply liver mask before flip and zoom
-                features["images"] = image_ops.random_noise(features["images"], args.noise_scale)
-                # Remove background
-                logging.info("Train: Add random noise, scale = {}".format(args.noise_scale))
-            # features["images"] *= liver
+        if args.noise:
+            # apply liver mask before flip and zoom
+            features["images"] = image_ops.random_noise(features["images"], args.noise_scale)
+            # Remove background
+            logging.info("Train: Add random noise, scale = {}".format(args.noise_scale))
+        # features["images"] *= liver
 
-            if args.flip:
-                features["images"], labels = image_ops.random_flip_left_right(
-                    features["images"], labels)
-                logging.info("Train: Add random flip")
+        if args.flip:
+            features["images"], labels = image_ops.random_flip_left_right(
+                features["images"], labels)
+            logging.info("Train: Add random flip")
 
-            if args.zoom:
-                features["images"], labels = image_ops.random_zoom_in(features["images"], labels,
-                                                                      args.zoom_scale)
-                logging.info("Train: Add random zoom, scale = {}".format(args.zoom_scale))
-
-            logging.info("Train: Add spatial guide")
-            guide = tf.py_func(_wrap_get_gd_image_multi_objs, [labels], tf.float32)
-            if args.random_spatial_guide:
-                mask = image_ops.random_zero_or_one(tf.shape(guide), guide.dtype)
-                guide = guide * mask
-                logging.info("Train: Add random spatial guide")
-            features["sp_guide"] = guide
-
-            if args.hist_noise:
-                features["density_hists"] += (tf.random.normal(tf.shape(features["density_hists"])) *
-                                              args.hist_noise_scale)
+        if args.zoom:
+            features["images"], labels = image_ops.random_zoom_in(features["images"], labels,
+                                                                  args.zoom_scale)
+            logging.info("Train: Add random zoom, scale = {}".format(args.zoom_scale))
 
         if args.resize_for_batch:
             logging.info("Train: Resize image to {} x {}".format(args.im_height, args.im_width))
             image = tf.image.resize_bilinear(tf.expand_dims(features["images"], axis=0),
                                              [args.im_height, args.im_width])
             features["images"] = tf.squeeze(image, axis=0)
-            logging.info("Train: Resize guide to {} x {}".format(args.im_height, args.im_width))
-            guide = tf.image.resize_bilinear(tf.expand_dims(features["sp_guide"], axis=0),
-                                             [args.im_height, args.im_width])
-            features["sp_guide"] = tf.squeeze(guide, axis=0)
+            # logging.info("Train: Resize guide to {} x {}".format(args.im_height, args.im_width))
+            # guide = tf.image.resize_bilinear(tf.expand_dims(features["sp_guide"], axis=0),
+            #                                  [args.im_height, args.im_width])
+            # features["sp_guide"] = tf.squeeze(guide, axis=0)
             logging.info("Train: Resize label to {} x {}".format(args.im_height, args.im_width))
             labels = tf.image.resize_nearest_neighbor(tf.expand_dims(tf.expand_dims(labels, axis=0), axis=-1),
                                                       [args.im_height, args.im_width])
             labels = tf.squeeze(labels, axis=(0, -1))
 
+    logging.info("Train: Add spatial guide")
+    guide = tf.py_func(_wrap_get_gd_image_multi_objs, [labels], tf.float32)
+    if args.random_spatial_guide:
+        mask = image_ops.random_zero_or_one(tf.shape(guide), guide.dtype)
+        guide = guide * mask
+        logging.info("Train: Add random spatial guide")
+    features["sp_guide"] = guide
+
+    if args.hist_noise:
+        features["density_hists"] += (tf.random.normal(tf.shape(features["density_hists"])) *
+                                      args.hist_noise_scale)
+
+    logging.info("Train: ({}, {})".format(features, labels))
     return features, labels
 
 
@@ -509,6 +514,7 @@ def data_processing_eval_while_train(features, labels, args):
                                                       [args.im_height, args.im_width])
             labels = tf.squeeze(labels, axis=(0, -1))
 
+    logging.info("Eval WT: ({}, {})".format(features, labels))
     return features, labels
 
 
@@ -520,11 +526,15 @@ def data_processing_eval(features, labels, args):
                                          [args.im_height, args.im_width])
         features["images"] = tf.squeeze(image, axis=0)
 
+    logging.info("Eval: ({}, {})".format(features, labels))
     return features, labels
 
 
 def get_2d_multi_records_dataset_for_train(image_filenames, hist_filenames, args):
-    filter_fn = partial(filter_slices, args=args, strategy="area", size=args.filter_size)
+    filter_fn = partial(filter_slices,
+                        args=args,
+                        strategy="area" if args.filter_size > 0 else "empty",
+                        size=args.filter_size)
 
     def parse_image_hist(*examples):
         features, labels = parse_2d_example_proto(examples[0], mode=ModeKeys.TRAIN, args=args)
@@ -551,8 +561,10 @@ def get_2d_multi_records_dataset_for_train(image_filenames, hist_filenames, args
                .prefetch(buffer_size=bs)
                .shuffle(buffer_size=SHUFFLE_BUFFER_SIZE, seed=SEED_BATCH)
                .repeat(count=None)
-               .apply(tf.data.experimental.map_and_batch(parse_image_hist, bs,
-                                                         num_parallel_batches=1))
+               .map(parse_image_hist, num_parallel_calls=bs)
+               .batch(bs)
+               # .apply(tf.data.experimental.map_and_batch(parse_image_hist, bs,
+               #                                           num_parallel_batches=1))
                .prefetch(buffer_size=contrib_data.AUTOTUNE))
 
     return dataset
@@ -563,22 +575,21 @@ def get_2d_multi_records_dataset_for_eval(image_filenames, hist_filenames, mode,
         features, labels = parse_2d_example_proto(examples[0], mode=mode, args=args)
         hists = parse_hist_example_proto(examples[1], nd=2, args=args)
         features["density_hists"] = hists["hists"]
-        return data_processing_eval_while_train(features, labels, args=args)
+        return (data_processing_eval_while_train(features, labels, args=args)
+                if mode == "eval_while_train" else
+                data_processing_eval(features, labels, args=args))
 
     if len(image_filenames) != len(hist_filenames):
         raise ValueError("Image and bbox shape mismatch: {} vs {}"
                          .format(len(image_filenames), len(hist_filenames)))
 
-    dataset = Dataset.zip((tf.data.TFRecordDataset(image_filenames[0]),
-                           tf.data.TFRecordDataset(hist_filenames[0])))
-    for image_filename, hist_filename in zip(image_filenames[1:], hist_filenames[1:]):
-        dataset = dataset.concatenate(Dataset.zip((tf.data.TFRecordDataset(image_filename),
-                                                   tf.data.TFRecordDataset(hist_filename))))
-
     bs = distribution_utils.per_device_batch_size(args.batch_size, args.num_gpus)
-    dataset = (dataset.apply(tf.data.experimental.map_and_batch(parse_image_hist, bs,
-                                                                num_parallel_batches=1,
-                                                                drop_remainder=True))
+    dataset = (Dataset.zip((tf.data.TFRecordDataset(image_filenames),
+                            tf.data.TFRecordDataset(hist_filenames)))
+
+               .apply(tf.data.experimental.map_and_batch(parse_image_hist, bs,
+                                                         num_parallel_batches=1,
+                                                         drop_remainder=True))
                .prefetch(buffer_size=contrib_data.AUTOTUNE))
 
     return dataset
@@ -673,7 +684,7 @@ def _flat_map_fn_multi_channels(x, y, mode, args):
         bboxes = Dataset.from_tensors(x["bboxes"]).repeat(repeat_times * (1 if args.guide != "middle" else 2))
         concat_list += (bboxes,)
         ex_arg_keys.append("bboxes")
-    if mode == "eval":
+    if mode == "eval" and "sp_guide" in x:
         sp_guides = (Dataset.from_tensor_slices(x["sp_guide"]) if args.guide != "middle" else
                      Dataset.from_tensor_slices(tf.concat((x["sp_guide"], tf.reverse(x["sp_guide"], [0])), axis=0)))
         concat_list += (sp_guides,)
@@ -703,18 +714,25 @@ def get_3d_multi_records_dataset_for_eval(image_filenames, hist_filenames, mode,
         features, labels = parse_3d_example_proto(examples[0], args=args)
         hists = parse_hist_example_proto(examples[1], nd=3, args=args, pad=features["pads"])
         features["density_hists"] = hists["hists"]
-        return ((features, labels) if mode == "eval_while_train" else
-                _before_flat_fn_eval(features, labels, args=args))
+        features["sp_guide"] = examples[2]
+        # return ((features, labels) if mode == "eval_while_train" else
+        #         _before_flat_fn_eval(features, labels, args=args))
+        return features, labels
 
     if len(image_filenames) != len(hist_filenames):
         raise ValueError("Image and bbox shape mismatch: {} vs {}"
                          .format(len(image_filenames), len(hist_filenames)))
 
-    dataset = Dataset.zip((tf.data.TFRecordDataset(image_filenames[0]),
-                           tf.data.TFRecordDataset(hist_filenames[0])))
-    for image_filename, hist_filename in zip(image_filenames[1:], hist_filenames[1:]):
-        dataset = dataset.concatenate(Dataset.zip((tf.data.TFRecordDataset(image_filename),
-                                                   tf.data.TFRecordDataset(hist_filename))))
+    # Load sp_guide
+    import pickle
+    mmts_path = Path(__file__).parent / "data/LiTS/test-3-of-5-mmts.pkl"    # TODO(ZJW): don't use hard code
+    with mmts_path.open("rb") as f:
+        sp_guides_mmts = pickle.load(f)
+
+    dataset = Dataset.zip((tf.data.TFRecordDataset(image_filenames),
+                           tf.data.TFRecordDataset(hist_filenames),
+                           tf.data.Dataset.from_generator(lambda: (x for x in sp_guides_mmts),
+                                                          output_types=tf.float32)))
     if args.eval_skip_num:
         dataset = dataset.skip(args.eval_skip_num)
 
@@ -723,6 +741,6 @@ def get_3d_multi_records_dataset_for_eval(image_filenames, hist_filenames, mode,
                .flat_map(flat_fn)
                .apply(tf.data.experimental.map_and_batch(augment_fn, bs,
                                                          num_parallel_batches=1))
-               .prefetch(buffer_size=200))
+               .prefetch(buffer_size=contrib_data.AUTOTUNE))
 
     return dataset

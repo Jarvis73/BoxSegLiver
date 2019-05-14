@@ -60,6 +60,11 @@ def add_arguments(parser):
     group.add_argument("--warm_start_from",
                        type=str,
                        required=False, help="Warm start the model from a checkpoint")
+    group.add_argument("--load_status_file",
+                       type=str,
+                       default="checkpoint_best",
+                       required=False, help="Status file to locate checkpoint file. Use for restore"
+                                            "parameters.")
 
     group = parser.add_argument_group(title="Device Arguments")
     group.add_argument("--distribution_strategy",

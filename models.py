@@ -176,13 +176,11 @@ def model_fn(features, labels, mode, params):
         for i, split_label in enumerate(split_labels[1:]):
             predictions["Labels_{}".format(i)] = split_label
 
-        if args.resize_for_batch:
-            predictions["Bboxes"] = features["bboxes"]
-
-        predictions.update({
-            "Names": features["names"],
-            "Pads": features["pads"]
-        })
+        if args.eval_3d:
+            predictions["Pads"] = features["pads"]
+            if args.resize_for_batch:
+                predictions["Bboxes"] = features["bboxes"]
+        predictions["Names"] = features["names"]
 
     if mode == ModeKeys.TRAIN:
         predictions["GlobalStep"] = tf.train.get_global_step(tf.get_default_graph())
