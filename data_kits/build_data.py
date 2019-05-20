@@ -23,7 +23,6 @@ from utils.nii_kits import nii_reader, nii_writer
 # noinspection PyUnresolvedReferences
 from utils.mhd_kits import mhd_reader, mhd_writer
 
-
 FORMATS = [
     "mhd",
     "nii"
@@ -42,6 +41,7 @@ class ImageReader(object):
         extend an extra channel dimension or not.
         Typically, True for image and False for label.
     """
+
     def __init__(self, image_type=np.int16, extend_channel=False):
         self._format = "mhd"
         self._type = image_type
@@ -149,6 +149,12 @@ class ImageReader(object):
                 img_array = np.fliplr(img_array)
         self._writer(save_path, img_array, meta_info=meta)
 
+    def transpose(self, dim):
+        self._decode = np.transpose(self._decode, dim)
+
+    def flipud(self):
+        self._decode = np.flipud(self._decode)
+
     class Header(object):
         def __init__(self, header, fmt):
             self.header = header
@@ -173,6 +179,7 @@ class SubVolumeReader(ImageReader):
     """
     Add `bbox` attribute: [x1, y1, z1, ..., x2, y2, z2]
     """
+
     def __init__(self, image_type=np.int16, extend_channel=False):
         super(SubVolumeReader, self).__init__(image_type, extend_channel)
         self._bbox = []
@@ -197,8 +204,8 @@ class SubVolumeReader(ImageReader):
     def _clip_image(self):
         ndim = self._decode.ndim - 1 if self._extend_channel else self._decode.ndim
         if len(self._bbox) // 2 != ndim:
-                raise ValueError("Mismatched dimensions: self.bbox({}) vs self.image({})"
-                                 .format(len(self._bbox) // 2, ndim))
+            raise ValueError("Mismatched dimensions: self.bbox({}) vs self.image({})"
+                             .format(len(self._bbox) // 2, ndim))
 
         self._decode = self._decode[array_kits.bbox_to_slices(self._bbox) +
                                     ((slice(None, None),) if self._extend_channel else ())]
@@ -269,6 +276,7 @@ def _bytes_list_feature(values):
     A TF-Feature
 
     """
+
     def to_bytes(value):
         if isinstance(value, str):
             return value.encode()
@@ -297,7 +305,7 @@ def _check_extra_info_type(extra_info):
         tag = "_".join(p[:-1])
         if p[-1] == "split":
             extra_split[tag] = val
-        else:   # origin
+        else:  # origin
             extra_origin[tag] = val
 
     return extra_split, extra_origin

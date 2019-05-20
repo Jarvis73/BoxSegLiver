@@ -15,6 +15,8 @@
 # =================================================================================
 
 import argparse
+import os
+
 import tensorflow as tf     # Tensorflow >= 1.13.0
 import tensorflow_estimator as tfes
 from pathlib import Path
@@ -77,7 +79,7 @@ def main(argv):
     logging.info(args)
 
     session_config = _get_session_config(args)
-
+    os.environ['CUDA_VISIBLE_DEVICES'] = '1'
     distribution_strategy = distribution_utils.get_distribution_strategy(
         distribution_strategy=args.distribution_strategy,
         num_gpus=args.num_gpus,
@@ -88,7 +90,7 @@ def main(argv):
     if args.mode == ModeKeys.TRAIN:
         log_step_count_steps = 500
         run_config = tfes.estimator.RunConfig(
-            train_distribute=distribution_strategy,
+            # train_distribute=distribution_strategy,
             tf_random_seed=TF_RANDOM_SEED,
             save_summary_steps=200,
             save_checkpoints_steps=5000,

@@ -30,8 +30,8 @@ Dataset = tf.data.Dataset
 ModeKeys = tfes.estimator.ModeKeys
 
 # number for debug, None for training
-SEED_FILE = np.random.randint(10000)    # 3456
-SEED_BATCH = np.random.randint(10000)   # 7890
+SEED_FILE = np.random.randint(10000)  # 3456
+SEED_BATCH = np.random.randint(10000)  # 7890
 
 # record block length
 BLOCK_LENGTH = 1
@@ -41,6 +41,7 @@ SHUFFLE_BUFFER_SIZE = 1000
 
 # Preprocess name scope
 PREPROCESS = "Preprocess/"
+
 
 # Global proportion, unused
 # [364, 7856, 5646]
@@ -147,6 +148,9 @@ def add_arguments(parser):
                        action="store_true",
                        required=False, help="Add cases' weights to loss for balancing dataset. If set, "
                                             "'extra/weights' will be parsed from example proto")
+    group.add_argument("--cute_height",
+                       action="store_true",
+                       required=False, help="")
     group.add_argument("--liver_sample_weights",
                        type=float,
                        required=False, help="Use unified case weights")
@@ -238,7 +242,7 @@ def filter_slices(*example_proto, args=None, strategy="empty", **kwargs):
             if args.case_weights:
                 cond2 = tf.less(tf.random.uniform((), dtype=tf.float32), features["extra/weights"])
                 return tf.logical_and(cond1, cond2)
-        else:   # strategy == "area"
+        else:  # strategy == "area"
             features = {"segmentation/encoded": tf.FixedLenFeature([], tf.string)}
             if args.case_weights:
                 features["extra/weights"] = tf.FixedLenFeature([], tf.float32)
@@ -280,12 +284,18 @@ def parse_2d_example_proto(example_proto, mode, args):
     with tf.name_scope("DecodeProto/"):
         features = {
             "image/encoded": tf.FixedLenFeature([], tf.string),
-            "image/shape": tf.FixedLenFeature([3], tf.int64),
             "image/name": tf.FixedLenFeature([], tf.string),
+            'image/format': tf.FixedLenFeature([], tf.string),
+            "image/shape": tf.FixedLenFeature([3], tf.int64),
             "segmentation/encoded": tf.FixedLenFeature([], tf.string),
+            "segmentation/name": tf.FixedLenFeature([], tf.string),
+            "segmentation/format": tf.FixedLenFeature([], tf.string),
             "segmentation/shape": tf.FixedLenFeature([2], tf.int64),
-            "extra/number": tf.FixedLenFeature([], tf.int64),
+            "extra/number": tf.FixedLenFeature([], tf.int64)
         }
+        if args.cute_height:
+            features['extra/offset_height'] = tf.FixedLenFeature([], tf.int64)
+            features['extra/sub_slice_height'] = tf.FixedLenFeature([], tf.int64)
         if args.case_weights:
             features["extra/weights"] = tf.FixedLenFeature([], tf.float32)
         features = tf.parse_single_example(example_proto, features=features)
@@ -314,6 +324,10 @@ def parse_2d_example_proto(example_proto, mode, args):
                 ret_features["bboxes"] = tf.constant([0] * 6, dtype=tf.int64)
             if args.case_weights:
                 ret_features["weights"] = features["extra/weights"]
+            if args.cute_height:
+                ret_features['offset_height'] = features['extra/offset_height']
+                ret_features['sub_slice_height'] = features['extra/sub_slice_height']
+                # ret_features["indices"] = features["extra/number"]
             if mode == "eval" and not args.eval_3d:
                 ret_features["indices"] = features["extra/number"]
 
@@ -340,13 +354,19 @@ def parse_3d_example_proto(example_proto, args):
     with tf.name_scope("DecodeProto/"):
         features = {
             "image/encoded": tf.FixedLenFeature([], tf.string),
-            "image/shape": tf.FixedLenFeature([4], tf.int64),
             "image/name": tf.FixedLenFeature([], tf.string),
+            "image/format": tf.FixedLenFeature([], tf.string),
+            "image/shape": tf.FixedLenFeature([4], tf.int64),
             "segmentation/encoded": tf.FixedLenFeature([], tf.string),
+            "segmentation/name": tf.FixedLenFeature([], tf.string),
+            "segmentation/format": tf.FixedLenFeature([], tf.string),
             "segmentation/shape": tf.FixedLenFeature([3], tf.int64),
         }
         if args.resize_for_batch:
             features["extra/bbox"] = tf.FixedLenFeature([6], tf.int64)
+        if args.cute_height:
+            features['extra/offset_height'] = tf.FixedLenFeature([], tf.int64)
+            features['extra/sub_slice_height'] = tf.FixedLenFeature([], tf.int64)
         features = tf.parse_single_example(example_proto, features=features)
 
         image = tf.decode_raw(features["image/encoded"], tf.int16, name="DecodeImage")
@@ -388,7 +408,9 @@ def parse_3d_example_proto(example_proto, args):
 
         if args.resize_for_batch:
             ret_features["bboxes"] = features["extra/bbox"]
-
+        if args.cute_height:
+            ret_features['offset_height'] = features['extra/offset_height']
+            ret_features['sub_slice_height'] = features['extra/sub_slice_height']
         if args.use_spatial_guide:
             ret_features["guides"] = tf.py_func(_wrap_get_gd_image_multi_objs, [label], tf.float32)
 
@@ -464,6 +486,7 @@ def data_processing_eval_while_train(features, labels, args):
     labels: [h, w]    --> liver + tumor
             [h, w, c] --> only tumor
     """
+
     def _wrap_get_gd_image_multi_objs(mask_):
         guide_image = array_kits.get_gd_image_multi_objs(
             mask_,
@@ -487,7 +510,7 @@ def data_processing_eval_while_train(features, labels, args):
             tf.expand_dims(features["images"], axis=0),
             [args.im_height, args.im_width])
         features["images"] = tf.squeeze(image, axis=0)
-        if not args.eval_3d:    # 3D evaluation don't need to resize label
+        if not args.eval_3d:  # 3D evaluation don't need to resize label
             logging.info("Eval WT: Resize label to {} x {}".format(args.im_height, args.im_width))
             labels = tf.image.resize_nearest_neighbor(
                 tf.expand_dims(tf.expand_dims(labels, axis=0), axis=-1),
@@ -587,7 +610,7 @@ def _flat_map_fn_multi_channels(x, y, mode, args):
         labels = Dataset.from_tensor_slices(y)
         names = Dataset.from_tensors(x["names"]).repeat(repeat_times)
         pads = Dataset.from_tensors(x["pads"]).repeat(repeat_times)
-    else:   # "middle"
+    else:  # "middle"
         images = Dataset.from_tensor_slices(tf.concat((image_multi_channels,
                                                        tf.reverse(image_multi_channels, [0])), axis=0))
         labels = Dataset.from_tensor_slices(tf.concat((y, tf.reverse(y, [0])), axis=0))
@@ -603,6 +626,15 @@ def _flat_map_fn_multi_channels(x, y, mode, args):
         bboxes = Dataset.from_tensors(x["bboxes"]).repeat(repeat_times * (1 if args.guide != "middle" else 2))
         concat_list += (bboxes,)
         ex_arg_keys.append("bboxes")
+    if args.cute_height:
+        offset_height = Dataset.from_tensors(x['offset_height']).repeat(
+            repeat_times * (1 if args.guide != "middle" else 2))
+        concat_list += (offset_height,)
+        ex_arg_keys.append("offset_height")
+        sub_slice_height = Dataset.from_tensors(x['sub_slice_height']).repeat(
+            repeat_times * (1 if args.guide != "middle" else 2))
+        concat_list += (sub_slice_height,)
+        ex_arg_keys.append("sub_slice_height")
 
     def map_fn(image, label, name, pad, *ex_args):
         features = {"images": image,

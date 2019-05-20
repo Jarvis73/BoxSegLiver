@@ -48,7 +48,7 @@ def add_arguments(parser):
                        required=True, help="Class names of the objects")
     group.add_argument("--batch_size",
                        type=int,
-                       default=8,
+                       default=5,
                        required=False, help="Model batch size (default: %(default)d)")
     group.add_argument("--weight_init",
                        type=str,
@@ -178,6 +178,9 @@ def model_fn(features, labels, mode, params):
 
         if args.resize_for_batch:
             predictions["Bboxes"] = features["bboxes"]
+        if args.cute_height:
+            predictions['offset_height'] = features['offset_height']
+            predictions['sub_slice_height'] = features['sub_slice_height']
 
         predictions.update({
             "Names": features["names"],

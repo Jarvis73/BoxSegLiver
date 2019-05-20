@@ -99,6 +99,7 @@ class EvaluateVolume(EvaluateBase):
     This class is for liver and tumor segmentation.
     Inherit this class and rewrite self._evaluate_case() for custom dataset.
     """
+
     def __init__(self, model, **kwargs):
         """
         Parameters
@@ -151,18 +152,24 @@ class EvaluateVolume(EvaluateBase):
         pad = -1
         bbox = None
         cur_case = None
+        sub_slice_height = None
+        offset = None
+        check_offset = {i: False for i in range(5)}
         global_step = None
 
         self._timer.reset()
         self._timer.tic()
         for predict in predicts:
-            new_case = predict["Names"][0].decode("utf-8")     # decode bytes string
+            new_case = predict["Names"][0].decode("utf-8")  # decode bytes string
             cur_case = cur_case or new_case
             pad = pad if pad != -1 else predict["Pads"][0]
             if "Bboxes" in predict:
                 bbox = bbox if bbox is not None else predict["Bboxes"][0]
             if "GlobalStep" in predict:
                 global_step = global_step if global_step is not None else predict["GlobalStep"]
+            if 'offset_height' in predict:
+                offset = predict['offset_height'][0]
+                sub_clice_height = predict['sub_slice_height'][0]
 
             if cur_case == new_case:
                 # Append batch to collections
@@ -254,8 +261,7 @@ class EvaluateVolume(EvaluateBase):
             predict_gen = self.model.predict(input_fn, predict_keys, hooks, checkpoint_path,
                                              yield_single_examples=False)
             tf.logging.info("Begin evaluating ...")
-            return self._evaluate(predict_gen, cases=cases, verbose=True,
-                                  save=self.params["args"].save_predict)
+            return self._evaluate(predict_gen, cases=cases, verbose=True, save=self.params["args"].save_predict)
         else:
             # Construct model with batch_size = 1
             # Disconnect input pipeline with model pipeline
@@ -263,8 +269,7 @@ class EvaluateVolume(EvaluateBase):
             predict_gen = self.model.predict_with_guide(input_fn, predict_keys, hooks,
                                                         checkpoint_path, yield_single_examples=False)
             tf.logging.info("Begin evaluating ...")
-            return self._evaluate(predict_gen, cases=cases, verbose=True,
-                                  save=self.params["args"].save_predict)
+            return self._evaluate(predict_gen, cases=cases, verbose=True, save=self.params["args"].save_predict)
 
     @staticmethod
     def _check_shapes_equal(volume_dict):
@@ -515,9 +520,9 @@ class TumorManager(object):
         self.total_tumors = self._tumor_info[self._tumor_info["PID"] ==
                                              "segmentation-{}.nii".format(self._name_id)]
         self.total_tumors = self.total_tumors.iloc[:, range(2, 8)].values
-        self.total_tumors[:, [3, 4, 5]] -= 1    # [) --> []
+        self.total_tumors[:, [3, 4, 5]] -= 1  # [) --> []
         self.total_tumors_yx = self.total_tumors[:, [1, 0, 4, 3]]  # [y1, x1, y2, x2]
-        self.total_tumors_z = self.total_tumors[:, [2, 5]]          # range: [z1, z2]
+        self.total_tumors_z = self.total_tumors[:, [2, 5]]  # range: [z1, z2]
         del self.total_tumors
 
     @property
@@ -528,7 +533,7 @@ class TumorManager(object):
         """
         new_bbox: make sure (x1, y1, z1, x2, y2, z2)
         """
-        self._bbox = np.asarray(new_bbox)   # []
+        self._bbox = np.asarray(new_bbox)  # []
         self.shape = np.asarray(shape)
         scale = self.shape / np.array([self._bbox[4] - self._bbox[1] + 1,
                                        self._bbox[3] - self._bbox[0] + 1])
@@ -653,7 +658,7 @@ class TumorManager(object):
             # print(np.max(mask_guide_by_res))
             if np.max(mask_guide_by_res) < filter_thresh:
                 self.print("Remove")
-                predict[slicer] -= res_obj_slicer   # Faster than labeled_objs[res_obj] = 0
+                predict[slicer] -= res_obj_slicer  # Faster than labeled_objs[res_obj] = 0
                 continue
             # 2. Match res_obj to guide
             res_peak_pos = list(np.unravel_index(mask_guide_by_res.argmax(), mask_guide_by_res.shape))
@@ -663,12 +668,12 @@ class TumorManager(object):
             found = -1
             for j, center in enumerate(self.centers_yx):
                 if res_peak_pos[0] == center[0] and res_peak_pos[1] == center[1]:
-                    found = j   # res_peak is just a center
+                    found = j  # res_peak is just a center
                     break
             #   2.2. From the nearest guide center, check that whether it is the corresponding guide.
             #        Rule: Image(guide) values along the line from res_obj's peak to its corresponding
             #        guide center must be monotonously increasing.
-            if found < 0:   # gradient ascent from res_peak to center
+            if found < 0:  # gradient ascent from res_peak to center
                 # compute distances between res_obj_peak and every guide center
                 distances = np.sum((self.centers_yx - res_peak_pos) ** 2, axis=1)
                 order = np.argsort(distances)
@@ -753,8 +758,10 @@ if __name__ == "__main__":
     tumor_path = Path(__file__).parent / "data/LiTS/tumor_summary.csv"
     tumors_info = pd.read_csv(str(tumor_path))
 
+
     class Foo(object):
         pass
+
 
     args = Foo()
     args.input_group = 3
@@ -779,6 +786,7 @@ if __name__ == "__main__":
         args=args
     ).skip(n).make_one_shot_iterator().get_next()
 
+
     def run(mgr):
         _, temp = nii_kits.nii_reader(Path(__file__).parent / "model_dir/016_osmn_in_noise"
                                                               "/prediction/prediction-113.nii.gz")
@@ -788,6 +796,7 @@ if __name__ == "__main__":
                         order=0)[n:]
         for x in np.concatenate((temp, np.flip(temp, axis=0)), axis=0):
             yield x
+
 
     sess = tf.Session()
     features_val, labels_val = sess.run(dataset)
@@ -816,6 +825,7 @@ if __name__ == "__main__":
 
     cur_name = features_val["names"][0]
 
+
     def key_press_event(event):
         global n, features_val, labels_val, pred, cur_name
         if event.key == "down":
@@ -839,6 +849,7 @@ if __name__ == "__main__":
             else:
                 n -= 1
             fig.canvas.draw()
+
 
     fig.canvas.mpl_connect("key_press_event", key_press_event)
     plt.show()

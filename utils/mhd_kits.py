@@ -137,8 +137,8 @@ def mhd_reader(mhd_path, only_meta=False, compress=False, ranges=None, readonly=
         if compress:
             buffer = zlib.decompress(buffer)
         raw_image = np.frombuffer(buffer, dtype=METType[meta_info['ElementType']])
-        if not readonly:
-            raw_image.setflags(write=1)
+        # if not readonly:
+        #     raw_image.setflags(write=1)
         raw_image = np.reshape(raw_image, new_shape)
 
     return meta_info, raw_image

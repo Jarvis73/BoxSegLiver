@@ -82,8 +82,7 @@ def _check_dataset_structure(result1, result2):
                         .format(type(result1), type(result2)))
 
     if ds1.output_types != ds2.output_types:
-        raise ValueError("Train/Eval dataset types mismatch: {} vs {}"
-                         .format(ds1.output_types, ds2.output_types))
+        raise ValueError("Train/Eval dataset types mismatch: {} vs {}".format(ds1.output_types, ds2.output_types))
 
     return (collections.namedtuple("DatasetProp", ["shapes", "types", "classes"])
             (ds1.output_shapes, ds1.output_types, ds1.output_classes))
