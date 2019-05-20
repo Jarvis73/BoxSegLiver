@@ -181,6 +181,7 @@ def model_fn(features, labels, mode, params):
         if args.cute_height:
             predictions['offset_height'] = features['offset_height']
             predictions['sub_slice_height'] = features['sub_slice_height']
+            predictions['ud_padding'] = features['ud_padding']
 
         predictions.update({
             "Names": features["names"],

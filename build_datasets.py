@@ -64,7 +64,6 @@ def main():
     # Histogram v2
     # build_lits_liver.convert_to_histogram_dataset("trainval", keep_only_liver=False, seed=1234,
     #                                               bins=100, xrng=(-100, 250),
-    #                                               folds_file="k_folds.txt", guide=None, hist_scale="total")
 
     #                                               folds_file="k_folds.txt")
     # build_body.convert_to_dataset("body", seed=1234,source_path='/home/yf/Slimed_NF')

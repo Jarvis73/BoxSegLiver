@@ -443,6 +443,7 @@ def cute_image_to_examples(image_reader,
                     "extra/number": bd._int64_list_feature(idx),
                     "extra/offset_height": bd._int64_list_feature(offset_index),
                     "extra/sub_slice_height": bd._int64_list_feature(sub_slice_height),
+                    "extra/ud_padding": bd._int64_list_feature(padding),
                 }
                 for key, val in extra_str_split.items():
                     feature_dict["extra/{}".format(key)] = bd._bytes_list_feature(val[idx])
@@ -473,6 +474,7 @@ def cute_image_to_examples(image_reader,
                 "segmentation/shape": bd._int64_list_feature(slices_label.shape),
                 "extra/offset_height": bd._int64_list_feature(offset_index),
                 "extra/sub_slice_height": bd._int64_list_feature(sub_slice_height),
+                "extra/ud_padding": bd._int64_list_feature(padding),
             }
 
             for key, val in extra_str_origin.items():

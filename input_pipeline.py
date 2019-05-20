@@ -296,6 +296,7 @@ def parse_2d_example_proto(example_proto, mode, args):
         if args.cute_height:
             features['extra/offset_height'] = tf.FixedLenFeature([], tf.int64)
             features['extra/sub_slice_height'] = tf.FixedLenFeature([], tf.int64)
+            features['extra/ud_padding'] = tf.FixedLenFeature([], tf.int64)
         if args.case_weights:
             features["extra/weights"] = tf.FixedLenFeature([], tf.float32)
         features = tf.parse_single_example(example_proto, features=features)
@@ -327,6 +328,7 @@ def parse_2d_example_proto(example_proto, mode, args):
             if args.cute_height:
                 ret_features['offset_height'] = features['extra/offset_height']
                 ret_features['sub_slice_height'] = features['extra/sub_slice_height']
+                ret_features['ud_padding'] = features['extra/ud_padding']
                 # ret_features["indices"] = features["extra/number"]
             if mode == "eval" and not args.eval_3d:
                 ret_features["indices"] = features["extra/number"]
@@ -367,6 +369,7 @@ def parse_3d_example_proto(example_proto, args):
         if args.cute_height:
             features['extra/offset_height'] = tf.FixedLenFeature([], tf.int64)
             features['extra/sub_slice_height'] = tf.FixedLenFeature([], tf.int64)
+            features['extra/ud_padding'] = tf.FixedLenFeature([], tf.int64)
         features = tf.parse_single_example(example_proto, features=features)
 
         image = tf.decode_raw(features["image/encoded"], tf.int16, name="DecodeImage")
@@ -400,7 +403,8 @@ def parse_3d_example_proto(example_proto, args):
         zero_float = tf.zeros(shape_img, dtype=image.dtype)
         zero_int64 = tf.zeros(shape_lab, dtype=label.dtype)
         image = tf.concat((image, zero_float), axis=0)
-        label = tf.concat((label, zero_int64), axis=0)
+        with tf.control_dependencies([tf.print(features["image/shape"],features["segmentation/shape"],tf.shape(image))]):
+            label = tf.concat((label, zero_int64), axis=0)
 
         ret_features = {"images": image,
                         "names": features["image/name"],
@@ -411,6 +415,7 @@ def parse_3d_example_proto(example_proto, args):
         if args.cute_height:
             ret_features['offset_height'] = features['extra/offset_height']
             ret_features['sub_slice_height'] = features['extra/sub_slice_height']
+            ret_features['ud_padding'] = features['extra/ud_padding']
         if args.use_spatial_guide:
             ret_features["guides"] = tf.py_func(_wrap_get_gd_image_multi_objs, [label], tf.float32)
 
@@ -635,6 +640,10 @@ def _flat_map_fn_multi_channels(x, y, mode, args):
             repeat_times * (1 if args.guide != "middle" else 2))
         concat_list += (sub_slice_height,)
         ex_arg_keys.append("sub_slice_height")
+        ud_padding = Dataset.from_tensors(x['ud_padding']).repeat(
+            repeat_times * (1 if args.guide != "middle" else 2))
+        concat_list += (ud_padding,)
+        ex_arg_keys.append("ud_padding")
 
     def map_fn(image, label, name, pad, *ex_args):
         features = {"images": image,

@@ -153,9 +153,12 @@ class EvaluateVolume(EvaluateBase):
         bbox = None
         cur_case = None
         sub_slice_height = None
-        offset = None
-        check_offset = {i: False for i in range(5)}
+        ud_padding = None
+        logits3d_0 = defaultdict(list)
+        label3d_0 = defaultdict(list)
+        offset_height = set()
         global_step = None
+        offset_index = None
 
         self._timer.reset()
         self._timer.tic()
@@ -168,22 +171,43 @@ class EvaluateVolume(EvaluateBase):
             if "GlobalStep" in predict:
                 global_step = global_step if global_step is not None else predict["GlobalStep"]
             if 'offset_height' in predict:
-                offset = predict['offset_height'][0]
-                sub_clice_height = predict['sub_slice_height'][0]
-
+                offset_index = predict['offset_height'][0]
+                offset_height.add(offset_index)  # 这里用集合来记录种类
+                sub_slice_height = predict['sub_slice_height'][0]
+                ud_padding = predict['ud_padding'][0]
             if cur_case == new_case:
                 # Append batch to collections
                 for c, cls in enumerate(self.classes):
-                    logits3d[cls].append(np.squeeze(predict[cls + "Pred"], axis=-1))
-                    labels3d[cls].append(predict["Labels_{}".format(c)])
+                    if 'offset_height' in predict:
+                        if predict['offset_height'][0] == 0:  # 只有第一个要考虑上下两片。其他后面只要拿后面一片就够了。
+                            logits3d_0[cls].append(
+                                np.squeeze(predict[cls + "Pred"], axis=-1)[:, 0: sub_slice_height, :])
+                            label3d_0[cls].append(predict["Labels_{}".format(c)][:, 0: sub_slice_height, :])
+                        logits3d[cls].append(
+                            np.squeeze(predict[cls + "Pred"], axis=-1)[:, sub_slice_height:2 * sub_slice_height, :])
+                        labels3d[cls].append(
+                            predict["Labels_{}".format(c)][:, sub_slice_height:2 * sub_slice_height, :])
+                    else:
+                        logits3d[cls].append(np.squeeze(predict[cls + "Pred"], axis=-1))
+                        labels3d[cls].append(predict["Labels_{}".format(c)])
                 # self.maybe_append(labels3d["SpGuide"], pred, "SpGuide")
                 # self.maybe_append(bg_masks3d, pred, "BgMasks")
             elif cur_case + ".rev" == new_case:
                 # Append reversed batch to another collections
                 for c, cls in enumerate(self.classes):
-                    logits3d[cls + "_rev"].append(np.squeeze(predict[cls + "Pred"], axis=-1))
+                    if 'offset_height' in predict:
+                        if predict['offset_height'][0] == 0:
+                            logits3d_0[cls + "_rev"].append(
+                                np.squeeze(predict[cls + "Pred"], axis=-1)[:, 0: sub_slice_height, :])
+                        logits3d[cls + "_rev"].append(np.squeeze(predict[cls + "Pred"], axis=-1)
+                                                      [:, sub_slice_height:2 * sub_slice_height, :])
+                    else:
+                        logits3d[cls + "_rev"].append(np.squeeze(predict[cls + "Pred"], axis=-1))
             else:
-                result = self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox, save)
+                for c, cls in enumerate(self.classes):
+                    logits3d[cls] = logits3d_0[cls] + logits3d[cls]
+                    labels3d[cls] = label3d_0[cls] + labels3d[cls]
+                result = self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox, save, offset_height, ud_padding)
                 # result = self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox, save,
                 #                              bg_masks3d=bg_masks3d, cls_acc=cls_acc, cls_pos=cls_pos,
                 #                              cls_rec=cls_rec)
@@ -194,12 +218,21 @@ class EvaluateVolume(EvaluateBase):
                         log_str += " {}: {:.3f}".format(key, value)
                     tf.logging.info(log_str + " ({:.3f} secs/case)".format(self._timer.average_time))
                 for c, cls in enumerate(self.classes):
-                    logits3d[cls].clear()
-                    labels3d[cls].clear()
-                    logits3d[cls].append(np.squeeze(predict[cls + "Pred"], axis=-1))
-                    labels3d[cls].append(predict["Labels_{}".format(c)])
+                    logits3d[cls] = list()
+                    labels3d[cls] = list()
+                    logits3d_0[cls] = list()
+                    label3d_0[cls] = list()
+                    # 这里offset应该是0
+                    if offset_index == 0:
+                        logits3d_0[cls].append(np.squeeze(predict[cls + "Pred"], axis=-1)[:, 0: sub_slice_height, :])
+                        label3d_0[cls].append(predict["Labels_{}".format(c)][:, 0: sub_slice_height, :])
+                    logits3d[cls].append(
+                        np.squeeze(predict[cls + "Pred"], axis=-1)[:, sub_slice_height:2 * sub_slice_height, :])
+                    labels3d[cls].append(
+                        predict["Labels_{}".format(c)][:, sub_slice_height:2 * sub_slice_height, :])
                     if cls + "_rev" in logits3d:
                         logits3d[cls + "_rev"].clear()
+                        logits3d_0[cls + "_rev"].clear()
 
                 # self.maybe_append(labels3d["SpGuide"], pred, "SpGuide", clear=True)
                 # self.maybe_append(bg_masks3d, pred, "BgMasks", clear=True)
@@ -212,11 +245,17 @@ class EvaluateVolume(EvaluateBase):
                 pad = predict["Pads"][0]
                 if "Bboxes" in predict:
                     bbox = predict["Bboxes"][0]
+                if 'offset_height' in predict:
+                    offset_height.clear()
+                    offset_height.add(predict['offset_height'][0])
                 self._timer.tic()
 
         if cases is None or (self._timer.calls < cases):
             # Final case
-            result = self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox, save)
+            for c, cls in enumerate(self.classes):
+                logits3d[cls] = logits3d_0[cls] + logits3d[cls]
+                labels3d[cls] = label3d_0[cls] + labels3d[cls]
+            result = self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox, save, offset_height, ud_padding)
             # result = self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox, save,
             #                              bg_masks3d=bg_masks3d, cls_acc=cls_acc, cls_pos=cls_pos,
             #                              cls_rec=cls_rec)
@@ -289,10 +328,25 @@ class EvaluateVolume(EvaluateBase):
                 log_str += "{} -> {}  ".format(key, value)
             raise ValueError(log_str)
 
-    def _evaluate_case(self, logits3d, labels3d, cur_case, pad, bbox=None, save=False):
+    def _evaluate_case(self, logits3d, labels3d, cur_case, pad, bbox=None, save=False, offset_height=None,
+                       ud_padding=None):
         # Process a complete volume
-        logits3d = {cls: np.concatenate(values) for cls, values in logits3d.items()}
-        labels3d = {cls: np.concatenate(values) for cls, values in labels3d.items()}
+        if offset_height != None:
+            for cls, values in logits3d.items():
+                logits = np.concatenate(values)
+                slice_num = logits.shape[0] // (len(offset_height) + 1)
+                slice_logits3d = [logits[i * slice_num:(i + 1) * slice_num] for i in range(len(offset_height) + 1)]
+                logits3d[cls] = np.concatenate(slice_logits3d, axis=1)  # 高度融合
+                logits3d[cls] = logits3d[cls][:, ud_padding // 2:-(ud_padding - ud_padding // 2), :]
+            for cls, values in labels3d.items():
+                labels = np.concatenate(values)
+                slice_num = labels.shape[0] // (len(offset_height) + 1)
+                slice_labels3d = [labels[i * slice_num:(i + 1) * slice_num] for i in range(len(offset_height) + 1)]
+                labels3d[cls] = np.concatenate(slice_labels3d, axis=1)  # 高度融合
+                labels3d[cls] = labels3d[cls][:, ud_padding // 2:-(ud_padding - ud_padding // 2), :]
+        else:
+            logits3d = {cls: np.concatenate(values) for cls, values in logits3d.items()}
+            labels3d = {cls: np.concatenate(values) for cls, values in labels3d.items()}
 
         if pad != 0:
             logits3d = {cls: value[:-pad] if not cls.endswith("_rev") else value[pad:]
