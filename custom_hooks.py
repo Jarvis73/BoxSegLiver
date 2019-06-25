@@ -134,7 +134,7 @@ class BestCheckpointSaverHook(session_run_hook.SessionRunHook):
             best_file = self._get_best_result_dump_file(name="best_result_{}".format(max_saved_step))
             self._last_step_in_get_saver = max_saved_step
         if best_file.exists():
-            with self._get_best_result_dump_file().open() as f:
+            with best_file.open() as f:
                 self._better_result = json.load(f)
             logging.info("Best result records '{}' loaded!".format(str(best_file)))
 
@@ -290,7 +290,8 @@ class BestCheckpointSaverHook(session_run_hook.SessionRunHook):
 
 
 class FeedGuideHook(session_run_hook.SessionRunHook):
-    def __init__(self, features_ph, labels_ph, features, labels, model_dir):
+    def __init__(self, features_ph, labels_ph, features, labels, model_dir, model_args):
+        self.args = model_args
         self.features_ph = copy.copy(features_ph)    # Copy a new dict
         self.labels_ph = labels_ph
         self.features = features
@@ -310,7 +311,7 @@ class FeedGuideHook(session_run_hook.SessionRunHook):
         # load interactive information: z_min, z_max
         tumor_path = Path(__file__).parent / "data/LiTS/tumor_summary.csv"
         tumors_info = pd.read_csv(str(tumor_path))
-        self.t_mgr = TumorManager(tumors_info)
+        self.t_mgr = TumorManager(tumors_info, min_std=self.args.min_std)
 
     def before_run(self, run_context):
         if self.first:

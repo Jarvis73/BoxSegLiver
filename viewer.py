@@ -32,7 +32,7 @@ class SegViewerAdapter(object):
         self.pred_dir = Path(pred_dir)
         self.data_dirs = [Path(data_dir) for data_dir in data_dirs]
         for dir_ in self.data_dirs + [self.pred_dir]:
-            assert dir_.exists()
+            assert dir_.exists(), str(dir_)
         self.bbox_file = Path(bbox_file)
 
         self.gt = None
@@ -213,7 +213,7 @@ class SegViewerAdapter(object):
 def main():
     adapter = SegViewerAdapter(
         Path(__file__).parent / "model_dir/016_osmn_in_noise/prediction",
-        ["D:/DataSet/LiTS/Training_Batch_1", "D:/DataSet/LiTS/Training_Batch_2"],
+        ["D:/DataSet/LiTS/Training_Batch"],
         Path("D:/DataSet/LiTS/liver_bbox_nii.pkl")
     )
 

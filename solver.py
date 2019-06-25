@@ -84,10 +84,20 @@ def add_arguments(parser):
                        type=float,
                        default=1e-4,
                        required=False, help="Learning rate employed during slow start")
+    group.add_argument("--adam_beta1", type=float)
+    group.add_argument("--adam_beta2", type=float)
+    group.add_argument("--adam_eps", type=float)
 
 
 def get_solver_params(args, warm_up=False, slow_start_step=None, slow_start_learning_rate=None):
-    params = {"solver": Solver(args)}
+    optimizer_params = {}
+    if args.adam_beta1:
+        optimizer_params["beta1"] = args.adam_beta1
+    if args.adam_beta2:
+        optimizer_params["beta2"] = args.adam_beta2
+    if args.adam_eps:
+        optimizer_params["epsilon"] = args.adam_eps
+    params = {"solver": Solver(args, optimizer_params=optimizer_params or None)}
 
     if warm_up:
         if slow_start_step is None or slow_start_learning_rate is None:
@@ -102,7 +112,7 @@ def get_solver_params(args, warm_up=False, slow_start_step=None, slow_start_lear
 
 
 class Solver(object):
-    def __init__(self, args, name=None):
+    def __init__(self, args, name=None, optimizer_params=None):
         """ Don't create ops/tensors in __init__() """
         self._args = args
         self.name = name or "Optimizer"
@@ -122,6 +132,7 @@ class Solver(object):
         self.learning_rate_custom_values = self.args.lr_custom_values
 
         self.optimizer = self.args.optimizer.lower()
+        self.optimizer_params = optimizer_params
 
     @property
     def args(self):
@@ -190,15 +201,15 @@ class Solver(object):
 
     def _get_model_optimizer(self, learning_rate):
         if self.optimizer == "adam":
-            optimizer_params = {"beta1": 0.9, "beta2": 0.99}
+            optimizer_params = self.optimizer_params or {"beta1": 0.9, "beta2": 0.99}
             optimizer = tf.train.AdamOptimizer(learning_rate, **optimizer_params)
         elif self.optimizer == "momentum":
-            optimizer_params = {"momentum": 0.9}
+            optimizer_params = self.optimizer_params or {"momentum": 0.9}
             optimizer = tf.train.MomentumOptimizer(learning_rate, **optimizer_params)
         elif self.optimizer == "adamw":
-            optimizer_params = {"weight_decay": self._args.weight_decay_rate,
-                                "learning_rate": learning_rate,
-                                "beta1": 0.9, "beta2": 0.99}
+            optimizer_params = self.optimizer_params or {"weight_decay": self._args.weight_decay_rate,
+                                                         "learning_rate": learning_rate,
+                                                         "beta1": 0.9, "beta2": 0.99}
             optimizer = contrib_opt.AdamWOptimizer(**optimizer_params)
         else:
             raise ValueError("Not supported optimizer: " + self.optimizer)

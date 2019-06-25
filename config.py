@@ -65,6 +65,9 @@ def add_arguments(parser):
                        default="checkpoint_best",
                        required=False, help="Status file to locate checkpoint file. Use for restore"
                                             "parameters.")
+    group.add_argument("--out_file",
+                       type=str,
+                       required=False, help="Logging file name to replace default.")
 
     group = parser.add_argument_group(title="Device Arguments")
     group.add_argument("--distribution_strategy",
@@ -90,7 +93,7 @@ def add_arguments(parser):
 
 def check_args(args, parser):
 
-    if args.zoom_scale < 1:
+    if hasattr(args, "zoom_scale") and args.zoom_scale < 1:
         raise parser.error("Asserting {} >= 1 failed!".format(args.zoom_scale))
 
     if args.loss_weight_type == "numerical":
@@ -113,7 +116,7 @@ def check_args(args, parser):
             if parts[0] not in args.classes or parts[1] not in args.metrics_eval:
                 raise ValueError("Wrong secondary_metric: {}".format(args.secondary_metric))
 
-    if args.mode == ModeKeys.TRAIN:
+    if args.mode == ModeKeys.TRAIN and hasattr(args, "dataset_for_train"):
         if not args.dataset_for_train:
             raise parser.error("TRAIN mode need parameter: --dataset_for_train")
         for x in args.dataset_for_train:
@@ -121,7 +124,7 @@ def check_args(args, parser):
             if not record.exists():
                 raise parser.error("File not found: " + str(record))
 
-    if args.mode == ModeKeys.EVAL:
+    if args.mode == ModeKeys.EVAL and hasattr(args, "dataset_for_eval"):
         if not args.dataset_for_eval:
             raise parser.error("EVAL mode need parameter: --dataset_for_eval")
         for x in args.dataset_for_eval:
@@ -145,6 +148,10 @@ def check_args(args, parser):
 
     if args.warm_start_from:
         args.warm_start_from = _try_to_find_ckpt(args.warm_start_from, args)
+
+    # TODO(ZJW): For compatibility
+    if hasattr(args, "eval_3d") and args.eval_3d:
+        args.evaluator = "Volume"
 
 
 def fill_default_args(args):

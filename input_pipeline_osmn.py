@@ -142,6 +142,10 @@ def add_arguments(parser):
                        type=float,
                        default=0.4,
                        required=False, help="stddev perturbation scale for spatial guide (default: %(default)f)")
+    group.add_argument("--min_std",
+                       type=float,
+                       default=5.0,
+                       required=False, help="Minimum stddev used for generating spatial guide (default: %(default)f)")
     group.add_argument("--only_tumor",
                        action="store_true",
                        required=False, help="Training with slices containing tumors")
@@ -463,12 +467,15 @@ def data_augmentation(features, labels, args):
                                                       [args.im_height, args.im_width])
             labels = tf.squeeze(labels, axis=(0, -1))
 
-    logging.info("Train: Add spatial guide")
-    guide = tf.py_func(_wrap_get_gd_image_multi_objs, [labels], tf.float32)
-    if args.random_spatial_guide:
-        mask = image_ops.random_zero_or_one(tf.shape(guide), guide.dtype)
-        guide = guide * mask
-        logging.info("Train: Add random spatial guide")
+    if args.model_config.split(".")[0].split("_")[1] != "DE":
+        logging.info("Train: Add spatial guide")
+        guide = tf.py_func(_wrap_get_gd_image_multi_objs, [labels], tf.float32)
+        if args.random_spatial_guide:
+            mask = image_ops.random_zero_or_one(tf.shape(guide), guide.dtype)
+            guide = guide * mask
+            logging.info("Train: Add random spatial guide")
+    else:
+        guide = tf.constant(0)
     features["sp_guide"] = guide
 
     if args.hist_noise:
@@ -495,8 +502,11 @@ def data_processing_eval_while_train(features, labels, args):
             with_fake_guides=False)[..., None]
         return guide_image.astype(np.float32)
 
-    logging.info("Eval WT: Add spatial guide")
-    guide = tf.py_func(_wrap_get_gd_image_multi_objs, [labels], tf.float32)
+    if args.model_config.split(".")[0].split("_")[1] != "DE":
+        logging.info("Eval WT: Add spatial guide")
+        guide = tf.py_func(_wrap_get_gd_image_multi_objs, [labels], tf.float32)
+    else:
+        guide = tf.constant(0)
     features["sp_guide"] = guide
 
     if args.resize_for_batch:
@@ -504,10 +514,12 @@ def data_processing_eval_while_train(features, labels, args):
         image = tf.image.resize_bilinear(tf.expand_dims(features["images"], axis=0),
                                          [args.im_height, args.im_width])
         features["images"] = tf.squeeze(image, axis=0)
-        logging.info("Eval WT: Resize guide to {} x {}".format(args.im_height, args.im_width))
-        guide = tf.image.resize_bilinear(tf.expand_dims(features["sp_guide"], axis=0),
-                                         [args.im_height, args.im_width])
-        features["sp_guide"] = tf.squeeze(guide, axis=0)
+
+        if args.model_config.split(".")[0].split("_")[1] != "DE":
+            logging.info("Eval WT: Resize guide to {} x {}".format(args.im_height, args.im_width))
+            guide = tf.image.resize_bilinear(tf.expand_dims(features["sp_guide"], axis=0),
+                                             [args.im_height, args.im_width])
+            features["sp_guide"] = tf.squeeze(guide, axis=0)
         if not args.eval_3d:    # 3D evaluation don't need to resize label
             logging.info("Eval WT: Resize label to {} x {}".format(args.im_height, args.im_width))
             labels = tf.image.resize_nearest_neighbor(tf.expand_dims(tf.expand_dims(labels, axis=0), axis=-1),
@@ -684,7 +696,11 @@ def _flat_map_fn_multi_channels(x, y, mode, args):
         bboxes = Dataset.from_tensors(x["bboxes"]).repeat(repeat_times * (1 if args.guide != "middle" else 2))
         concat_list += (bboxes,)
         ex_arg_keys.append("bboxes")
-    if mode == "eval" and "sp_guide" in x:
+    if args.model_config.split(".")[0].split("_")[1] == "DE":
+        sp_guides = Dataset.range(100).repeat()
+        concat_list += (sp_guides,)
+        ex_arg_keys.append("sp_guide")
+    elif mode == "eval" and "sp_guide" in x:
         sp_guides = (Dataset.from_tensor_slices(x["sp_guide"]) if args.guide != "middle" else
                      Dataset.from_tensor_slices(tf.concat((x["sp_guide"], tf.reverse(x["sp_guide"], [0])), axis=0)))
         concat_list += (sp_guides,)
@@ -725,7 +741,7 @@ def get_3d_multi_records_dataset_for_eval(image_filenames, hist_filenames, mode,
 
     # Load sp_guide
     import pickle
-    mmts_path = Path(__file__).parent / "data/LiTS/test-3-of-5-mmts.pkl"    # TODO(ZJW): don't use hard code
+    mmts_path = Path(__file__).parent / "data/LiTS/test-3-of-5-mmts-fix.pkl"    # TODO(ZJW): don't use hard code
     with mmts_path.open("rb") as f:
         sp_guides_mmts = pickle.load(f)
 

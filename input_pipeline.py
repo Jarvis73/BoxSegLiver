@@ -375,12 +375,10 @@ def parse_3d_example_proto(example_proto, args):
         # Padding volume with empty slices to fit batch_size
         bs = args.batch_size
         pad = (bs - (features["image/shape"][0] % bs)) % bs
-        shape_img = tf.concat(([pad], features["image/shape"][1:]), axis=0)
-        shape_lab = tf.concat(([pad], features["segmentation/shape"][1:]), axis=0)
-        zero_float = tf.zeros(shape_img, dtype=image.dtype)
-        zero_int64 = tf.zeros(shape_lab, dtype=label.dtype)
-        image = tf.concat((image, zero_float), axis=0)
-        label = tf.concat((label, zero_int64), axis=0)
+        pad_img = tf.reverse(image[-pad:], [0])
+        pad_lab = tf.reverse(label[-pad:], [0])
+        image = tf.concat((image, pad_img), axis=0)
+        label = tf.concat((label, pad_lab), axis=0)
 
         ret_features = {"images": image,
                         "names": features["image/name"],

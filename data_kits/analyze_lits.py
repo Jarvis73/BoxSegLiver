@@ -33,8 +33,7 @@ from utils import array_kits
 
 
 if "Windows" in platform.system():
-    LiTS_ROOTS = [Path(r"D:\DataSet\LiTS\Training_Batch_1"),
-                  Path(r"D:\DataSet\LiTS\Training_Batch_2")]
+    LiTS_ROOTS = [Path(r"D:\DataSet\LiTS\Training_Batch")]
 elif "Linux" in platform.system():
     LiTS_ROOTS = [Path(__file__).parent.parent / "data/LiTS/Training_Batch_1",
                   Path(__file__).parent.parent / "data/LiTS/Training_Batch_2"]
@@ -178,13 +177,34 @@ def dump_all_tumor_bbox():
     pd.DataFrame(data=info).to_csv(str(save_file))
 
 
+def dump_liver_region():
+    save_file = Path(__file__).parent.parent / "data/LiTS/liver_summary.csv"
+    info = collections.defaultdict(list)
+    for lits in LiTS_ROOTS:
+        for mask_path in sorted(lits.glob("segmentation-*.nii")):
+            _, mask = nii_kits.nii_reader(mask_path)
+            mask = np.clip(mask, 0, 1)
+            bbox = array_kits.extract_region(mask, align=(16, 16, 1), padding=(25, 25, 2))
+            info["Name"].append(mask_path.name)
+            info["x1"].append(bbox[0])
+            info["y1"].append(bbox[1])
+            info["z1"].append(bbox[2])
+            info["x2"].append(bbox[3])
+            info["y2"].append(bbox[4])
+            info["z2"].append(bbox[5])
+            info["thick"].append(bbox[5] - bbox[2] + 1)
+            print(mask_path)
+    pd.DataFrame(data=info).to_csv(str(save_file))
+
+
 def main():
     # dump_all_liver_tumor_hist()
     # dump_all_tumor_det_metrics()
     # check_tumor_hist()
     # dump_all_tumor_hist()
     # check_np_hist()
-    dump_all_tumor_bbox()
+    # dump_all_tumor_bbox()
+    dump_liver_region()
 
 
 if __name__ == "__main__":

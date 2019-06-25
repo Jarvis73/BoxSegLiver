@@ -56,10 +56,11 @@ def _get_session_config(args):
         gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=args.device_mem_frac)
     else:
         gpu_options = tf.GPUOptions(allow_growth=True)
-    sess_cfg = tf.ConfigProto(allow_soft_placement=True, gpu_options=gpu_options,
-                              device_count={"CPU": 1},
-                              inter_op_parallelism_threads=1,
-                              intra_op_parallelism_threads=20)
+    sess_cfg = tf.ConfigProto(allow_soft_placement=True, gpu_options=gpu_options)
+    # sess_cfg = tf.ConfigProto(allow_soft_placement=True, gpu_options=gpu_options,
+    #                           device_count={"CPU": 1},
+    #                           inter_op_parallelism_threads=1,
+    #                           intra_op_parallelism_threads=20)
     return sess_cfg
 
 
@@ -70,14 +71,14 @@ def _custom_tf_logger(args):
         log_dir.mkdir(parents=True, exist_ok=True)
 
     log_file = log_dir / "{}_{}".format(args.mode, args.tag)
-    logging._logger = create_logger(log_file=log_file, with_time=True,
+    logging._logger = create_logger(log_file=log_file, with_time=True, file_level=1,
                                     clear_exist_handlers=True, name="tensorflow")
 
 
 def main(argv):
     args = _get_arguments(argv)
     _custom_tf_logger(args)
-    logging.info(args)
+    logging.debug(args)
 
     session_config = _get_session_config(args)
 
@@ -109,6 +110,8 @@ def main(argv):
         if not args.train_without_eval:
             params.update(custom_evaluator.get_eval_params(evaluator="Volume" if args.eval_3d else "Slice",
                                                            eval_steps=args.eval_steps,
+                                                           largest=True,
+                                                           merge_tumor_to_liver=True,
                                                            primary_metric=args.primary_metric,
                                                            secondary_metric=args.secondary_metric))
 
@@ -148,4 +151,3 @@ def main(argv):
 
 if __name__ == "__main__":
     tf.app.run(main)
-    tfes.estimator.Estimator

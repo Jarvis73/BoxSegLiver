@@ -1,0 +1,10 @@
+init_channels: 64
+use_density_modulator: true
+use_spatial_modulator: false
+density_channels: 200
+with_conv: true
+conv_init_num_outs: 2
+ret_prob: false
+ret_pred: true
+mod_layers: [1, 2, 3, 4]
+group_layers: 1

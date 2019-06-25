@@ -23,10 +23,11 @@ LiTS liver dataset is expected to have the following directory structure:
   + MedicalImageSegmentation
     + data_kits
       - build_data.py
-      - build_lits_liver.py (current working directory).
+      - build_lits_liver.py
     + data
       + LiTS
-        - image_list.txt
+        - trainval.txt
+        - k_fold.txt
         + records
           - trainval-2D-1-of-5.tfrecord
           - trainval-2D-2-of-5.tfrecord
@@ -40,13 +41,23 @@ LiTS liver dataset is expected to have the following directory structure:
           - trainval-3D-5-of-5.tfrecord
 
 Image folder:
-  ./data/LiTS/Training_Batch_1
-  ./data/LiTS/Training_Batch_2
-  ./data/LiTS/Test_Batch
 
-list folder:
-  ./data/LiTS/trainval.txt
-  ./data/LiTS/test.txt
+  + MedicalImageSegmentation
+    + data
+      + NF
+        + Training_Batch_1
+          - volume-001.nii.gz
+          - volume-002.nii.gz
+          - segmentation-001.nii.gz
+          - segmentation-002.nii.gz
+        + Training_Batch_2
+          - volume-041.nii.gz
+          - volume-042.nii.gz
+          - segmentation-041.nii.gz
+          - segmentation-042.nii.gz
+        + Test_Batch
+          - volume-001.nii.gz
+          - volume-002.nii.gz
 
 This script converts data into shared data files and save at tfrecord folder.
 
@@ -70,8 +81,6 @@ from pathlib import Path
 import data_kits.build_data as bd
 from data_kits.build_data import ImageReader
 from data_kits.build_data import SubVolumeReader
-from data_kits.build_data import image_to_examples
-from data_kits.build_data import bbox_to_examples
 from data_kits.preprocess import random_split_k_fold
 from utils import array_kits
 from utils import misc
@@ -152,6 +161,116 @@ def _get_lits_records_dir():
     return LiTS_records
 
 
+def image_to_examples(image_reader,
+                      label_reader,
+                      split=False,
+                      extra_str_info=None,
+                      extra_int_info=None,
+                      group="triplet",
+                      group_label=False,
+                      mask_image=False,
+                      extra_float_info=None):
+    """
+    Convert N-D image and label to N-D/(N-1)-D tfexamples.
+
+    This is a generator.
+
+    Parameters
+    ----------
+    image_reader: ImageReader
+        Containing image
+    label_reader: ImageReader
+        Containing label
+    split: bool
+        If true, image and label will be converted slice by slice.
+    extra_str_info: dict
+        extra information added to tfexample. Dict keys will be the tf-feature keys,
+        and values must be a list whose length is equal with image_reader.shape[0]
+    extra_int_info: dict
+    group: str
+        none or triplet or quintuplet
+    group_label: bool
+    mask_image: bool
+    extra_float_info: dict
+
+    Returns
+    -------
+    A list of TF-Example
+
+    """
+    if group not in ["none", "triplet", "quintuplet"]:
+        raise ValueError("group must be one of [none, triplet, quintuplet], got {}".format(group))
+
+    if image_reader.name is None:
+        raise RuntimeError("ImageReader need call `read()` first.")
+    extra_str_split, extra_str_origin = bd._check_extra_info_type(extra_str_info)
+    extra_int_split, extra_int_origin = bd._check_extra_info_type(extra_int_info)
+    extra_float_split, extra_float_origin = bd._check_extra_info_type(extra_float_info)
+
+    if split:
+        num_slices = image_reader.shape[0]
+        for extra_list in extra_str_split.values():
+            assert num_slices == len(extra_list), "Length not equal: {} vs {}".format(num_slices, len(extra_list))
+        for extra_list in extra_int_split.values():
+            assert num_slices == len(extra_list), "Length not equal: {} vs {}".format(num_slices, len(extra_list))
+        for extra_list in extra_float_split.values():
+            assert num_slices == len(extra_list), "Length not equal: {} vs {}".format(num_slices, len(extra_list))
+
+        for idx in image_reader.indices:
+            if group == "triplet":
+                indices = (idx - 1, idx, idx + 1)
+                shape = image_reader.shape[1:-1] + (3,)
+            elif group == "quintuplet":
+                indices = (idx - 2, idx - 1, idx, idx + 1, idx + 2)
+                shape = image_reader.shape[1:-1] + (5,)
+            else:
+                indices = idx
+                shape = image_reader.shape[1:]
+            if not mask_image:
+                slices = image_reader.data(indices)
+            else:
+                slices = (image_reader.image(indices) * np.clip(label_reader.image(indices), 0, 1)
+                          .astype(image_reader.image().dtype)).tobytes()
+            feature_dict = {
+                "image/encoded": bd._bytes_list_feature(slices),
+                "image/name": bd._bytes_list_feature(image_reader.name),
+                "image/format": bd._bytes_list_feature(image_reader.format),
+                "image/shape": bd._int64_list_feature(shape),
+                "segmentation/encoded": bd._bytes_list_feature(label_reader.data(indices if group_label else idx)),
+                "segmentation/name": bd._bytes_list_feature(label_reader.name),
+                "segmentation/format": bd._bytes_list_feature(label_reader.format),
+                "segmentation/shape": bd._int64_list_feature(shape if group_label else label_reader.shape[1:]),
+                "extra/number": bd._int64_list_feature(idx),
+            }
+            for key, val in extra_str_split.items():
+                feature_dict["extra/{}".format(key)] = bd._bytes_list_feature(val[idx])
+            for key, val in extra_int_split.items():
+                feature_dict["extra/{}".format(key)] = bd._int64_list_feature(val[idx])
+            for key, val in extra_float_split.items():
+                feature_dict["extra/{}".format(key)] = bd._float_list_feature(val[idx])
+
+            yield tf.train.Example(features=tf.train.Features(feature=feature_dict))
+    else:
+        feature_dict = {
+            "image/encoded": bd._bytes_list_feature(image_reader.data()),
+            "image/name": bd._bytes_list_feature(image_reader.name),
+            "image/format": bd._bytes_list_feature(image_reader.format),
+            "image/shape": bd._int64_list_feature(image_reader.shape),
+            "segmentation/encoded": bd._bytes_list_feature(label_reader.data()),
+            "segmentation/name": bd._bytes_list_feature(label_reader.name),
+            "segmentation/format": bd._bytes_list_feature(label_reader.format),
+            "segmentation/shape": bd._int64_list_feature(label_reader.shape)
+        }
+
+        for key, val in extra_str_origin.items():
+            feature_dict["extra/{}".format(key)] = bd._bytes_list_feature(val)
+        for key, val in extra_int_origin.items():
+            feature_dict["extra/{}".format(key)] = bd._int64_list_feature(val)
+        for key, val in extra_float_origin.items():
+            feature_dict["extra/{}".format(key)] = bd._float_list_feature(val)
+        yield tf.train.Example(features=tf.train.Features(feature=feature_dict))
+
+
 def convert_to_liver(dataset, keep_only_liver, k_split=5, seed=None, folds_file="k_folds.txt"):
     """
     Convert dataset list to several tf-record files.
@@ -171,8 +290,7 @@ def convert_to_liver(dataset, keep_only_liver, k_split=5, seed=None, folds_file=
     file_names = get_lits_list(dataset, keep_only_liver)
     num_images = len(file_names)
 
-    k_folds = read_or_create_k_folds(Path(__file__).parent.parent / "data/LiTS/{}".format(folds_file),
-                                     file_names, k_split, seed)
+    k_folds = read_or_create_k_folds(LiTS_Dir / folds_file, file_names, k_split, seed)
     LiTS_records = _get_lits_records_dir()
 
     image_reader = ImageReader(np.int16, extend_channel=True)
@@ -229,7 +347,8 @@ def convert_to_liver_bounding_box(dataset,
     file_names = get_lits_list(dataset, keep_only_liver)
     num_images = len(file_names)
 
-    k_folds = read_or_create_k_folds(Path(__file__).parent.parent / "data/LiTS/{}".format(folds_file), file_names, k_split, seed)
+    k_folds = read_or_create_k_folds(Path(__file__).parent.parent / "data/LiTS/{}".format(folds_file),
+                                     file_names, k_split, seed)
     LiTS_records = _get_lits_records_dir()
 
     image_reader = SubVolumeReader(np.int16, extend_channel=True)
@@ -379,6 +498,30 @@ def dump_fp_bbox_from_prediction(label_dirs, pred_dir):
 
     with save_path.open("wb") as f:
         pickle.dump(all_bboxes, f, pickle.HIGHEST_PROTOCOL)
+
+
+# Deprecated
+def bbox_to_examples(label_reader, bbox_array):
+    # bbox: shape [depth, 4] --> [y1, x1, y2, x2]
+    # where point (y1, x1) and (y2, z2) is in region
+    shape = label_reader.shape[1:]
+
+    def norm_bbox(bboxes):
+        bbox = bboxes.copy()
+        bbox += np.array([[-3, -3, 3, 3]])
+        bbox = np.clip(bbox, 0, 65535)
+        bbox[:, 2:4] = np.minimum(bbox[:, 2:4], np.array(shape)[None, :])
+        return bbox / (np.concatenate((shape, shape), axis=0) - 1)
+
+    for idx in label_reader.indices:
+        locs = norm_bbox(np.asarray(bbox_array[idx]).reshape(-1, 4))
+        feature_dict = {
+            "name": bd._bytes_list_feature(label_reader.name),
+            "data": bd._bytes_list_feature(locs.astype(np.float32).tobytes()),
+            "shape": bd._int64_list_feature(locs.shape)
+        }
+
+        yield tf.train.Example(features=tf.train.Features(feature=feature_dict))
 
 
 # Deprecated

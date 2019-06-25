@@ -175,6 +175,27 @@ def random_zoom_in(image, label=None, max_scale=1.5, seed_scale=None, seed_shift
         return cropped_image, cropped_label
 
 
+def random_crop(image, label, shape, seed=None, name=None):
+    with tf.name_scope(name, "random_crop", [image, shape]):
+        image_shape = image.get_shape()
+        if image_shape.ndims == 3 or image_shape.ndims is None:
+            label_shape = label.get_shape()
+            assert label_shape.ndims is None or image_shape.ndims is None or \
+                image_shape.ndims - label_shape.ndims == 1, \
+                "image and label shape: {} vs {}".format(image_shape, label_shape)
+            # Zoom in also with label
+            expanded_label = tf.cast(tf.expand_dims(label, -1), tf.float32)
+            combined = tf.concat(axis=-1, values=[image, expanded_label])
+            shape = list(shape[:-1]) + [shape[-1] + 1]
+            cropped_combined = tf.image.random_crop(combined, shape, seed=seed)
+            cropped_image = cropped_combined[..., :-1]
+            cropped_label = tf.cast(cropped_combined[..., -1], tf.int32)
+        else:
+            raise ValueError('\'image\' must have either 3 or 4 dimensions.')
+
+        return cropped_image, cropped_label
+
+
 def random_noise(image, scale, mask=None, seed=None, name=None):
     """
     Add a random noise tensor to image.

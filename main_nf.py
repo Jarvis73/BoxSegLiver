@@ -24,7 +24,7 @@ import config
 import models
 import solver
 import loss_metrics
-import input_pipeline_osmn
+import input_pipeline_nf
 import custom_evaluator
 from utils.logger import create_logger
 from utils import distribution_utils
@@ -33,6 +33,7 @@ from custom_hooks import LogLearningRateHook
 
 ModeKeys = tfes.estimator.ModeKeys
 TF_RANDOM_SEED = None
+input_pipeline = input_pipeline_nf
 
 
 def _get_arguments(argv):
@@ -41,7 +42,7 @@ def _get_arguments(argv):
     models.add_arguments(parser)
     solver.add_arguments(parser)
     loss_metrics.add_arguments(parser)
-    input_pipeline_osmn.add_arguments(parser)
+    input_pipeline.add_arguments(parser)
     custom_evaluator.add_arguments(parser)
 
     args = parser.parse_args(argv[1:])
@@ -70,13 +71,8 @@ def _custom_tf_logger(args):
     if not log_dir.exists():
         log_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.out_file:
-        log_file = log_dir / args.out_file
-        with_time = False
-    else:
-        log_file = log_dir / "{}_{}".format(args.mode, args.tag)
-        with_time = True
-    logging._logger = create_logger(log_file=log_file, with_time=with_time, file_level=1,
+    log_file = log_dir / "{}_{}".format(args.mode, args.tag)
+    logging._logger = create_logger(log_file=log_file, with_time=True, file_level=1,
                                     clear_exist_handlers=True, name="tensorflow")
 
 
@@ -118,15 +114,14 @@ def main(argv):
                                                            largest=True,
                                                            merge_tumor_to_liver=True,
                                                            primary_metric=args.primary_metric,
-                                                           secondary_metric=args.secondary_metric,
-                                                           use_sg_reduce_fp=False))
+                                                           secondary_metric=args.secondary_metric))
 
         estimator = CustomEstimator(models.model_fn, args.model_dir, run_config, params,
                                     args.warm_start_from)
 
         steps, max_steps = ((args.num_of_steps, None)
                             if args.num_of_steps > 0 else (None, args.num_of_total_steps))
-        estimator.train(input_pipeline_osmn.input_fn,
+        estimator.train(input_pipeline.input_fn,
                         hooks=[LogLearningRateHook(tag=args.tag,
                                                    every_n_steps=log_step_count_steps,
                                                    output_dir=args.model_dir)],
@@ -145,15 +140,13 @@ def main(argv):
         eval_params = custom_evaluator.get_eval_params(evaluator=args.evaluator,
                                                        eval_steps=args.eval_steps,
                                                        largest=True,
-                                                       merge_tumor_to_liver=True,
-                                                       use_sg_reduce_fp=True
-                                                       if args.model_config.split(".")[0].split("_")[1] != "DE" else False)
+                                                       merge_tumor_to_liver=True)
 
         estimator = CustomEstimator(models.model_fn, args.model_dir, run_config, params)
 
         evaluator = eval_params["evaluator"](estimator, **eval_params["eval_kwargs"])
         estimator.evaluate(evaluator,
-                           input_pipeline_osmn.input_fn,
+                           input_pipeline.input_fn,
                            checkpoint_path=args.ckpt_path,
                            latest_filename=(args.load_status_file if not args.eval_final else None),
                            cases=args.eval_num)

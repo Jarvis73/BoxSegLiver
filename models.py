@@ -168,25 +168,26 @@ def model_fn(features, labels, mode, params):
         predictions = {key: value for key, value in model.layers.items()
                        if key.endswith("Pred")}
         predictions.update(model.metrics_dict)
-
-        with tf.name_scope("LabelProcess/"):
-            one_hot_label = tf.one_hot(labels, model.num_classes)
-            split_labels = tf.split(one_hot_label, model.num_classes, axis=-1)
-
-        for i, split_label in enumerate(split_labels[1:]):
-            predictions["Labels_{}".format(i)] = split_label
-
-        if args.eval_3d:
-            predictions["Pads"] = features["pads"]
-            if args.resize_for_batch:
-                predictions["Bboxes"] = features["bboxes"]
         predictions["Names"] = features["names"]
 
-    if mode == ModeKeys.TRAIN:
-        predictions["GlobalStep"] = tf.train.get_global_step(tf.get_default_graph())
+        if model.num_classes > 2:
+            with tf.name_scope("LabelProcess/"):
+                one_hot_label = tf.one_hot(labels, model.num_classes)
+                split_labels = tf.split(one_hot_label, model.num_classes, axis=-1)
+            for i, split_label in enumerate(split_labels[1:]):
+                predictions["Labels_{}".format(i)] = split_label
+        else:
+            predictions["Labels_0"] = labels
+
+        if "Volume" in args.evaluator:
+            if "pads" in features:
+                predictions["Pads"] = features["pads"]
+            if args.resize_for_batch and "bboxes" in features:
+                predictions["Bboxes"] = features["bboxes"]
+
     if "livers" in features:
         predictions["BgMasks"] = features["livers"]
-    if mode == ModeKeys.PREDICT and not args.eval_3d:
+    if mode == ModeKeys.PREDICT and "Volume" not in args.evaluator and "indices" in features:
         predictions["Indices"] = features["indices"]
 
     #############################################################################

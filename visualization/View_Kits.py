@@ -24,7 +24,7 @@ from traits.api import (
     Color, File, Any
 )
 from traitsui.api import (
-    View, Item, VSplit, HSplit, VGroup, HGroup, FileEditor, TableEditor,
+    View, Item, VSplit, HSplit, VGroup, HGroup, TableEditor,
     Handler
 )
 from traitsui.table_column import ObjectColumn

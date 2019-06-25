@@ -60,15 +60,12 @@ def create_logger(log_file=None, file_=True, console=True,
         elif with_time:
             log_file = os.path.join(os.path.dirname(log_file), prefix + "_" + os.path.basename(log_file))
 
-        if os.path.exists(log_file):
-            os.remove(log_file)
-
     logger = logging.getLogger(name)
 
     if clear_exist_handlers:
         logger.handlers.clear()
 
-    logger.setLevel(levels[2])
+    logger.setLevel(levels[1])
     logger.propagate = propagate
 
     formatter = MyFormatter("%(asctime)s: %(levelname).1s %(message)s")

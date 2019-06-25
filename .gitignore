@@ -124,3 +124,5 @@ run_scripts/*
 images/
 notebooks/
 grabcut.py
+data/NF/*
+nf_output/

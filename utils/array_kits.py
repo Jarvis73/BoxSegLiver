@@ -347,7 +347,7 @@ def get_largest_component(inputs, rank, connectivity=1):
     return merge_labels(labeled_res, [-1, int(arg_min[-1]) + 1])
 
 
-def compute_robust_moments(binary_image, isotropic=False, index=None):
+def compute_robust_moments(binary_image, isotropic=False, index=None, min_std=5.0):
     """
     Compute robust center and standard deviation of a binary image(0: background, 1: foreground).
 
@@ -392,7 +392,7 @@ def compute_robust_moments(binary_image, isotropic=False, index=None):
         diff = np.absolute(points - center)
         mad = np.median(diff, axis=0)
     std_dev = 1.4826 * mad
-    std_dev = np.maximum(std_dev, [5.0] * ndim)
+    std_dev = np.maximum(std_dev, [min_std] * ndim)
     if not index or index == "xy":
         return center, std_dev
     elif index == "ij":
@@ -411,7 +411,7 @@ def create_gaussian_distribution(shape, center, stddev):
 
 
 def get_gd_image_single_obj(labels, center_perturb=0.2, stddev_perturb=0.4, blank_prob=0,
-                            partial=False, partial_slice="first", only_moments=False):
+                            partial=False, partial_slice="first", only_moments=False, min_std=5.0):
     """
     Get gaussian distribution image with some perturbation. All points assigned 1 are considered
     to be the same object.
@@ -467,7 +467,7 @@ def get_gd_image_single_obj(labels, center_perturb=0.2, stddev_perturb=0.4, blan
         obj_lab = labels
         obj_ndim = ndim
 
-    center, std = compute_robust_moments(obj_lab)
+    center, std = compute_robust_moments(obj_lab, min_std=min_std)
     center_p_ratio = np.random.uniform(-center_perturb, center_perturb, obj_ndim)
     center_p = center_p_ratio * std + center
     std_p_ratio = np.random.uniform(1.0 / (1 + stddev_perturb), 1.0 + stddev_perturb, obj_ndim)

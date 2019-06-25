@@ -19,6 +19,7 @@ import tensorflow as tf
 import scipy.ndimage as ndi
 from collections import defaultdict
 from pathlib import Path
+import SimpleITK as sitk
 
 import loss_metrics as metric_ops
 import utils.array_kits as arr_ops
@@ -60,6 +61,9 @@ def add_arguments(parser):
                        default="first",
                        choices=["first", "middle"],
                        required=False, help="Generate guide from which slice")
+    group.add_argument("--evaluator",
+                       type=str,
+                       choices=["Volume", "Slice", "NFVolume", "NFSlice"])
     group.add_argument("--eval_num",
                        type=int,
                        required=False, help="Number of cases for evaluation")
@@ -75,22 +79,30 @@ def add_arguments(parser):
 
 def get_eval_params(evaluator="Volume",
                     eval_steps=2500,
-                    largest=True,
-                    merge_tumor_to_liver=True,
+                    largest=False,
+                    merge_tumor_to_liver=False,
                     use_sg_reduce_fp=False,
                     primary_metric=None,
                     secondary_metric=None):
-    if evaluator not in ["Volume", "Slice"]:
+    if evaluator in ["Volume", "Slice"]:
+        return {
+            "evaluator": eval("Evaluate" + evaluator),
+            "eval_steps": eval_steps,
+            "eval_kwargs": {"merge_tumor_to_liver": merge_tumor_to_liver,
+                            "largest": largest,
+                            "use_sg_reduce_fp": use_sg_reduce_fp},
+            "primary_metric": primary_metric,
+            "secondary_metric": secondary_metric
+            }
+    elif evaluator in ["NFVolume", "NFSlice"]:
+        return {
+            "evaluator": eval("Evaluate" + evaluator),
+            "eval_steps": eval_steps,
+            "eval_kwargs": {"use_sg_reduce_fp": use_sg_reduce_fp},
+            "primary_metric": primary_metric
+        }
+    else:
         raise ValueError("Unsupported evaluator: {}. Must be [Volume, Slice]".format(evaluator))
-    return {
-        "evaluator": eval("Evaluate" + evaluator),
-        "eval_steps": eval_steps,
-        "eval_kwargs": {"merge_tumor_to_liver": merge_tumor_to_liver,
-                        "largest": largest,
-                        "use_sg_reduce_fp": use_sg_reduce_fp},
-        "primary_metric": primary_metric,
-        "secondary_metric": secondary_metric
-    }
 
 
 class EvaluateVolume(EvaluateBase):
@@ -115,8 +127,8 @@ class EvaluateVolume(EvaluateBase):
 
         self.img_reader = data_ops.ImageReader()
 
-        self.merge_tumor_to_liver = kwargs.get("merge_tumor_to_liver", True)
-        self.largest = kwargs.get("largest", True)
+        self.merge_tumor_to_liver = kwargs.get("merge_tumor_to_liver", False)
+        self.largest = kwargs.get("largest", False)
         self.use_sg_reduce_fp = kwargs.get("use_sg_reduce_fp", False)
         if self.merge_tumor_to_liver:
             tf.logging.info("Enable --> merge_tumor_to_liver")
@@ -226,7 +238,7 @@ class EvaluateVolume(EvaluateBase):
         self.save_metrics("metrics_3d.txt", self.model.model_dir)
         # Compute average metrics
         results = {key: np.mean(values) for key, values in self._metric_values.items()}
-        display_str = ""
+        display_str = "Average:: "
         for key, value in results.items():
             display_str += "{}: {:.3f} ".format(key, value)
         tf.logging.info(display_str)
@@ -293,7 +305,6 @@ class EvaluateVolume(EvaluateBase):
             logits3d = {cls: value[:-pad] if not cls.endswith("_rev") else value[pad:]
                         for cls, value in logits3d.items()}
             labels3d = {cls: value[:-pad] for cls, value in labels3d.items()}
-
         # For reversed volume
         keys = [x for x in logits3d.keys() if not x.endswith("_rev")]
         for key in keys:
@@ -487,8 +498,216 @@ def _compare(cur_result,
     return False
 
 
+class EvaluateNFVolume(EvaluateVolume):
+    """ Evaluate Estimator model by volume
+
+    This class is for neurofibroma segmentation.
+    """
+    def __init__(self, model, **kwargs):
+        _ = kwargs
+        empty_kwargs = {}
+        super(EvaluateNFVolume, self).__init__(model, **empty_kwargs)
+        self.img_reader = data_ops.ImageReader()
+        self._timer = Timer()
+        # It should only contain `NF`
+        # assert len(self.classes) == 1, "self.classes contains " + " ".join(self.classes)
+
+        import json
+        ds_file = Path(__file__).parent / ("data/NF/dataset_f%d_fs5.json" % self.params["args"].test_fold)
+        ds = json.load(ds_file.open())["test"]
+        self.ds = {x["PID"]: x for i, x in enumerate(ds)}
+
+    def evaluate_with_session(self, session=None, cases=None):
+        predicts = [x for x in self._predict_keys
+                    if x not in self.params["model_instances"][0].metrics_dict]
+        # TODO(ZJW): Remove metrics_eval
+        # predicts.extend(self.params["model_instances"][0].metrics_eval)
+        predict_gen = self.model.predict_with_session(session, predicts, yield_single_examples=True)
+        tf.logging.info("Begin evaluating 3D ...")
+        return self._evaluate(predict_gen, cases=cases, verbose=True)
+
+    def evaluate(self,
+                 input_fn,
+                 predict_keys=None,
+                 hooks=None,
+                 checkpoint_path=None,
+                 cases=None):
+        predict_gen = self.model.predict(input_fn, predict_keys, hooks, checkpoint_path,
+                                         yield_single_examples=True)
+        tf.logging.info("Begin evaluating ...")
+        return self._evaluate(predict_gen, cases=cases, verbose=True,
+                              save=self.params["args"].save_predict)
+
+    def _evaluate(self, predicts, cases=None, verbose=False, save=False):
+        # process a 3D image slice by slice or patch by patch
+        logits3d = defaultdict(list)
+        labels3d = defaultdict(list)
+        self.clear_metrics()
+
+        cur_case = None  # case name
+        cur_si = -1    # slice index
+
+        self._timer.reset()
+        self._timer.tic()
+        for predict in predicts:
+            new_case, new_si = predict["Names"].decode("utf-8").split("_")
+            new_case = int(new_case)
+            new_si = int(new_si)
+            cur_case = cur_case or new_case
+
+            if cur_case == new_case:
+                # Append batch to collections
+                for c, cls in enumerate(self.classes):
+                    if new_si != cur_si:
+                        logits3d[cls].append([np.squeeze(predict[cls + "Pred"], axis=-1)])
+                        labels3d[cls].append([predict["Labels_{}".format(c)]])
+                        cur_si = new_si
+                    else:
+                        logits3d[cls][-1].append(np.squeeze(predict[cls + "Pred"], axis=-1))
+                        labels3d[cls][-1].append(predict["Labels_{}".format(c)])
+            else:
+                result = self._evaluate_case(logits3d, labels3d, cur_case, 0, save=save)
+                self._timer.toc()
+                if verbose:
+                    log_str = "Evaluate-{} {}".format(self._timer.calls, cur_case)
+                    for key, value in result.items():
+                        log_str += " {}: {:.3f}".format(key, value)
+                    tf.logging.info(log_str + " ({:.3f} secs/case)".format(self._timer.average_time))
+                for c, cls in enumerate(self.classes):
+                    logits3d[cls].clear()
+                    labels3d[cls].clear()
+                    logits3d[cls].append([np.squeeze(predict[cls + "Pred"], axis=-1)])
+                    labels3d[cls].append([predict["Labels_{}".format(c)]])
+
+                if cases is not None and self._timer.calls >= cases:
+                    break
+
+                # Reset
+                cur_case = new_case
+                cur_si = new_si
+                self._timer.tic()
+
+        if cases is None or (self._timer.calls < cases):
+            # Final case
+            result = self._evaluate_case(logits3d, labels3d, cur_case, 0, save=save)
+            # result = self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox, save,
+            #                              bg_masks3d=bg_masks3d, cls_acc=cls_acc, cls_pos=cls_pos,
+            #                              cls_rec=cls_rec)
+            self._timer.toc()
+            if verbose:
+                log_str = "Evaluate-{} {}".format(self._timer.calls, cur_case)
+                for key, value in result.items():
+                    log_str += " {}: {:.3f}".format(key, value)
+                # log_str += " {}".format(list(bbox))
+                tf.logging.info(log_str + " ({:.3f} secs/case)".format(self._timer.average_time))
+        tf.logging.info("Evaluate all the dataset ({} cases) finished! ({:.3f} secs/case)"
+                        .format(self._timer.calls, self._timer.average_time))
+
+        self.save_metrics("metrics_3d.txt", self.model.model_dir)
+        # Compute average metrics
+        results = {key: np.mean(values) for key, values in self._metric_values.items()}
+        display_str = "Average:: "
+        for key, value in results.items():
+            display_str += "{}: {:.3f} ".format(key, value)
+        tf.logging.info(display_str)
+
+        return results
+
+    def _evaluate_case(self, logits3d, labels3d, cur_case, pad, bbox=None, save=False):
+        import math
+        _ = pad
+        _ = bbox
+        # Process a complete volume
+        ds = self.ds[cur_case]
+        half_height = self.params["args"].im_height // 2
+        split_num = math.ceil(ds["sz_y"] / half_height - 1)
+        m_logits3d = np.zeros((ds["sz_z"], ds["sz_y"], self.params["args"].im_width), dtype=np.uint8)
+        m_labels3d = np.zeros((ds["sz_z"], ds["sz_y"], self.params["args"].im_width), dtype=np.uint8)
+        for i, (logit_slice, label_slice) in enumerate(
+                zip(logits3d[self.classes[0]], labels3d[self.classes[0]])):
+            for j, (logit_patch, label_patch) in enumerate(zip(logit_slice, label_slice)):
+                if j < split_num - 1:
+                    m_logits3d[i, j * half_height:(j + 2) * half_height] = np.maximum(
+                        m_logits3d[i, j * half_height:(j + 2) * half_height], logit_patch)
+                    m_labels3d[i, j * half_height:(j + 2) * half_height] = np.maximum(
+                        m_labels3d[i, j * half_height:(j + 2) * half_height], label_patch)
+                else:
+                    m_logits3d[i, -2 * half_height:] = np.maximum(
+                        m_logits3d[i, -2 * half_height:], logit_patch)
+                    m_labels3d[i, -2 * half_height:] = np.maximum(
+                        m_labels3d[i, -2 * half_height:], label_patch)
+
+        # zoom to original size
+        scale = [1, 1, ds["sz_x"] / self.params["args"].im_width]
+        logits3d = ndi.zoom(m_logits3d, scale, order=0)
+        labels3d = ndi.zoom(m_labels3d, scale, order=0)
+        spacing = [ds["sp_z"], ds["sp_y"], ds["sp_x"]]
+
+        # Calculate 3D metrics
+        cur_pairs = {}
+        pairs = metric_ops.metric_3d(logits3d, labels3d, required=self.metrics_str, sampling=spacing)
+        for met, value in pairs.items():
+            cur_pairs["{}/{}".format(self.classes[0], met)] = value
+
+        self.append_metrics(cur_pairs)
+
+        if save:
+            case_name = "prediction-%03d.nii.gz" % cur_case
+            save_path = Path(self.model.model_dir) / "prediction"
+            save_path.mkdir(parents=True, exist_ok=True)
+            save_path = save_path / case_name
+
+            out = sitk.GetImageFromArray(logits3d)
+            out.SetSpacing(spacing[::-1])
+            sitk.WriteImage(out, str(save_path))
+            tf.logging.info("    ==> Save to {}"
+                            .format(str(save_path.relative_to(save_path.parent.parent.parent))))
+        return cur_pairs
+
+
+class EvaluateNFSlice(EvaluateSlice):
+    """ Evaluate Estimator model by slice """
+
+    def __init__(self, model, **kwargs):
+        super(EvaluateNFSlice, self).__init__(model, **kwargs)
+
+    @property
+    def classes(self):
+        return self.params["model_instances"][0].classes[1:]  # Remove background
+
+    def evaluate(self,
+                 input_fn,
+                 predict_keys=None,
+                 hooks=None,
+                 checkpoint_path=None,
+                 cases=None):
+        predicts = ["Names"]
+        tf.logging.info("Begin evaluating 2D ...")
+        predict_gen = self.model.predict(input_fn, predicts, hooks, checkpoint_path,
+                                         yield_single_examples=True)
+
+        self.clear_metrics()
+        for i, pred_ in enumerate(predict_gen):
+            print("\rEval {} examples ...".format(i + 1), end="")
+            self.append_metrics(pred_)
+        print()
+        self.save_metrics("metrics_2d.txt", self.model.model_dir)
+
+        results = {key: float(np.mean(values)) for key, values in self._metric_values.items()
+                   if key not in ["Names"]}
+        display_str = ""
+        for key, value in results.items():
+            display_str += "{}: {:.3f} ".format(key, value)
+        tf.logging.info(display_str)
+
+        return results
+
+    def compare(self, *args_, **kwargs):
+        return _compare(*args_, **kwargs)
+
+
 class TumorManager(object):
-    def __init__(self, tumor_info):
+    def __init__(self, tumor_info, min_std):
         self._tumor_info = tumor_info
         self._name = None
         self._bbox = None
@@ -499,6 +718,7 @@ class TumorManager(object):
         self.pred = None
         self.backup = defaultdict(list)
         self.debug = False
+        self.min_std = min_std
 
     @property
     def info(self):
@@ -692,7 +912,7 @@ class TumorManager(object):
                 predict[slicer] -= res_obj_slicer
                 continue
             # 4. Compute moments. Save moments of tumors for next slice
-            ctr, std = arr_ops.compute_robust_moments(res_obj_slicer, index="ij")
+            ctr, std = arr_ops.compute_robust_moments(res_obj_slicer, index="ij", min_std=self.min_std)
             ctr[0] += slicer[0].start
             ctr[1] += slicer[1].start
             self.append_backup(ctr, std, self.zi[found])

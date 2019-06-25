@@ -14,7 +14,7 @@
 #
 # =================================================================================
 
-from data_kits import build_lits_liver, build_body
+from data_kits import build_lits_liver
 
 
 def main():
@@ -67,8 +67,50 @@ def main():
     #                                               folds_file="k_folds.txt", guide=None, hist_scale="total")
 
     #                                               folds_file="k_folds.txt")
-    build_body.convert_to_liver("trainval", seed=1234)
+
+
+def build_eval_guide(tfrecord):
+    import tensorflow as tf
+    from utils import array_kits
+    import numpy as np
+    import pickle
+    from pathlib import Path
+    dataset = tf.data.TFRecordDataset(tfrecord)
+
+    def parse_fn(example):
+        features = {
+            "image/name": tf.FixedLenFeature([], tf.string),
+            "segmentation/encoded": tf.FixedLenFeature([], tf.string),
+            "segmentation/shape": tf.FixedLenFeature([3], tf.int64),
+        }
+        features = tf.parse_single_example(example, features=features)
+
+        label = tf.decode_raw(features["segmentation/encoded"], tf.uint8, name="DecodeMask")
+        label = tf.reshape(label, features["segmentation/shape"], name="ReshapeMask")
+        label = tf.cast(label, tf.int32)
+
+        return label, features["image/name"]
+
+    dataset = dataset.map(parse_fn).make_initializable_iterator()
+    labels, names = dataset.get_next()
+
+    all_sp_guides = []
+    with tf.Session() as sess:
+        sess.run(dataset.initializer)
+        while True:
+            try:
+                labels_val, name = sess.run([labels, names])
+                sp_guide = array_kits.get_moments_multi_objs(labels_val, 2, partial=True, partial_slice="middle")
+                print(name, sp_guide.shape)
+                all_sp_guides.append(sp_guide.astype(np.float32))
+            except tf.errors.OutOfRangeError:
+                break
+
+    save_path = Path(__file__).parent / "data/LiTS/test-3-of-5-mmts.pkl"
+    with save_path.open("wb") as f:
+        pickle.dump(all_sp_guides, f, pickle.HIGHEST_PROTOCOL)
 
 
 if __name__ == "__main__":
     main()
+    # build_eval_guide("/data/jarvis/TF_1_13_MedicalImageSegmentation/data/LiTS/records/trainval-bbox-3D-3-of-5.tfrecord")

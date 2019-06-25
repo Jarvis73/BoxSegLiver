@@ -193,7 +193,7 @@ class CustomEstimator(object):
         # Model directory
         self._model_dir = self._config.model_dir
         self._session_config = self._config.session_config
-        logging.info('Using config: %s', str(vars(self._config)))
+        logging.debug('Using config: %s', str(vars(self._config)))
 
         # None for local mode
         self._device_fn = (
@@ -354,7 +354,7 @@ class CustomEstimator(object):
                            for key, value in features.items()}
             labels_ph = array_ops.placeholder(labels.dtype, labels.shape, name="labels")
             feed_guide_hook = FeedGuideHook(features_ph, labels_ph, features, labels,
-                                            self.model_dir)
+                                            self.model_dir, self._params["args"])
 
             estimator_spec = self._call_model_fn(
                 features_ph, labels_ph, model_fn_lib.ModeKeys.PREDICT, self.config)
@@ -399,9 +399,11 @@ class CustomEstimator(object):
         pred_feed_dict = self._params["model_instances"][0].get_eval_feed_dict()
         if self._train_with_eval:
             pred_feed_dict = _add_key_value(pred_feed_dict, self.handler, self.dataset_handle_hook.eval_handle)
+
         try:
             # Initialize evaluation iterator
             session.run(self.eval_iterator.initializer)
+
             counter = 0
             while True:
                 if steps and counter >= steps:
@@ -769,7 +771,7 @@ class CustomEstimator(object):
             self.dataset_handle_hook = IteratorStringHandleHook(self.train_iterator,
                                                                 self.eval_iterator)
             worker_hooks.append(self.dataset_handle_hook)
-            self._p = estimator_spec.predictions
+            self._predict_keys = estimator_spec.predictions
 
         if save_best_ckpt:
             EvaluatorCls = self._params.get("evaluator", None)

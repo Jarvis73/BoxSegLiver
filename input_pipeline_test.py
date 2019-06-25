@@ -52,9 +52,6 @@ def add_arguments(parser):
                        default="first",
                        choices=["first", "middle"],
                        required=False, help="Generate guide from which slice")
-    group.add_argument("--cls_branch",
-                       action="store_true",
-                       required=False, help="Classify branch")
     group.add_argument("--eval_skip_num",
                        type=int,
                        default=0,
