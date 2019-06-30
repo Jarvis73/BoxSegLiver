@@ -136,7 +136,7 @@ def check_args(args, parser):
         raise ValueError("When using spatial guide, im_channel should be at least 2, got {}"
                          .format(args.im_channel))
 
-    if args.use_fewer_guide:
+    if hasattr(args, "use_fewer_guide") and args.use_fewer_guide:
         args.batch_size = 1
         logging.info("Using fewer guides will force batch_size = 1.")
 
