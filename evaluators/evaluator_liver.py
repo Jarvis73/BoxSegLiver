@@ -27,16 +27,14 @@ import utils.array_kits as arr_ops
 from evaluators.evaluator_base import EvaluateBase
 from utils import timer
 
+ModeKeys = tfes.estimator.ModeKeys
+
 
 def add_arguments(parser):
     group = parser.add_argument_group(title="Evaluation Arguments")
     group.add_argument("--save_best",
                        action="store_false",
                        required=False, help="Save checkpoint with best results")
-    group.add_argument("--eval_steps",
-                       type=int,
-                       default=5000,
-                       required=False, help="Evaluate pre several steps (default: %(default)d)")
     group.add_argument("--primary_metric",
                        type=str,
                        required=False, help="Primary metric for evaluation. Typically it has format "
@@ -74,7 +72,6 @@ def add_arguments(parser):
                        action="store_true",
                        required=False, help="Evaluate when training in 2D slices or 3D volume."
                                             "Default in 2D slices")
-    group.add_argument("--eval_epoch", action="store_true")
 
 
 def get_evaluator(evaluator, estimator=None, model_dir=None, params=None,
@@ -104,7 +101,7 @@ class EvaluateVolume(EvaluateBase):
                  merge_tumor_to_liver=True, largest=True, use_sg_reduce_fp=False):
         self.estimator = estimator
         self.model_dir = model_dir
-        self.params = params
+        self.params = params or estimator.params
         self._timer = timer.Timer()
         meta_file = Path(__file__).parent.parent / "DataLoader/Liver/prepare/meta.json"
         with meta_file.open() as f:
@@ -229,12 +226,33 @@ class EvaluateVolume(EvaluateBase):
 
         return results
 
-    def run_with_session(self, session=None, cases=None):
-        predicts = ["labels", "names", "pads", "bboxes"] + \
-                   list(self.params["model_instances"][0].predictions)
+    # def run_with_session(self, session=None, cases=None):
+    #     predicts = ["labels", "names", "pads", "bboxes"] + \
+    #                list(self.params["model_instances"][0].predictions)
+    #     predict_gen = self.estimator.evaluate_online(session, predicts, yield_single_examples=False)
+    #     tf.logging.info("Begin evaluating 3D ...")
+    #     return self._evaluate(predict_gen, cases=cases, verbose=2)
+
+    def run_with_session(self, session=None):
+        predicts = list(self.params["model_instances"][0].metrics_dict)
+        tf.logging.info("Begin evaluating at epoch end ...")
         predict_gen = self.estimator.evaluate_online(session, predicts, yield_single_examples=False)
-        tf.logging.info("Begin evaluating 3D ...")
-        return self._evaluate(predict_gen, cases=cases, verbose=2)
+        accumulator = defaultdict(list)
+
+        self._timer.reset()
+        self._timer.tic()
+        for x in predict_gen:
+            self._timer.toc()
+            for k, v in x.items():
+                accumulator[k].append(v)
+            self._timer.tic()
+
+        display_str = "----Evaluate {} batches ".format(self._timer.calls)
+        results = {key: np.mean(values) for key, values in accumulator.items()}
+        for key, value in results.items():
+            display_str += "- {}: {:.3f} ".format(key, value)
+        tf.logging.info(display_str + "({:.3f} secs)".format(self._timer.total_time))
+        return results
 
     # def evaluate(self,
     #              input_fn,
@@ -275,7 +293,7 @@ class EvaluateVolume(EvaluateBase):
                 model = self.params["model"](args)
                 self.params["model_instances"] = [model]
                 # build model
-                model(model_inputs, tfes.estimator.ModeKeys.EVAL, *model_args, **model_kwargs)
+                model(model_inputs, ModeKeys.EVAL, *model_args, **model_kwargs)
                 saver = tf.train.Saver()
                 sess = tf.Session()
                 # load weights
@@ -283,7 +301,7 @@ class EvaluateVolume(EvaluateBase):
                 saver.restore(sess, checkpoint_path)
 
                 predictions = model.predictions
-                for features, labels in input_fn(tfes.estimator.ModeKeys.EVAL, self.params):
+                for features, labels in input_fn(ModeKeys.EVAL, self.params):
                     preds_eval = sess.run(predictions, {images: features.pop("images")})
                     preds_eval.update(features)
                     preds_eval["labels"] = labels

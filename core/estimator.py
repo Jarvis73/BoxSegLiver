@@ -30,12 +30,14 @@ from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import random_seed
 from tensorflow.python.framework import errors_impl
 from tensorflow.python.platform import tf_logging as logging
+from tensorflow.python.summary import summary
 from tensorflow.python.training import training
 from tensorflow.python.training import training_util
 from tensorflow.python.training import warm_starting_util
 from tensorflow.python.training import checkpoint_management
 from tensorflow.python.training import distribute as distribute_lib
 from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import metrics
 from tensorflow.python.util import nest
 from tensorflow.python.util import function_utils
 from tensorflow_estimator.python.estimator import estimator as estimator_lib
@@ -708,6 +710,21 @@ class CustomEstimator(object):
             logging.info('Warm-starting with WarmStartSettings: %s' %
                          (self._warm_start_settings,))
             warm_starting_util.warm_start(*self._warm_start_settings)
+        # Check if the user created a loss summary, and add one if they didn't.
+        # We assume here that the summary is called 'loss'. If it is not, we will
+        # make another one with the name 'loss' to ensure it shows up in the right
+        # graph in TensorBoard.
+        if not any([x.op.name == 'Losses/total_loss'
+                    for x in ops.get_collection(ops.GraphKeys.SUMMARIES)]):
+            # Compute total loss moving average
+            value, update_op = metrics.mean(estimator_spec.loss, name="Losses/total_loss_mean")
+            ops.add_to_collection(CustomKeys.LOSS_MEAN, value)
+            g = ops.get_default_graph()
+            local_init_ops = [x.initializer for x in g.get_collection(ops.GraphKeys.METRIC_VARIABLES)
+                              if "total_loss" in x.op.name]
+            summary.scalar(self._params["args"].tag + '/Losses/total_loss', value)
+            worker_hooks.append(hooks_lib.AverageTensorHook(update_op, local_init_ops,
+                                                            every_n_steps=self._config.save_summary_steps))
         worker_hooks.extend(hooks)
         worker_hooks.append(training.NanTensorHook(estimator_spec.loss))
         if self._config.log_step_count_steps is not None:

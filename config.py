@@ -21,6 +21,8 @@ from tensorflow.python.platform import tf_logging as logging
 
 class CustomKeys(object):
     LEARNING_RATE = "learning_rate"
+    LOSS_MEAN = "total_loss_mean"
+    LR_UPDATE_OPS = "lr_update_ops"
 
 
 def _try_to_find_ckpt(path, args):

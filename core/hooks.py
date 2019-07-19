@@ -84,8 +84,8 @@ class EvaluatorHook(session_run_hook.SessionRunHook):
                  checkpoint_dir=None,
                  compare_fn=None,
                  tag=None,
-                 save_secs=None,
-                 save_steps=None,
+                 eval_n_secs=None,
+                 eval_n_steps=None,
                  saver=None,
                  checkpoint_basename="best_model.ckpt",
                  save_best=False,
@@ -97,12 +97,12 @@ class EvaluatorHook(session_run_hook.SessionRunHook):
           evaluator: for evaluate model
           checkpoint_dir: `str`, base directory for the checkpoint files.
           compare_fn: `function`, compare function for the better results
-          save_secs: `int`, save every N secs.
-          save_steps: `int`, save every N steps.
+          eval_n_secs: `int`, save every N secs.
+          eval_n_steps: `int`, save every N steps.
           saver: `Saver` object, used for saving.
           checkpoint_basename: `str`, base name for the checkpoint files.
           save_best: `bool`, save best ckpt or not
-          save_interval: `int`: 0 for False, positive for True
+          save_interval: `int`: 0 for False, positive for True. It is work on if save_best is True.
 
         Raises:
           ValueError: One of `save_steps` or `save_secs` should be set.
@@ -116,8 +116,8 @@ class EvaluatorHook(session_run_hook.SessionRunHook):
         self._compare_fn = compare_fn
         self._saver = saver
         self._checkpoint_dir = checkpoint_dir
-        self._timer = basic_session_run_hooks.SecondOrStepTimer(every_secs=save_secs,
-                                                                every_steps=save_steps)
+        self._timer = basic_session_run_hooks.SecondOrStepTimer(every_secs=eval_n_secs,
+                                                                every_steps=eval_n_steps)
         self._steps_per_run = 1
         self._save_best = save_best
         self._save_interval = save_interval
@@ -183,7 +183,7 @@ class EvaluatorHook(session_run_hook.SessionRunHook):
 
         self._summary(step, results)
         if self._save_best:
-            return (self._save_and_keep_per_steps(session, step)
+            return (self._save_interval_best(session, step)
                     if self._save_interval else self._save(session, step))
         else:
             return False
@@ -205,8 +205,8 @@ class EvaluatorHook(session_run_hook.SessionRunHook):
         should_stop = False
         return should_stop
 
-    def _save_and_keep_per_steps(self, session, step):
-        """Saves the better checkpoint in each step interval, returns should_stop."""
+    def _save_interval_best(self, session, step):
+        """Saves the better checkpoint in each interval, returns should_stop."""
         if not self._need_save:
             return False
         self._need_save = False
@@ -484,6 +484,150 @@ class LoggingTensorWithSpeedFormatterHook(basic_session_run_hooks.LoggingTensorH
         elapsed_secs, _ = self._timer.update_last_triggered_step(self._iter_count)
         if elapsed_secs is not None:
             speed = (self._iter_count - last_step) / elapsed_secs
-            logging.info(self._formatter(tensor_values) + "({:.3g} it/s)".format(speed))
+            logging.info(self._formatter(tensor_values) + " ({:.3g} it/s)".format(speed))
         else:
             logging.info(self._formatter(tensor_values))
+
+
+class AverageTensorHook(session_run_hook.SessionRunHook):
+    def __init__(self,
+                 update_op,
+                 local_init_ops,
+                 every_n_steps=200,
+                 every_n_secs=None):
+        self.update_op = update_op
+        self.local_init_ops = local_init_ops
+        self._timer = basic_session_run_hooks.SecondOrStepTimer(every_steps=every_n_steps,
+                                                                every_secs=every_n_secs)
+        self._steps_per_run = 1
+
+    def _set_steps_per_run(self, steps_per_run):
+        self._steps_per_run = steps_per_run
+
+    def begin(self):
+        self._global_step_tensor = training_util._get_or_create_global_step_read()
+        if self._global_step_tensor is None:
+            raise RuntimeError(
+                "Global step should be created to use StepCounterHook.")
+
+    def before_run(self, run_context):
+        return session_run_hook.SessionRunArgs([self.update_op, self._global_step_tensor])
+
+    def after_run(self, run_context, run_values):
+        lr, stale_global_step = run_values.results
+        if self._timer.should_trigger_for_step(
+                stale_global_step + self._steps_per_run):
+            # get the real value after train op.
+            global_step = run_context.session.run(self._global_step_tensor)
+            if self._timer.should_trigger_for_step(global_step):
+                self._timer.update_last_triggered_step(global_step)
+                run_context.session.run(self.local_init_ops)
+
+
+class ReduceLROnPlateauHook(session_run_hook.SessionRunHook):
+    def __init__(self,
+                 monitor='total_loss',
+                 lr_patience=10,
+                 tr_patience=50,
+                 mode='min',
+                 min_delta=0.0001,
+                 cooldown=0,
+                 moving_average=0.95,
+                 every_n_steps=200,
+                 every_n_secs=None):
+        self.monitor = monitor
+        self.lr_patience = lr_patience    # wait number of epochs
+        self.tr_patience = tr_patience  # wait number of epochs
+        self.mode = mode
+        self.min_delta = min_delta
+        self.cooldown = cooldown
+        self.cooldown_counter = 0  # Cooldown counter.
+        self.lr_wait = 0
+        self.tr_wait = 0
+        self.best = 0
+        self.monitor_op = None
+        self.alpha = moving_average
+        self.total_loss_MA = None
+        self.lr = None
+        self._reset()
+
+        self._timer = basic_session_run_hooks.SecondOrStepTimer(every_steps=every_n_steps,
+                                                                every_secs=every_n_secs)
+        self._steps_per_run = 1
+
+    def _set_steps_per_run(self, steps_per_run):
+        self._steps_per_run = steps_per_run
+
+    def begin(self):
+        self._global_step_tensor = training_util._get_or_create_global_step_read()
+        if self._global_step_tensor is None:
+            raise RuntimeError(
+                "Global step should be created to use StepCounterHook.")
+
+    def after_create_session(self, session, coord):
+        if self.monitor == "total_loss":
+            self.monitor = ops.get_collection(CustomKeys.LOSS_MEAN)[0]
+        self.lr = ops.get_collection(CustomKeys.LEARNING_RATE)[0]
+        self.update_op = ops.get_collection(CustomKeys.LR_UPDATE_OPS)[0]
+
+    def before_run(self, run_context):
+        return session_run_hook.SessionRunArgs([self.lr, self.monitor, self._global_step_tensor])
+
+    def after_run(self, run_context, run_values):
+        old_lr, current, stale_global_step = run_values.results
+        if self._timer.should_trigger_for_step(
+                stale_global_step + self._steps_per_run):
+            # get the real value after train op.
+            global_step = run_context.session.run(self._global_step_tensor)
+            if self._timer.should_trigger_for_step(global_step):
+                self._timer.update_last_triggered_step(global_step)
+                self.try_update_lr(run_context.session, current)
+                if self.check_stop(old_lr):
+                    run_context.request_stop()
+
+    def try_update_lr(self, session, current):
+        if self.total_loss_MA is None:
+            self.total_loss_MA = current
+        else:
+            self.total_loss_MA = self.alpha * self.total_loss_MA + (1 - self.alpha) * current
+
+        if self.in_cooldown():
+            self.cooldown_counter -= 1
+            self.lr_wait = 0
+
+        if self.monitor_op(self.total_loss_MA, self.best):
+            self.best = self.total_loss_MA
+            self.lr_wait = 0
+            self.tr_wait = 0
+        elif not self.in_cooldown():
+            self.lr_wait += 1
+            self.tr_wait += 1
+            if self.lr_wait > self.lr_patience:
+                logging.info("*** Decay learning rate. Total loss MA: {:.3g}".format(self.total_loss_MA))
+                session.run(self.update_op)
+                self.cooldown_counter = self.cooldown
+                self.lr_wait = 0
+
+    def check_stop(self, old_lr):
+        if old_lr > 1e-6:
+            return False
+        if self.tr_wait <= self.tr_patience:
+            return False
+        return True
+
+    def _reset(self):
+        """Resets wait counter and cooldown counter."""
+        if self.mode not in ['min', 'max']:
+            raise ValueError('Learning Rate Plateau Reducing mode %s is unknown, '
+                             'fallback to auto mode.', self.mode)
+        if self.mode == 'min':
+            self.monitor_op = lambda a, b: np.less(a, b - self.min_delta)
+            self.best = np.Inf
+        else:
+            self.monitor_op = lambda a, b: np.greater(a, b + self.min_delta)
+            self.best = -np.Inf
+        self.cooldown_counter = 0
+        self.wait = 0
+
+    def in_cooldown(self):
+        return self.cooldown_counter > 0

@@ -4,8 +4,8 @@ Medical image segmentation using deep learning methods
 
 ## Library
 ```bash
-conda create -n xxx python=3.6 tensorflow-gpu=1.13 scipy matplotlib pandas pathlib traits traitsui scikit-image
-conda install -c conda-forge pyyaml nibabel
+conda create -n xxx python=3.6 tensorflow-gpu=1.13 scipy matplotlib pandas pathlib traits traitsui scikit-image tqdm
+conda install -c conda-forge pyyaml nibabel opencv
 pip install medpy
 ```
 

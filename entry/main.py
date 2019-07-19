@@ -30,7 +30,7 @@ from core import solver
 from core import models
 from core import estimator as estimator_lib
 from core import hooks
-import input_pipeline
+from DataLoader.Liver import input_pipeline
 from evaluators import evaluator_liver
 
 ModeKeys = tfes.estimator.ModeKeys
@@ -102,16 +102,16 @@ def main():
         all_reduce_alg=args.all_reduce_alg,
         session_config=session_config)
 
-    save_summary_steps = 200
+    save_summary_steps = 500
     if args.mode == ModeKeys.TRAIN:
-        log_step_count_steps = 500
+        log_step_count_steps = save_summary_steps
         run_config = tfes.estimator.RunConfig(
             train_distribute=distribution_strategy,
             tf_random_seed=TF_RANDOM_SEED,
             save_summary_steps=save_summary_steps,
             save_checkpoints_steps=5000,
             session_config=session_config,
-            keep_checkpoint_max=1,
+            keep_checkpoint_max=2,
             log_step_count_steps=log_step_count_steps,
         )
 
@@ -124,22 +124,32 @@ def main():
                                                slow_start_step=args.slow_start_step,
                                                slow_start_learning_rate=args.slow_start_lr))
 
-        if args.eval_epoch:
-            params["double_dataloader_modes"] = [ModeKeys.TRAIN, "eval_while_train"]
+        if args.eval_per_epoch:
+            params["double_dataloader_modes"] = [ModeKeys.TRAIN, "eval_online"]
 
         estimator = estimator_lib.CustomEstimator(models.model_fn, args.model_dir, run_config, params,
                                                   args.warm_start_from)
-        train_hooks = []
-        if args.eval_epoch:
+        train_hooks = [hooks.LogLearningRateHook(tag=args.tag,
+                                                 every_n_steps=log_step_count_steps,
+                                                 output_dir=args.model_dir)]
+        if args.learning_policy == "plateau":
+            lr_hook = hooks.ReduceLROnPlateauHook(lr_patience=30,
+                                                  tr_patience=50,
+                                                  min_delta=1e-5,
+                                                  every_n_steps=args.batches_per_epoch)
+            train_hooks.append(lr_hook)
+
+        if args.eval_per_epoch:
             evaluator_lib = eval("evaluator_{}".format(subcommand))
             evaluator = evaluator_lib.get_evaluator(args.evaluator, estimator=estimator)
             eval_hook = hooks.EvaluatorHook(evaluator,
                                             checkpoint_dir=estimator.model_dir,
                                             compare_fn=functools.partial(evaluator.compare,
-                                                                         args.primary_metric,
-                                                                         args.secondary_metric),
+                                                                         primary_metric=args.primary_metric,
+                                                                         secondary_metric=args.secondary_metric),
                                             tag=args.tag,
-                                            save_steps=args.eval_steps)
+                                            eval_n_steps=args.batches_per_epoch,
+                                            save_best=True)
             train_hooks.append(eval_hook)
 
         steps, max_steps = ((args.num_of_steps, None)

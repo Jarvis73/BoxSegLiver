@@ -14,6 +14,7 @@
 #
 # =================================================================================
 
+import collections
 import json
 # noinspection PyUnresolvedReferences
 import pprint
@@ -24,7 +25,13 @@ import nibabel as nib
 import numpy as np
 import scipy.ndimage as ndi
 
+from DataLoader.Liver import nii_kits
 from utils import array_kits
+
+GRAY_MIN = -200
+GRAY_MAX = 250
+IM_SCALE = 128
+LB_SCALE = 64
 
 
 def check_dataset(file_path):
@@ -49,22 +56,6 @@ def check_dataset(file_path):
             print(" | False")
 
 
-def read_nii(file_name, out_dtype=np.int16, special=False):
-    nib_vol = nib.load(str(file_name))
-    vh = nib_vol.header
-    affine = vh.get_best_affine()
-    data = nib_vol.get_fdata().astype(out_dtype).transpose(2, 1, 0)
-    if special:
-        data = np.flip(data, axis=2)
-    if affine[0, 0] > 0:                # Increase x from Right to Left
-        data = np.flip(data, axis=2)
-    if affine[1, 1] > 0:                # Increase y from Anterior to Posterior
-        data = np.flip(data, axis=1)
-    if affine[2, 2] < 0:                # Increase z from Interior to Superior
-        data = np.flip(data, axis=0)
-    return vh, data
-
-
 def nii_3d_to_png(in_path, out_path):
     """ Livers in volumes 28-47 are in anatomical Left(should be Right).
         Livers in labels  28-52 are in anatomical Left(should be Right).
@@ -85,12 +76,12 @@ def nii_3d_to_png(in_path, out_path):
         print("{:03d} {:47s}".format(i, str(vol_case)))
         dst_dir = dst_path / vol_case.stem
 
-        vh, volume = read_nii(vol_case, out_dtype=np.int16,
-                              special=True if 28 <= int(vol_case.stem.split("-")[-1]) < 48 else False)
-        volume = ((np.clip(volume, -200, 250) + 200) * 128).astype(np.uint16)
+        vh, volume = nii_kits.read_nii(vol_case, out_dtype=np.int16,
+                                       special=True if 28 <= int(vol_case.stem.split("-")[-1]) < 48 else False)
+        volume = ((np.clip(volume, GRAY_MIN, GRAY_MAX) - GRAY_MIN) * IM_SCALE).astype(np.uint16)
         lab_case = vol_case.parent / vol_case.name.replace("volume", "segmentation")
-        _, labels = read_nii(lab_case, out_dtype=np.uint8,
-                             special=True if 28 <= int(vol_case.stem.split("-")[-1]) < 52 else False)
+        _, labels = nii_kits.read_nii(lab_case, out_dtype=np.uint8,
+                                      special=True if 28 <= int(vol_case.stem.split("-")[-1]) < 52 else False)
         assert volume.shape == labels.shape, "Vol{} vs Lab{}".format(volume.shape, labels.shape)
         # print(vh)
 
@@ -156,7 +147,7 @@ def nii_3d_to_png(in_path, out_path):
         all_meta_data.append(meta_data)
 
         dst_dir.mkdir(parents=True, exist_ok=True)
-        labels = labels * 64
+        labels = labels * LB_SCALE
         for j, (img, lab) in enumerate(zip(volume, labels)):
             out_img_file = dst_dir / "{:03d}_im.png".format(j)
             out_img = sitk.GetImageFromArray(img)
@@ -167,6 +158,124 @@ def nii_3d_to_png(in_path, out_path):
 
     with json_file.open("w") as f:
         json.dump(all_meta_data, f)
+
+
+def dump_manual_features_for_train(in_path, out_path, out_name="feat.npy", features=("hist",), **kwargs):
+    """
+
+    Parameters
+    ----------
+    in_path: str
+        data directory
+    out_path: str
+        npy/npz directory
+    out_name: str
+        output file name, npy format
+    features: tuple
+        list of features
+    kwargs: dict
+        bins: int, in `hist`, number of bins of histogram, default 100
+        xrng: tuple, in `hist`, (x_min, x_max), default (GRAY_MIN, GRAY_MAX)
+
+    Returns
+    -------
+
+    """
+    src_path = Path(in_path)
+    dst_path = Path(out_path)
+    dst_path.mkdir(parents=True, exist_ok=True)
+    pos = out_name.find(".")
+    dst_file = str(dst_path / (out_name[:pos] + "_%03d" + out_name[pos:]))
+
+    for i, vol_case in enumerate(sorted(src_path.glob("volume-*.nii"),
+                                        key=lambda x: int(str(x).split(".")[0].split("-")[-1]))):
+        PID = int(vol_case.stem.split("-")[-1])
+        print("{:03d} {:47s}".format(i, str(vol_case)))
+
+        vh, volume = nii_kits.read_nii(vol_case, out_dtype=np.int16,
+                                       special=True if 28 <= int(vol_case.stem.split("-")[-1]) < 48 else False)
+        volume = (np.clip(volume, -200, 250) + 200).astype(np.uint16)
+        lab_case = vol_case.parent / vol_case.name.replace("volume", "segmentation")
+        _, labels = nii_kits.read_nii(lab_case, out_dtype=np.uint8,
+                                      special=True if 28 <= int(vol_case.stem.split("-")[-1]) < 52 else False)
+        assert volume.shape == labels.shape, "Vol{} vs Lab{}".format(volume.shape, labels.shape)
+
+        all_features = {}
+        if "hist" in features:
+            bins = kwargs.get("bins", 100)
+            xrng = kwargs.get("xrng", (GRAY_MIN, GRAY_MAX))
+            slice_hists = np.empty((volume.shape[0], bins * 2))
+            for k in range(volume.shape[0]):
+                val1, _ = np.histogram(volume[k][labels[k] >= 1], bins=bins, range=xrng, density=True)
+                val2, _ = np.histogram(volume[k][labels[k] == 2], bins=bins, range=xrng, density=True)
+                # Convert float64 to float32
+                slice_hists[k, :bins] = np.nan_to_num(val1.astype(np.float32))
+                slice_hists[k, bins:] = np.nan_to_num(val2.astype(np.float32))
+            all_features["hist"] = slice_hists
+        np.save(dst_file % PID, all_features)
+
+
+def dump_manual_features_for_eval(in_path, out_path,
+                                  out_name="feat-guide.npy",
+                                  guide="middle",
+                                  features=("hist",),
+                                  **kwargs):
+    """ Generate based on `guides`
+
+    Parameters
+    ----------
+    in_path: str
+        npy directory
+    out_path: str
+        npy directory
+    out_name: str
+        output file name, npy format
+    guide: str
+        choice which slice as the guide of a tumor, valid values: ["first", "middle"]
+    features: tuple
+        list of features
+    kwargs: dict
+        bins: int, in `hist`, number of bins of histogram, default 100
+        xrng: tuple, in `hist`, (x_min, x_max), default (GRAY_MIN, GRAY_MAX)
+
+    Returns
+    -------
+
+    """
+    src_path = Path(in_path)
+    dst_path = Path(out_path)
+    dst_path.mkdir(parents=True, exist_ok=True)
+    pos = out_name.find(".")
+    dst_file = str(dst_path / (out_name[:pos] + "_%03d" + out_name[pos:]))
+
+    for i, vol_case in enumerate(sorted(src_path.glob("volume-*.nii"),
+                                        key=lambda x: int(str(x).split(".")[0].split("-")[-1]))):
+        PID = int(vol_case.stem.split("-")[-1])
+        print("{:03d} {:47s}".format(i, str(vol_case)))
+
+        vh, volume = nii_kits.read_nii(vol_case, out_dtype=np.int16,
+                                       special=True if 28 <= int(vol_case.stem.split("-")[-1]) < 48 else False)
+        volume = (np.clip(volume, -200, 250) + 200).astype(np.uint16)
+        lab_case = vol_case.parent / vol_case.name.replace("volume", "segmentation")
+        _, labels = nii_kits.read_nii(lab_case, out_dtype=np.uint8,
+                                      special=True if 28 <= int(vol_case.stem.split("-")[-1]) < 52 else False)
+        assert volume.shape == labels.shape, "Vol{} vs Lab{}".format(volume.shape, labels.shape)
+
+        tumor_labels = array_kits.get_guide_image(labels, obj_val=2, guide=guide, tile_guide=True)
+
+        all_features = {}
+        if "hist" in features:
+            bins = kwargs.get("bins", 100)
+            xrng = kwargs.get("xrng", (GRAY_MIN, GRAY_MAX))
+            slice_hists = np.empty((volume.shape[0], bins * 2))
+            for k in range(volume.shape[0]):
+                val1, _ = np.histogram(volume[k][labels[k] >= 1], bins=bins, range=xrng, density=True)
+                val2, _ = np.histogram(volume[k][tumor_labels[k] == 1], bins=bins, range=xrng, density=True)
+                # Convert float64 to float32
+                slice_hists[k, :bins] = np.nan_to_num(val1.astype(np.float32))
+                slice_hists[k, bins:] = np.nan_to_num(val2.astype(np.float32))
+            all_features["hist"] = slice_hists
+        np.save(dst_file % PID, all_features)
 
 
 if __name__ == "__main__":

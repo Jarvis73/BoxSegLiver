@@ -410,6 +410,16 @@ def create_gaussian_distribution(shape, center, stddev):
     return np.clip(d, 0, 1).astype(np.float32)
 
 
+def create_gaussian_distribution_v2(shape, center, stddev):
+    center = np.asarray(center, np.float32)
+    stddev = np.asarray(stddev, np.float32)
+    coords = [np.arange(0, s) for s in shape]
+    coords = np.stack(np.meshgrid(*coords, indexing="ij"), axis=-1)
+    normalizer = 2 * (stddev * stddev)
+    d = np.exp(-np.sum((coords - center) ** 2 / normalizer, axis=-1))
+    return d.astype(np.float32)
+
+
 def get_gd_image_single_obj(labels, center_perturb=0.2, stddev_perturb=0.4, blank_prob=0,
                             partial=False, partial_slice="first", only_moments=False, min_std=5.0):
     """

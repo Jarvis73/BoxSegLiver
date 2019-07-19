@@ -22,6 +22,7 @@ from pathlib import Path
 from tensorflow.python import pywrap_tensorflow as pt
 
 from NetworksV2.UNet import UNet
+from core import hooks
 
 ModeKeys = tfes.estimator.ModeKeys
 
@@ -73,6 +74,8 @@ def add_arguments(parser):
     group.add_argument("--without_norm",
                        action="store_true",
                        required=False, help="Conv without batch normalization")
+    group.add_argument("--batches_per_epoch", type=int, default=2000, help="Number of batches per epoch")
+    group.add_argument("--eval_per_epoch", action="store_true")
 
 
 def get_model_params(args, build_metrics=False, build_summaries=False):
@@ -128,7 +131,7 @@ def init_partial_model(model, args):
     return init_fn
 
 
-def model_fn(features, labels, mode, params):
+def model_fn(features, labels, mode, params, config):
     features = copy.copy(features)
     # Add graph nodes for images and labels
     images = tf.identity(features.pop("images"), name="Images")
@@ -163,7 +166,7 @@ def model_fn(features, labels, mode, params):
         train_op = solver(loss, *solver_args, **solver_kwargs)
 
     # TODO-0: Check ModeKeys.PREDICT
-    if args.eval_epoch or mode == ModeKeys.EVAL:
+    if args.eval_per_epoch or mode == ModeKeys.EVAL:
         predictions = features
         predictions["labels"] = labels
         predictions.update(model.predictions)

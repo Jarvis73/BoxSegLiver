@@ -62,10 +62,10 @@ def read_or_create_k_folds(path, list_, k_split=None, seed=None):
                 f.write(write_str + "\n")
 
     try:
+        # sort integers
         for fold in k_folds:
-            print(sorted([int(x) for x in fold]))
+            print(",".join([str(x) for x in sorted([int(x) for x in fold])]))
     except ValueError:
         for fold in k_folds:
-            print(fold)
+            print(",".join(fold))
     return k_folds
-

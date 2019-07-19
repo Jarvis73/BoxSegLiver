@@ -38,6 +38,7 @@ class BaseNet(object):
         self.classes = ["Background"]
         self.metrics_dict = {}
         self.predictions = {}
+        self.key_collections = {}
 
         self._is_training = self.mode == ModeKeys.TRAIN
         self._feed_dict = {}

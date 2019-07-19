@@ -176,11 +176,3 @@ class UNet(base.BaseNet):
         for key, value in self._image_summaries.items():
             tf.summary.image("{}/{}".format(self.args.tag, key), value * 255,
                              max_outputs=1, collections=[self.DEFAULT])
-
-        for tensor in losses.get_losses():
-            tf.summary.scalar("{}/{}".format(self.args.tag, tensor.op.name), tensor,
-                              collections=[self.DEFAULT])
-
-        for tensor in metrics.get_metrics():
-            tf.summary.scalar("{}/{}".format(self.args.tag, tensor.op.name), tensor,
-                              collections=[self.DEFAULT])

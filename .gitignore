@@ -117,12 +117,11 @@ logs/
 *deprecated*
 model_dir/
 run_scripts/*
-!run_scripts/004_triplet.sh
-!run_scripts/005_triplet_sg_wd.sh
+!run_scripts/001_unet_noise_0_05.sh
 !run_scripts/016_osmn_in_noise.sh
-!data/dataset_example.json
 images/
 notebooks/
 grabcut.py
 data/NF/*
 nf_output/
+prepare/

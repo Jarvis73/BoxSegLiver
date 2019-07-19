@@ -28,7 +28,7 @@ def add_arguments(parser):
     group.add_argument("--learning_policy",
                        type=str,
                        default="period_step",
-                       choices=["custom_step", "period_step", "poly"],
+                       choices=["custom_step", "period_step", "poly", "plateau"],
                        help="Learning rate policy for training (default: %(default)s)")
     group.add_argument("--num_of_steps",
                        type=int,
@@ -39,26 +39,27 @@ def add_arguments(parser):
     group.add_argument("--lr_decay_boundaries",
                        type=int,
                        nargs="*", help="For \"custom_step\" policy. Use the specified learning rate at the "
-                                            "given boundaries.")
+                                       "given boundaries.")
     group.add_argument("--lr_custom_values",
                        type=float,
                        nargs="+", help="For \"custom_step\" policy. Use the specified learning rate at the "
-                                            "given boundaries. "
-                                            "Make sure len(lr_custom_values) - len(lr_decay_boundaries) = 1")
+                                       "given boundaries. "
+                                       "Make sure len(lr_custom_values) - len(lr_decay_boundaries) = 1")
     group.add_argument("--lr_decay_step",
                        type=int,
                        default=1e5, help="For \"period_step\" policy. Decay the base learning rate at a fixed "
-                                            "step (default: %(default)d)")
+                                         "step (default: %(default)d)")
     group.add_argument("--lr_decay_rate",
                        type=float,
-                       default=0.1, help="For \"period_step\" policy. Learning rate decay rate "
-                                            "(default: %(default)f)")
+                       default=0.1, help="For \"period_step\" and \"plateau\" policy. Learning rate decay rate "
+                                         "(default: %(default)f)")
     group.add_argument("--lr_power",
                        type=float,
                        default=0.9, help="For \"poly\" policy. Polynomial power (default: %(default)f)")
     group.add_argument("--lr_end",
                        type=float,
-                       default=1e-6, help="For \"poly\" policy. The minimal end learning rate (default: %(default)f)")
+                       default=1e-6, help="For \"poly\" and \"plateau\" policy. The minimal end learning rate "
+                                          "(default: %(default)f)")
     group.add_argument("--optimizer",
                        type=str,
                        default="Adam",
@@ -177,6 +178,11 @@ class Solver(object):
                 self.num_of_total_steps,
                 self.end_learning_rate,
                 self.learning_power)
+        elif self.learning_policy == "plateau":
+            learning_rate, update_lr_op = plateau_decay(
+                self.base_learning_rate,
+                self.learning_rate_decay_rate,
+                self.end_learning_rate)
         else:
             raise ValueError('Not supported learning policy.')
 
@@ -227,3 +233,14 @@ class Solver(object):
                 train_op = optimizer.minimize(loss, global_step=self.global_step)
 
         return train_op
+
+
+def plateau_decay(lr, factor, min_lr):
+    lr_exist = len(tf.get_collection(CustomKeys.LEARNING_RATE)) > 0
+    with tf.variable_scope("learning_rate", reuse=lr_exist):
+        learning_rate = tf.get_variable("value", dtype=tf.float32,
+                                        initializer=lr,
+                                        trainable=False)
+    update_lr_op = tf.assign(learning_rate, tf.maximum(learning_rate * factor, min_lr))
+    tf.add_to_collection(CustomKeys.LR_UPDATE_OPS, update_lr_op)
+    return learning_rate, update_lr_op

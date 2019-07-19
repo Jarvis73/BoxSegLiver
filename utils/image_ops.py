@@ -334,9 +334,9 @@ def create_spatial_guide_2d(shape, center, stddev):
     shape: Tensor
         two values
     center: Tensor
-        Float tensor with shape [bs, n, 2], 2 means (x, y)
+        Float tensor with shape [n, 2], 2 means (x, y)
     stddev: Tensor
-        Float tensor with shape [bs, n, 2], 2 means (x, y)
+        Float tensor with shape [n, 2], 2 means (x, y)
 
     Returns
     -------
@@ -349,15 +349,13 @@ def create_spatial_guide_2d(shape, center, stddev):
     y = tf.range(shape[0])
     x = tf.range(shape[1])
     # Let n the number of tumors in current slice
-    coords = tf.tile(tf.expand_dims(tf.expand_dims(
-        tf.stack(tf.meshgrid(y, x, indexing="ij"), axis=-1), axis=0), axis=0),
-        multiples=tf.concat((tf.shape(center)[:2], [1, 1, 1]), axis=0))    # [bs, n, h, w, 2]
+    coords = tf.tile(tf.expand_dims(
+        tf.stack(tf.meshgrid(y, x, indexing="ij"), axis=-1), axis=0),
+        multiples=tf.concat((tf.shape(center)[:1], [1, 1, 1]), axis=0))     # [n, h, w, 2]
     coords = tf.cast(coords, tf.float32)
-    print(coords)
-    center = tf.expand_dims(tf.expand_dims(center, axis=-2), axis=-2)     # [bs, n, 1, 1, 2]
-    stddev = tf.expand_dims(tf.expand_dims(stddev, axis=-2), axis=-2)     # [bs, n, 1, 1, 2]
-    normalizer = tf.reverse(2. * stddev * stddev, axis=[-1])            # [bs, n, 1, 1, 2]
-    d = tf.exp(-tf.reduce_sum((coords - tf.reverse(center, axis=[-1])) ** 2 / normalizer,
-                              axis=-1))   # [bs, n, h, w]
-    guide = tf.reduce_max(tf.clip_by_value(d, 0, 1), axis=1)     # [bs, h, w]
-    return tf.expand_dims(guide, axis=-1)       # [bs, h, w, 1]
+    center = tf.expand_dims(tf.expand_dims(center, axis=-2), axis=-2)       # [n, 1, 1, 2]
+    stddev = tf.expand_dims(tf.expand_dims(stddev, axis=-2), axis=-2)       # [n, 1, 1, 2]
+    normalizer = 2. * stddev * stddev                                       # [n, 1, 1, 2]
+    d = tf.exp(-tf.reduce_sum((coords - center) ** 2 / normalizer, axis=-1))    # [n, h, w]
+    guide = tf.reduce_max(tf.clip_by_value(d, 0, 1), axis=1)                    # [h, w]
+    return tf.expand_dims(guide, axis=-1)                                   # [h, w, 1]
