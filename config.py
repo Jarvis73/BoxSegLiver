@@ -56,13 +56,13 @@ def add_arguments(parser):
                        type=str,
                        default="",
                        required=False, help="Directory to save model parameters, graph and etc")
-    group.add_argument("--save_predict",
+    group.add_argument("-s", "--save_predict",
                        action="store_true",
                        required=False, help="Save prediction to file")
     group.add_argument("--warm_start_from",
                        type=str,
                        required=False, help="Warm start the model from a checkpoint")
-    group.add_argument("--load_status_file",
+    group.add_argument("-l", "--load_status_file",
                        type=str,
                        default="checkpoint_best",
                        required=False, help="Status file to locate checkpoint file. Use for restore"

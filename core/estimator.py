@@ -717,7 +717,15 @@ class CustomEstimator(object):
         if not any([x.op.name == 'Losses/total_loss'
                     for x in ops.get_collection(ops.GraphKeys.SUMMARIES)]):
             # Compute total loss moving average
-            value, update_op = metrics.mean(estimator_spec.loss, name="Losses/total_loss_mean")
+            if self._train_distribution:
+                value, grouped_update_op = self._train_distribution.call_for_each_replica(
+                    metrics.mean,
+                    args=(estimator_spec.loss,
+                          None, None, None,
+                          "Losses/total_loss_mean"))
+                update_op = self._train_distribution.group(grouped_update_op)
+            else:
+                value, update_op = metrics.mean(estimator_spec.loss, name="Losses/total_loss_mean")
             ops.add_to_collection(CustomKeys.LOSS_MEAN, value)
             g = ops.get_default_graph()
             local_init_ops = [x.initializer for x in g.get_collection(ops.GraphKeys.METRIC_VARIABLES)

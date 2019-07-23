@@ -176,7 +176,7 @@ def model_fn(features, labels, mode, params, config):
     kwargs = {"loss": loss,
               "train_op": train_op,
               "predictions": predictions}
-
+    tfes.estimator.Estimator
     #############################################################################
     # Initialize partial graph variables by init_fn
     # init_fn = init_partial_model(model, args)

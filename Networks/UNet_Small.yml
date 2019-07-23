@@ -1,6 +1,0 @@
-init_channels: 64
-num_down_samples: 4
-ret_prob: false
-ret_pred: true
-input_down_sample: true
-input_down_sample_rate: 2

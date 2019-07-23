@@ -16,6 +16,7 @@
 
 import json
 import numpy as np
+import nibabel as nib
 import tensorflow as tf
 import tensorflow_estimator as tfes
 import scipy.ndimage as ndi
@@ -26,6 +27,7 @@ import loss_metrics as metric_ops
 import utils.array_kits as arr_ops
 from evaluators.evaluator_base import EvaluateBase
 from utils import timer
+from DataLoader.Liver import nii_kits
 
 ModeKeys = tfes.estimator.ModeKeys
 
@@ -100,13 +102,15 @@ class EvaluateVolume(EvaluateBase):
     def __init__(self, estimator=None, model_dir=None, params=None,
                  merge_tumor_to_liver=True, largest=True, use_sg_reduce_fp=False):
         self.estimator = estimator
-        self.model_dir = model_dir
+        self.model_dir = model_dir or estimator.model_dir
         self.params = params or estimator.params
         self._timer = timer.Timer()
         meta_file = Path(__file__).parent.parent / "DataLoader/Liver/prepare/meta.json"
         with meta_file.open() as f:
             meta = json.load(f)
         self.meta = {x["PID"]: x for x in meta}
+        self.eval_in_patches = self.params["args"].eval_in_patches
+        self.do_mirror = self.params["args"].eval_mirror
 
         self.merge_tumor_to_liver = merge_tumor_to_liver
         self.largest = largest
@@ -117,6 +121,8 @@ class EvaluateVolume(EvaluateBase):
             tf.logging.info("Enable --> largest")
         if self.use_sg_reduce_fp:
             tf.logging.info("Enable --> use_sg_reduce_fp")
+        if self.do_mirror:
+            tf.logging.info("Enable --> average by mirror")
 
     @property
     def classes(self):
@@ -142,8 +148,8 @@ class EvaluateVolume(EvaluateBase):
             checkpoint_dir = latest_path
         return checkpoint_dir
 
-    def _evaluate(self, predicts, cases=None, verbose=0, save=False):
-        # process a 3D image slice by slice or patch by patch
+    def _evaluate_images(self, predicts, cases=None, verbose=0, save=False):
+        # process a 3D image slice by slice
         logits3d = defaultdict(list)
         labels3d = defaultdict(list)
         # bg_masks3d = list()
@@ -156,8 +162,7 @@ class EvaluateVolume(EvaluateBase):
         self._timer.reset()
         self._timer.tic()
         for predict in predicts:
-            new_case = predict["names"][0] if isinstance(predict["names"][0], str) else \
-                predict["names"][0].decode("utf-8")     # decode bytes string
+            new_case = str(predict["names"][0])
 
             cur_case = cur_case or new_case
             pad = pad if pad != -1 else predict["pads"][0]
@@ -166,9 +171,14 @@ class EvaluateVolume(EvaluateBase):
 
             if cur_case == new_case:
                 # Append batch to collections
-                for c, cls in enumerate(self.classes):
-                    logits3d[cls].append(np.squeeze(predict[cls + "Pred"], axis=-1))
-                    labels3d[cls].append(predict["labels"] == c + 1)
+                if not predict["mirror"]:
+                    for c, cls in enumerate(self.classes):
+                        logits3d[cls].append(np.squeeze(predict[cls + "Pred"], axis=-1))
+                        labels3d[cls].append(predict["labels"] == c + 1)
+                else:
+                    for c, cls in enumerate(self.classes):
+                        logits3d[cls][-1] = (logits3d[cls][-1] +
+                                             np.flip(np.squeeze(predict[cls + "Pred"], axis=-1), axis=2)) / 2
             elif cur_case + ".rev" == new_case:
                 # Append reversed batch to another collections
                 for c, cls in enumerate(self.classes):
@@ -177,7 +187,7 @@ class EvaluateVolume(EvaluateBase):
                 result = self._evaluate_case(logits3d, labels3d, cur_case, pad, bbox, save)
                 self._timer.toc()
                 if verbose:
-                    log_str = "Evaluate-{} {}".format(self._timer.calls, Path(cur_case).stem)
+                    log_str = "Evaluate-{} {}".format(self._timer.calls, cur_case)
                     for key, value in result.items():
                         log_str += " {}: {:.3f}".format(key, value)
                     if verbose == 1:
@@ -223,6 +233,160 @@ class EvaluateVolume(EvaluateBase):
             display_str += "- {}: {:.3f} ".format(key, value)
         tf.logging.info(display_str + "({:.3f} secs/case)"
                         .format(self._timer.average_time))
+
+        return results
+
+    def _evaluate_images_do_mirror(self, predicts, cases=None, verbose=0, save=False):
+        # process a 3D image slice by slice
+        logits3d = []
+        labels3d = []
+        # bg_masks3d = list()
+        self.clear_metrics()
+
+        pad = -1
+        bbox = None
+        cur_case = None
+        volume = None
+        labels = None
+
+        self._timer.reset()
+        self._timer.tic()
+        for predict in predicts:
+            new_case = str(predict["names"][0])
+
+            cur_case = cur_case or new_case
+            pad = pad if pad != -1 else predict["pads"][0]
+            if "bboxes" in predict:
+                bbox = bbox if bbox is not None else predict["bboxes"][0]
+
+            if cur_case == new_case:
+                # Append batch to collections
+                if not predict["mirror"]:
+                    logits3d.append(predict["Prob"])
+                    labels3d.append(predict["labels"])
+                else:
+                    logits3d[-1] = (logits3d[-1] + np.flip(predict["Prob"], axis=2)) / 2
+            else:
+                volume = np.concatenate(logits3d)
+                volume = np.argmax(volume, axis=-1)
+                labels = np.concatenate(labels3d)
+                volume = {cls: volume == i + 1 for i, cls in enumerate(self.classes)}
+                labels = {cls: labels == i + 1 for i, cls in enumerate(self.classes)}
+                result = self._evaluate_case(volume, labels, cur_case, pad, bbox, save, concat=False)
+                self._timer.toc()
+                if verbose:
+                    log_str = "Evaluate-{} {}".format(self._timer.calls, cur_case)
+                    for key, value in result.items():
+                        log_str += " {}: {:.3f}".format(key, value)
+                    if verbose == 1:
+                        tf.logging.debug(log_str + " ({:.3f} s)".format(self._timer.diff))
+                    elif verbose == 2:
+                        tf.logging.info(log_str + " ({:.3f} s)".format(self._timer.diff))
+
+                logits3d.clear()
+                labels3d.clear()
+                logits3d.append(predict["Prob"])
+                labels3d.append(predict["labels"])
+
+                if cases is not None and self._timer.calls >= cases:
+                    break
+
+                # Reset
+                cur_case = new_case
+                pad = predict["pads"][0]
+                if "bboxes" in predict:
+                    bbox = predict["bboxes"][0]
+                self._timer.tic()
+
+        if cases is None or (self._timer.calls < cases):
+            # Final case
+            volume = np.concatenate(logits3d)
+            volume = np.argmax(volume, axis=-1)
+            labels = np.concatenate(labels3d)
+            volume = {cls: volume == i + 1 for i, cls in enumerate(self.classes)}
+            labels = {cls: labels == i + 1 for i, cls in enumerate(self.classes)}
+            result = self._evaluate_case(volume, labels, cur_case, pad, bbox, save, concat=False)
+            self._timer.toc()
+            if verbose:
+                log_str = "Evaluate-{} {}".format(self._timer.calls, Path(cur_case).stem)
+                for key, value in result.items():
+                    log_str += " {}: {:.3f}".format(key, value)
+                if verbose == 1:
+                    tf.logging.debug(log_str + " ({:.3f} s)".format(self._timer.diff))
+                else:
+                    tf.logging.info(log_str + " ({:.3f} s)".format(self._timer.diff))
+
+        # Compute average metrics
+        display_str = "----Evaluate {} cases ".format(self._timer.calls)
+        results = {key: np.mean(values) for key, values in self._metric_values.items()}
+        for key, value in results.items():
+            display_str += "- {}: {:.3f} ".format(key, value)
+        tf.logging.info(display_str + "({:.3f} secs/case)"
+                        .format(self._timer.average_time))
+
+        return results
+
+    def _evaluate_patches(self, predicts, cases=None, verbose=0, save=False):
+        # process a 3D image patch by patch
+        self.clear_metrics()
+        self._timer.reset()
+
+        result = None
+        num_samples = None
+        self._timer.tic()
+
+        for predict in predicts:
+            positions = predict["position"]
+            lab = predict["labels"]     # labels will be None except the final batch of each case
+            bbox = predict["bbox"]
+            name = predict["name"]
+            pad = predict["pad"]
+
+            if result is None:
+                result = np.zeros(arr_ops.bbox_to_shape(bbox) + (len(self.classes) + 1,),
+                                  dtype=np.float32)
+                num_samples = np.zeros_like(result, dtype=np.float32)
+
+            end_id = len(positions) - pad
+            for i, (z, lb_y, ub_y, lb_x, ub_x) in enumerate(positions[:end_id]):
+                result[z, lb_y:ub_y, lb_x:ub_x] = predict["Prob"][i]
+                num_samples[z, lb_y:ub_y, lb_x:ub_x] += 1
+
+            if lab is not None:
+                labels3d_crop = lab[arr_ops.bbox_to_slices(bbox)]
+                # Finish all the patches of current case
+                softmax_pred = result / num_samples
+                prediction = np.argmax(softmax_pred, axis=-1)
+                logits3d = {cls: prediction == i + 1 for i, cls in enumerate(self.classes)}
+                labels3d = {cls: labels3d_crop == i + 1 for i, cls in enumerate(self.classes)}
+                result = self._evaluate_case(logits3d, labels3d, name, 0, bbox, save,
+                                             concat=False, reshape_ori=False)
+                self._timer.toc()
+
+                # Logging
+                if verbose:
+                    log_str = "Evaluate-{} {}".format(self._timer.calls, name)
+                    for key, value in result.items():
+                        log_str += " {}: {:.3f}".format(key, value)
+                    if verbose == 1:
+                        tf.logging.debug(log_str + " ({:.3f} s)".format(self._timer.diff))
+                    elif verbose == 2:
+                        tf.logging.info(log_str + " ({:.3f} s)".format(self._timer.diff))
+
+                if cases is not None and self._timer.calls >= cases:
+                    break
+
+                # Reset
+                result = None
+                num_samples = None
+                self._timer.tic()
+
+        # Compute average metrics
+        display_str = "----Evaluate {} cases ".format(self._timer.calls)
+        results = {key: np.mean(values) for key, values in self._metric_values.items()}
+        for key, value in results.items():
+            display_str += "- {}: {:.3f} ".format(key, value)
+        tf.logging.info(display_str + "({:.3f} secs/case)".format(self._timer.average_time))
 
         return results
 
@@ -300,14 +464,25 @@ class EvaluateVolume(EvaluateBase):
                 sess.run(tf.global_variables_initializer())
                 saver.restore(sess, checkpoint_path)
 
-                predictions = model.predictions
+                if self.eval_in_patches or self.do_mirror:
+                    predictions = {"Prob": model.probability}
+                else:
+                    predictions = model.predictions
                 for features, labels in input_fn(ModeKeys.EVAL, self.params):
                     preds_eval = sess.run(predictions, {images: features.pop("images")})
                     preds_eval.update(features)
                     preds_eval["labels"] = labels
                     yield preds_eval
 
-        return self._evaluate(run_eval(), cases=cases, verbose=2, save=save)
+        if self.eval_in_patches:
+            tf.logging.info("Eval in patches ...")
+            return self._evaluate_patches(run_eval(), cases=cases, verbose=2, save=save)
+        else:
+            tf.logging.info("Eval in images ...")
+            if self.do_mirror:
+                return self._evaluate_images_do_mirror(run_eval(), cases=cases, verbose=2, save=save)
+            else:
+                return self._evaluate_images(run_eval(), cases=cases, verbose=2, save=save)
 
     @staticmethod
     def _check_shapes_equal(volume_dict):
@@ -327,10 +502,12 @@ class EvaluateVolume(EvaluateBase):
                 log_str += "{} -> {}  ".format(key, value)
             raise ValueError(log_str)
 
-    def _evaluate_case(self, logits3d, labels3d, cur_case, pad, bbox=None, save=False):
+    def _evaluate_case(self, logits3d, labels3d, cur_case, pad, bbox=None, save=False,
+                       concat=True, reshape_ori=True):
         # Process a complete volume
-        logits3d = {cls: np.concatenate(values) for cls, values in logits3d.items()}
-        labels3d = {cls: np.concatenate(values) for cls, values in labels3d.items()}
+        if concat:
+            logits3d = {cls: np.concatenate(values) for cls, values in logits3d.items()}
+            labels3d = {cls: np.concatenate(values) for cls, values in labels3d.items()}
 
         if pad != 0:
             logits3d = {cls: value[:-pad] if not cls.endswith("_rev") else value[pad:]
@@ -343,7 +520,7 @@ class EvaluateVolume(EvaluateBase):
                 # Merge two volumes which generated from different directions
                 logits3d[key] = np.maximum(logits3d[key], np.flip(logits3d[key + "_rev"], axis=0))
 
-        if bbox is not None:
+        if bbox is not None and reshape_ori:
             # Resize logits3d to the shape of labels3d
             ori_shape = list(arr_ops.bbox_to_shape(bbox))
             cur_shape = logits3d[self.classes[0]].shape
@@ -379,28 +556,32 @@ class EvaluateVolume(EvaluateBase):
 
         self.append_metrics(cur_pairs)
 
-        # if save:
-        #     cur_case = Path(cur_case)
-        #     case_name = cur_case.name.replace("volume", "prediction") + ".gz"
-        #     save_path = Path(self.estimator.model_dir) / "prediction"
-        #     if not save_path.exists():
-        #         save_path.mkdir(exist_ok=True)
-        #     save_path = save_path / case_name
-        #
-        #     if "Liver" in logits3d and "Tumor" in logits3d:
-        #         img_array = logits3d["Liver"] + logits3d["Tumor"]
-        #     elif "Liver" in logits3d:
-        #         img_array = logits3d["Liver"]
-        #     elif "Tumor" in logits3d:
-        #         img_array = logits3d["Tumor"]
-        #     else:
-        #         raise ValueError("Not supported save object!")
-        #     pad_with = tuple(zip(bbox[2::-1], np.array(header.shape) - bbox[:2:-1] - 1))
-        #     img_array = np.pad(img_array, pad_with, mode="constant", constant_values=0)
-        #
-        #     self.img_reader.save(save_path, img_array, fmt=cur_case.suffix[1:])
-        #     tf.logging.info("    ==> Save to {}"
-        #                     .format(str(save_path.relative_to(save_path.parent.parent.parent))))
+        if save:
+            seg_path = Path(__file__).parent.parent / ("data/LiTS/Training_Batch/segmentation-{}.nii"
+                                                       .format(cur_case))
+            case_name = seg_path.name.replace("segmentation", "prediction") + ".gz"
+            save_path = Path(self.model_dir) / "prediction"
+            if not save_path.exists():
+                save_path.mkdir(exist_ok=True)
+            save_path = save_path / case_name
+
+            if "Liver" in logits3d and "Tumor" in logits3d:
+                img_array = logits3d["Liver"] + logits3d["Tumor"]
+            elif "Liver" in logits3d:
+                img_array = logits3d["Liver"]
+            elif "Tumor" in logits3d:
+                img_array = logits3d["Tumor"]
+            else:
+                raise ValueError("Not supported save object!")
+
+            case_header = nib.load(str(seg_path)).header
+            pad_with = tuple(zip(bbox[2::-1], np.array(case_header.get_data_shape()[::-1]) - bbox[:2:-1] - 1))
+            img_array = np.pad(img_array, pad_with, mode="constant", constant_values=0)
+
+            nii_kits.write_nii(img_array, case_header, save_path,
+                               special=True if 28 <= int(cur_case) < 52 else False)
+            tf.logging.info("    ==> Save to {}"
+                            .format(str(save_path.relative_to(save_path.parent.parent.parent))))
         return cur_pairs
 
     def compare(self, *args_, **kwargs):

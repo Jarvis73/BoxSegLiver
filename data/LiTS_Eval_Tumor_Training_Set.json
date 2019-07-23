@@ -1,8 +1,0 @@
-{
-  "dataset": [
-    "LiTS/records/trainval-bbox-3D-1-of-5.tfrecord",
-    "LiTS/records/trainval-bbox-3D-2-of-5.tfrecord",
-    "LiTS/records/trainval-bbox-3D-4-of-5.tfrecord",
-    "LiTS/records/trainval-bbox-3D-5-of-5.tfrecord"
-  ]
-}

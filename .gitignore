@@ -117,8 +117,8 @@ logs/
 *deprecated*
 model_dir/
 run_scripts/*
-!run_scripts/001_unet_noise_0_05.sh
-!run_scripts/016_osmn_in_noise.sh
+!run_scripts/001_dist.sh
+!run_scripts/001_unet.sh
 images/
 notebooks/
 grabcut.py

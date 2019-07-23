@@ -13,25 +13,13 @@
 # limitations under the License.
 #
 # =================================================================================
+
 import numpy as np
 
 
-def random_split_k_fold(file_list, k, seed=None):
-    state = np.random.get_state()
-    np.random.seed(seed)
-
-    np.random.shuffle(file_list)
-    num_total = len(file_list)
-    num_test = int(num_total / k)
-
-    folds = []
-    for i in range(k):
-        folds.append(file_list[i * num_test:(i + 1) * num_test])
-
-    remain = file_list[k * num_test:]
-    for i, f in enumerate(remain):
-        folds[i].append(f)
-
-    np.random.set_state(state)
-
-    return folds
+def hist_aug(feat, **kwargs):
+    if "hist_noise" in kwargs and kwargs["hist_noise"]:
+        feat += np.random.normal(loc=0., scale=1., size=feat.shape) * kwargs.get("hist_noise_scale", 0.005)
+    if "hist_scale" in kwargs:
+        feat *= kwargs["hist_scale"]
+    return feat

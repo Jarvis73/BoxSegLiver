@@ -1,7 +1,0 @@
-init_channels: 64
-mod_early_conv: false
-use_density_modulator: false
-use_spatial_modulator: true
-density_channels: 1024
-ret_prob: false
-ret_pred: true

@@ -160,125 +160,7 @@ def nii_3d_to_png(in_path, out_path):
         json.dump(all_meta_data, f)
 
 
-def dump_manual_features_for_train(in_path, out_path, out_name="feat.npy", features=("hist",), **kwargs):
-    """
-
-    Parameters
-    ----------
-    in_path: str
-        data directory
-    out_path: str
-        npy/npz directory
-    out_name: str
-        output file name, npy format
-    features: tuple
-        list of features
-    kwargs: dict
-        bins: int, in `hist`, number of bins of histogram, default 100
-        xrng: tuple, in `hist`, (x_min, x_max), default (GRAY_MIN, GRAY_MAX)
-
-    Returns
-    -------
-
-    """
-    src_path = Path(in_path)
-    dst_path = Path(out_path)
-    dst_path.mkdir(parents=True, exist_ok=True)
-    pos = out_name.find(".")
-    dst_file = str(dst_path / (out_name[:pos] + "_%03d" + out_name[pos:]))
-
-    for i, vol_case in enumerate(sorted(src_path.glob("volume-*.nii"),
-                                        key=lambda x: int(str(x).split(".")[0].split("-")[-1]))):
-        PID = int(vol_case.stem.split("-")[-1])
-        print("{:03d} {:47s}".format(i, str(vol_case)))
-
-        vh, volume = nii_kits.read_nii(vol_case, out_dtype=np.int16,
-                                       special=True if 28 <= int(vol_case.stem.split("-")[-1]) < 48 else False)
-        volume = (np.clip(volume, -200, 250) + 200).astype(np.uint16)
-        lab_case = vol_case.parent / vol_case.name.replace("volume", "segmentation")
-        _, labels = nii_kits.read_nii(lab_case, out_dtype=np.uint8,
-                                      special=True if 28 <= int(vol_case.stem.split("-")[-1]) < 52 else False)
-        assert volume.shape == labels.shape, "Vol{} vs Lab{}".format(volume.shape, labels.shape)
-
-        all_features = {}
-        if "hist" in features:
-            bins = kwargs.get("bins", 100)
-            xrng = kwargs.get("xrng", (GRAY_MIN, GRAY_MAX))
-            slice_hists = np.empty((volume.shape[0], bins * 2))
-            for k in range(volume.shape[0]):
-                val1, _ = np.histogram(volume[k][labels[k] >= 1], bins=bins, range=xrng, density=True)
-                val2, _ = np.histogram(volume[k][labels[k] == 2], bins=bins, range=xrng, density=True)
-                # Convert float64 to float32
-                slice_hists[k, :bins] = np.nan_to_num(val1.astype(np.float32))
-                slice_hists[k, bins:] = np.nan_to_num(val2.astype(np.float32))
-            all_features["hist"] = slice_hists
-        np.save(dst_file % PID, all_features)
-
-
-def dump_manual_features_for_eval(in_path, out_path,
-                                  out_name="feat-guide.npy",
-                                  guide="middle",
-                                  features=("hist",),
-                                  **kwargs):
-    """ Generate based on `guides`
-
-    Parameters
-    ----------
-    in_path: str
-        npy directory
-    out_path: str
-        npy directory
-    out_name: str
-        output file name, npy format
-    guide: str
-        choice which slice as the guide of a tumor, valid values: ["first", "middle"]
-    features: tuple
-        list of features
-    kwargs: dict
-        bins: int, in `hist`, number of bins of histogram, default 100
-        xrng: tuple, in `hist`, (x_min, x_max), default (GRAY_MIN, GRAY_MAX)
-
-    Returns
-    -------
-
-    """
-    src_path = Path(in_path)
-    dst_path = Path(out_path)
-    dst_path.mkdir(parents=True, exist_ok=True)
-    pos = out_name.find(".")
-    dst_file = str(dst_path / (out_name[:pos] + "_%03d" + out_name[pos:]))
-
-    for i, vol_case in enumerate(sorted(src_path.glob("volume-*.nii"),
-                                        key=lambda x: int(str(x).split(".")[0].split("-")[-1]))):
-        PID = int(vol_case.stem.split("-")[-1])
-        print("{:03d} {:47s}".format(i, str(vol_case)))
-
-        vh, volume = nii_kits.read_nii(vol_case, out_dtype=np.int16,
-                                       special=True if 28 <= int(vol_case.stem.split("-")[-1]) < 48 else False)
-        volume = (np.clip(volume, -200, 250) + 200).astype(np.uint16)
-        lab_case = vol_case.parent / vol_case.name.replace("volume", "segmentation")
-        _, labels = nii_kits.read_nii(lab_case, out_dtype=np.uint8,
-                                      special=True if 28 <= int(vol_case.stem.split("-")[-1]) < 52 else False)
-        assert volume.shape == labels.shape, "Vol{} vs Lab{}".format(volume.shape, labels.shape)
-
-        tumor_labels = array_kits.get_guide_image(labels, obj_val=2, guide=guide, tile_guide=True)
-
-        all_features = {}
-        if "hist" in features:
-            bins = kwargs.get("bins", 100)
-            xrng = kwargs.get("xrng", (GRAY_MIN, GRAY_MAX))
-            slice_hists = np.empty((volume.shape[0], bins * 2))
-            for k in range(volume.shape[0]):
-                val1, _ = np.histogram(volume[k][labels[k] >= 1], bins=bins, range=xrng, density=True)
-                val2, _ = np.histogram(volume[k][tumor_labels[k] == 1], bins=bins, range=xrng, density=True)
-                # Convert float64 to float32
-                slice_hists[k, :bins] = np.nan_to_num(val1.astype(np.float32))
-                slice_hists[k, bins:] = np.nan_to_num(val2.astype(np.float32))
-            all_features["hist"] = slice_hists
-        np.save(dst_file % PID, all_features)
-
-
-if __name__ == "__main__":
+def run_nii_3d_to_png():
     # data_dir = "D:/Dataset/LiTS/Training_Batch"
     data_dir = Path(__file__).parent.parent.parent / "data/LiTS/Training_Batch"
     check_dataset(data_dir)
@@ -291,3 +173,88 @@ if __name__ == "__main__":
         # with json_file.open() as f:
         #     d = json.load(f)
         # pprint.pprint(d)
+
+
+def dump_hist_feature(in_path, out_path,
+                      mode="train",
+                      bins=100,
+                      xrng=(GRAY_MIN, GRAY_MAX),
+                      number=0):
+    """
+
+    Parameters
+    ----------
+    in_path: str
+        data directory
+    out_path: str
+        npy/npz directory
+    mode: str
+        for train or eval
+    bins: int
+        number of bins of histogram, default 100
+    xrng: tuple
+        (x_min, x_max), default (GRAY_MIN, GRAY_MAX)
+    number: int
+        for debug
+
+    Returns
+    -------
+
+    """
+    src_path = Path(in_path)
+    dst_path = Path(out_path) / mode
+    dst_path.mkdir(parents=True, exist_ok=True)
+    dst_file = str(dst_path / "%03d")
+
+    for i, vol_case in enumerate(sorted(src_path.glob("volume-*.nii"),
+                                        key=lambda x: int(str(x).split(".")[0].split("-")[-1]))):
+        if number > 0 and number != i:
+            continue
+        PID = int(vol_case.stem.split("-")[-1])
+        print("{:03d} {:47s}".format(i, str(vol_case)))
+
+        vh, volume = nii_kits.read_lits(vol_case.stem.split("-")[-1], "vol", vol_case)
+        lab_case = vol_case.parent / vol_case.name.replace("volume", "segmentation")
+        _, labels = nii_kits.read_lits(vol_case.stem.split("-")[-1], "lab", lab_case)
+        assert volume.shape == labels.shape, "Vol{} vs Lab{}".format(volume.shape, labels.shape)
+
+        if mode == "train":
+            tumor_labels = labels
+        else:
+            tumor_labels = array_kits.get_guide_image(
+                labels, obj_val=2, guide="middle", tile_guide=True) * 2
+
+        slice_hists = np.empty((volume.shape[0], bins * 2), dtype=np.float32)
+        for k in range(volume.shape[0]):
+            with np.errstate(invalid='ignore'):
+                val1, _ = np.histogram(volume[k][labels[k] >= 1], bins=bins, range=xrng, density=True)
+                val2, _ = np.histogram(volume[k][tumor_labels[k] == 2], bins=bins, range=xrng, density=True)
+            # Convert float64 to float32
+            slice_hists[k, :bins] = np.nan_to_num(val1.astype(np.float32))
+            slice_hists[k, bins:] = np.nan_to_num(val2.astype(np.float32))
+        np.save(dst_file % PID, slice_hists)
+
+
+def run_dump_hist_feature(num=-1):
+    # data_dir = "D:/Dataset/LiTS/Training_Batch"
+    data_dir = Path(__file__).parent.parent.parent / "data/LiTS/Training_Batch"
+    features_dir = Path(__file__).parent.parent.parent / "data/LiTS/feat/hist"
+    dump_hist_feature(data_dir, features_dir, mode="train",bins=100,
+                      xrng=(GRAY_MIN, GRAY_MAX), number=num)
+    dump_hist_feature(data_dir, features_dir, mode="eval", bins=100,
+                      xrng=(GRAY_MIN, GRAY_MAX), number=num)
+
+
+if __name__ == "__main__":
+    cmd = input("Please choice function:\n\t"
+                "a: exit()\n\t"
+                "b: run_nii_3d_to_png()\n\t"
+                "c: run_dump_hist_feature() [A/b/c]")
+    cmd = cmd.lower()
+
+    if cmd == "b":
+        run_nii_3d_to_png()
+    elif cmd == "c":
+        run_dump_hist_feature()
+
+    print("Exit")

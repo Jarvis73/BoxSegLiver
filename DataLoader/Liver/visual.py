@@ -14,17 +14,30 @@
 #
 # =================================================================================
 
+import numpy as np
+import matplotlib.pyplot as plt
 from pathlib import Path
 
 
-def find_file(data_dirs, case_path):
-    found = False
-    file_path = None
-    for dir_ in data_dirs:
-        file_path = Path(dir_) / case_path
-        if file_path.exists():
-            found = True
-            break
-    if not found:
-        raise FileNotFoundError(case_path)
-    return file_path
+def visual_hist(num):
+    path = Path(__file__).parent.parent.parent / "data/LiTS/feat/hist/train/{:03d}.npy".format(num)
+    d1 = np.load(str(path), allow_pickle=True)
+    path = Path(__file__).parent.parent.parent / "data/LiTS/feat/hist/eval/{:03d}.npy".format(num)
+    d2 = np.load(str(path), allow_pickle=True)
+    plt.subplot(221)
+    plt.imshow(d1[:, :100])
+    plt.colorbar()
+    plt.subplot(223)
+    plt.imshow(d1[:, 100:])
+    plt.colorbar()
+    plt.subplot(222)
+    plt.imshow(d2[:, :100])
+    plt.colorbar()
+    plt.subplot(224)
+    plt.imshow(d2[:, 100:])
+    plt.colorbar()
+    plt.show()
+
+
+if __name__ == "__main__":
+    visual_hist(3)

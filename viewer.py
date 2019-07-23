@@ -20,9 +20,9 @@ from pathlib import Path
 import scipy.ndimage as ndi
 import skimage.measure as measure
 
-from utils import nii_kits
+from utils import nii_kits_deprecated
 from utils import array_kits
-from utils.misc import find_file
+from utils.misc_deprecated import find_file
 from visualization.View_Kits import ComparePrediction
 from visualization.Tool_Kits import get_pred_score
 
@@ -59,7 +59,7 @@ class SegViewerAdapter(object):
             lab_file = find_file(self.data_dirs, case_path.replace("prediction", "segmentation")
                                  .replace(".nii.gz", ".nii"))
             pred_file = find_file([self.pred_dir], case_path)
-            reader = nii_kits.nii_reader
+            reader = nii_kits_deprecated.nii_reader
         else:
             raise ValueError("Wrong prediction name: {}".format(case_path))
 
@@ -172,7 +172,7 @@ class SegViewerAdapter(object):
 
         if not self.table:
             for path in self.pred_dir.glob("*.nii.gz"):
-                hdr, _ = nii_kits.nii_reader(str(path), only_meta=True)
+                hdr, _ = nii_kits_deprecated.nii_reader(str(path), only_meta=True)
                 names = path.stem.split(".")[0].split("-")
                 name = "Pred-{:03d}".format(int(names[1]))
                 if self.liver_range is not None:

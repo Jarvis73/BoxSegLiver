@@ -18,6 +18,15 @@ import numpy as np
 import nibabel as nib
 
 
+def read_lits(num, obj, file_name):
+    if obj == "vol":
+        return read_nii(file_name, out_dtype=np.int16,
+                        special=True if 28 <= int(num) < 48 else False)
+    if obj == "lab":
+        return read_nii(file_name, out_dtype=np.uint8,
+                        special=True if 28 <= int(num) < 52 else False)
+
+
 def read_nii(file_name, out_dtype=np.int16, special=False):
     nib_vol = nib.load(str(file_name))
     vh = nib_vol.header
@@ -32,3 +41,20 @@ def read_nii(file_name, out_dtype=np.int16, special=False):
     if affine[2, 2] < 0:                # Increase z from Interior to Superior
         data = np.flip(data, axis=0)
     return vh, data
+
+
+def write_nii(data, header, out_path, out_dtype=np.int16, special=False):
+    affine = header.get_best_affine()
+
+    if special:
+        data = np.flip(data, axis=2)
+    if affine[0, 0] > 0:                # Increase x from Right to Left
+        data = np.flip(data, axis=2)
+    if affine[1, 1] > 0:                # Increase y from Anterior to Posterior
+        data = np.flip(data, axis=1)
+    if affine[2, 2] < 0:                # Increase z from Interior to Superior
+        data = np.flip(data, axis=0)
+
+    out_image = np.transpose(data, (2, 1, 0)).astype(out_dtype)
+    out = nib.Nifti1Image(out_image, affine=None, header=header)
+    nib.save(out, str(out_path))

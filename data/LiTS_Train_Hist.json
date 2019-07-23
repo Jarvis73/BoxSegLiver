@@ -1,8 +1,0 @@
-{
-  "dataset": [
-    "LiTS/records/hist-100--200_250-2D-1-of-5.tfrecord",
-    "LiTS/records/hist-100--200_250-2D-2-of-5.tfrecord",
-    "LiTS/records/hist-100--200_250-2D-4-of-5.tfrecord",
-    "LiTS/records/hist-100--200_250-2D-5-of-5.tfrecord"
-  ]
-}

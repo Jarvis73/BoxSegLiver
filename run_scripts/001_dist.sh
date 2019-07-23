@@ -4,6 +4,7 @@ TASK=$1
 GPU_ID=$2
 shift 2
 
+IFS="," read -ra GPU_IDS <<< ${GPU_ID}
 PROJECT_DIR=$(dirname $(dirname $(realpath $0)))
 BASE_NAME=$(basename $0)
 
@@ -32,6 +33,7 @@ if [[ "$TASK" == "train" ]]; then
         --eval_num_batches_per_epoch 200 \
         --eval_per_epoch \
         --evaluator Volume \
+        --distribution_strategy mirrored --num_gpus ${#GPU_IDS[@]} \
         $@
 elif [[ "$TASK" == "eval" ]]; then
     PYTHONPATH=${PROJECT_DIR} CUDA_VISIBLE_DEVICES=${GPU_ID} python ./entry/main.py liver \

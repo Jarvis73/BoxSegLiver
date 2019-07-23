@@ -236,11 +236,11 @@ class Solver(object):
 
 
 def plateau_decay(lr, factor, min_lr):
-    lr_exist = len(tf.get_collection(CustomKeys.LEARNING_RATE)) > 0
-    with tf.variable_scope("learning_rate", reuse=lr_exist):
+    with tf.variable_scope("learning_rate"):
         learning_rate = tf.get_variable("value", dtype=tf.float32,
                                         initializer=lr,
-                                        trainable=False)
-    update_lr_op = tf.assign(learning_rate, tf.maximum(learning_rate * factor, min_lr))
-    tf.add_to_collection(CustomKeys.LR_UPDATE_OPS, update_lr_op)
+                                        trainable=False,
+                                        aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
+        update_lr_op = tf.assign(learning_rate, tf.maximum(learning_rate * factor, min_lr))
+        tf.add_to_collection(CustomKeys.LR_UPDATE_OPS, update_lr_op)
     return learning_rate, update_lr_op

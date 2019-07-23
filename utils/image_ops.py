@@ -232,11 +232,11 @@ def random_noise(image, scale, mask=None, seed=None, name=None):
         return new_image
 
 
-def random_flip_left_right(image, label=None, seed=None):
-    """Randomly flip an image horizontally (left to right).
+def random_flip(image, label=None, seed=None, direction="lr", name=None):
+    """Randomly flip an image horizontally (left to right) or vertically (up to down).
 
     With a 1 in 2 chance, outputs the contents of `image` flipped along the
-    second dimension, which is `width`.  Otherwise output the image as-is.
+    specified dimension.  Otherwise output the image as-is.
 
     Parameters
     ----------
@@ -247,6 +247,8 @@ def random_flip_left_right(image, label=None, seed=None):
     seed: A Python integer. Used to create a random seed. See
         `tf.set_random_seed`
         for behavior.
+    direction: str
+        `lr` for left/right, `ud` for up/down
 
     Returns
     -------
@@ -256,13 +258,32 @@ def random_flip_left_right(image, label=None, seed=None):
     ------
     ValueError: if the shape of `image` not supported.
     """
-    if label is None:
-        return tf.image.random_flip_left_right(image, seed)
-    else:
-        label_new = tf.expand_dims(tf.cast(label, image.dtype), axis=-1)
-        combined = tf.concat((image, label_new), axis=-1)
-        combined_flipped = tf.image.random_flip_left_right(combined, seed)
-        return combined_flipped[..., :-1], tf.cast(combined_flipped[..., -1], dtype=label.dtype)
+    with tf.name_scope(name, "random_flip", [image, label]):
+        if label is None:
+            if direction == "lr":
+                return tf.image.random_flip_left_right(image, seed)
+            elif direction == "ud":
+                return tf.image.random_flip_up_down(image, seed)
+            else:
+                raise ValueError("Wrong direction: %s" % direction)
+        else:
+            label_new = tf.expand_dims(tf.cast(label, image.dtype), axis=-1)
+            combined = tf.concat((image, label_new), axis=-1)
+            if direction == "lr":
+                combined_flipped = tf.image.random_flip_left_right(combined, seed)
+            elif direction == "ud":
+                combined_flipped = tf.image.random_flip_up_down(combined, seed)
+            else:
+                raise ValueError("Wrong direction: %s" % direction)
+            return combined_flipped[..., :-1], tf.cast(combined_flipped[..., -1], dtype=label.dtype)
+
+
+def random_flip_left_right(image, label=None, seed=None):
+    return random_flip(image, label, seed, direction="lr", name="random_flip_left_right")
+
+
+def random_flip_up_down(image, label=None, seed=None):
+    return random_flip(image, label, seed, direction="ud", name="random_flip_up_down")
 
 
 def random_zero_or_one(shape, dtype, seed=None):

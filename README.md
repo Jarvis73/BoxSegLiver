@@ -3,60 +3,62 @@ Medical image segmentation using deep learning methods
 
 
 ## Library
+Please recovery environment by `conda`
 ```bash
-conda create -n xxx python=3.6 tensorflow-gpu=1.13 scipy matplotlib pandas pathlib traits traitsui scikit-image tqdm
-conda install -c conda-forge pyyaml nibabel opencv
-pip install medpy
+conda env create -f pyenv.yml
+```
+
+or by `pip`
+```bash
+pip install -r requirements.txt
 ```
 
 
 ## Usage
 
-### 1. How to construct a tf-record dataset for your own data ?
-
-* Create a subfolder in `./data/` for your dataset. For example `./data/new_dataset/`.
-* Put your dataset folder into `new_dataset`. For example `./data/new_dataset/TrainingImages/`.
-* Create a text file saving image list. For example `./data/new_dataset/trainval.txt`.
-  * All the image paths in `trainval.txt` should be based on `./data/new_dataset/`:
+Change working directory to project root directory and activate virtual environment.
+```bash
+cd ~/MedicalImageSegmentation
+source activate <env-name>
 ```
-TrainingImages/image-1.png
-TrainingImages/image-2.png
-TrainingImages/image-3.png
-......
-```
-* Write your own `build_xxx.py` following the format of `./data_kits/build_lits_liver.py`.
-* Add your script file `./data_kits/build_xxx.py` to `./build_datasets.py` and run `python build_datasets.py`
-* Write a json file like `./data/LiTS_Train.json` if you have multiple tf-records for training/evaluation.
 
-### 2. How to train/eval a UNet model with your data ?
+### 1. Process LiTS dataset
+
+* Convert 3D nii images and labels to 2d slices:
+```bash
+PYTHONPATH=./ python DataLoader/Liver/extract.py
+
+# -------------------------------------------------------
+Please choice function:
+	a: exit()
+	b: run_nii_3d_to_png()
+	c: run_dump_hist_feature() [A/b/c] b
+# Choice `b` for executing function `run_nii_3d_to_png()`
+```
+
+### 2. Train/Evaluate a UNet model
 
 **A. For help**
 ```bash
 python main.py --help
 ```
 
-**B. Write your bash file `train_unet.sh` in `./run_scripts/`.**
+**B. Write your bash file in `./run_scripts/001_unet.sh`.**
 * Required Parameters:
-  * --mode {train, eval}
-  * --tag (better to use current script name, such as ${BASE_NAME%".sh"})
-  * --model {UNet}
-  * --classes (your class names, such as "Liver")
-  * --dataset_for_train (a list of *.tfrecord files or *.json file)
-  * --dataset_for_eval_while_train (a list of *.tfrecord files or *.json file)
+  * `--mode`: {train, eval}
+  * `--tag`: (better to use current script name, such as ${BASE_NAME%".sh"})
+  * `--model`: {UNet}
+  * `--classes`: (your class names, such as "Liver Tumor")
+  * `--test_fold`: which fold for validating, others for training
 
 * Optional Parameters:
-  * --zoom --noise --flip --zoom_scale 1.2 (for data augmentation)
+  * --zoom_scale 1.2 (for data augmentation)
   * --im_height 256 --im_width 256 (specify training image size, -1 if not specified)
   * --im_channel 1 (specify image channel)
-  * --resize_for_batch (resize training image to the same size for batching operation)
   * --num_of_total_steps (number of max training steps)
   * --primary_metric ("<class>/<metric>", such as "Liver/Dice")
   * --weight_decay_rate (weight decay rate)
-  * --learning_policy (learning policy, such as "custom_step")
-  * --lr_decay_boundaries (in which step to decay learning rate, such as "200000 300000")
-  * --lr_custom_values (learning rate values in each interval, such as "0.003 0.0003 0.0001")
-  * --input_group (group image neighbor slices as a multi-channel input, such as "3". This
-    parameter must be match with your examples in *.tfrecord dataset)
+  * --learning_policy (learning rate decay policy, such as "plateau")
   * --warm_start_from "004_triplet/best_model.ckpt-215001" (absolute or relative path)
 
 * Other Parameters:
@@ -65,29 +67,23 @@ python main.py --help
 **C. Add execution permission for your bash file: `chmod u+x ./run_scripts/train_unet.sh`**
 * training
 ```bash
-./run_scripts/train_unet.sh train 0
-./run_scripts/train_unet.sh train 0,1   # Using multiple GPUs
+./run_scripts/001_unet.sh train 0
+./run_scripts/001_unet.sh train 0,1   # Using multiple GPUs
 ```
 * evaluation
 ```bash
-./run_scripts/train_unet.sh eval 0
-```
-* evaluation with saving predictions
-```bash
+# evaluation with best checkpoint
+./run_scripts/train_unet.sh eval 0 --load_status_file checkpoint_best
+# evaluation with final checkpoint
+./run_scripts/train_unet.sh eval 0 --eval_final
+# evaluating and saving predictions
 ./run_scripts/train_unet.sh eval 0 --save_predict
 ```
 * other parameters...
 
 ### 3. How to train/eval a OSMNUNet model with your data ?
 
-**A. Create `tumor_summary.csv` by running `./data_kits/analyze_lits.py`
-
-**B. Mostly train/eval routine is the same with UNet, but some details are different. Please check
-  `./run_scripts/016_osmn_in_noise.sh` for details. Notice that the entry becomes `main_osmn.py`.
-  * For training with single gpu: `./run_scripts/xxx.sh train 0`
-  * For training with multiple gpus: `./run_scripts/xxx.sh train 0,1`
-  * For evaluating with single gpu: `./run_scripts/xxx.sh eval 0 --use_fewer_guide --guide middle`
-  * For evaluating with multiple gpus: not supported!
+Coming soon...
 
 
 ## Need implemented
@@ -105,9 +101,9 @@ python main.py --help
 
 - [x] UNet
 - [ ] Attention UNet
-- [x] OSMN
+- [ ] OSMN
 
-- [ ] Balance dataset
+- [x] Balance dataset
 - [ ] Pre-trained backbone
-- [x] Spatial guide
+- [ ] Spatial guide
 - [x] Gaussian distribution

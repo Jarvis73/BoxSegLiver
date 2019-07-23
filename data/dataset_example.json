@@ -1,8 +1,0 @@
-{
-  "dataset": [
-    "LiTS/records/data_fold_0.tfrecord",
-    "LiTS/records/data_fold_1.tfrecord",
-    "LiTS/records/data_fold_2.tfrecord",
-    "LiTS/records/data_fold_3.tfrecord"
-  ]
-}
