@@ -423,6 +423,7 @@ class LogLearningRateHook(session_run_hook.SessionRunHook):
                  every_n_steps=100,
                  every_n_secs=None,
                  output_dir=None,
+                 do_logging=True,
                  summary_writer=None):
         self._timer = basic_session_run_hooks.SecondOrStepTimer(every_steps=every_n_steps,
                                                                 every_secs=every_n_secs)
@@ -430,6 +431,7 @@ class LogLearningRateHook(session_run_hook.SessionRunHook):
         self._output_dir = output_dir
         self._summary_tag = "{}/learning rate".format(tag)
         self._steps_per_run = 1
+        self.do_logging = do_logging
 
     def _set_steps_per_run(self, steps_per_run):
         self._steps_per_run = steps_per_run
@@ -461,7 +463,8 @@ class LogLearningRateHook(session_run_hook.SessionRunHook):
     def _log_and_record(self, lr, step):
         if self._summary_writer is not None:
             summary_scalar(self._summary_writer, step, [self._summary_tag], [lr])
-        logging.info(self._summary_tag + ": {:.6f}".format(lr))
+        if self.do_logging:
+            logging.info(self._summary_tag + ": {:.6f}".format(lr))
 
 
 class LoggingTensorWithSpeedFormatterHook(basic_session_run_hooks.LoggingTensorHook):

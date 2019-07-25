@@ -208,7 +208,7 @@ def dump_hist_feature(in_path, out_path,
 
     for i, vol_case in enumerate(sorted(src_path.glob("volume-*.nii"),
                                         key=lambda x: int(str(x).split(".")[0].split("-")[-1]))):
-        if number > 0 and number != i:
+        if number >= 0 and number != i:
             continue
         PID = int(vol_case.stem.split("-")[-1])
         print("{:03d} {:47s}".format(i, str(vol_case)))
@@ -239,7 +239,7 @@ def run_dump_hist_feature(num=-1):
     # data_dir = "D:/Dataset/LiTS/Training_Batch"
     data_dir = Path(__file__).parent.parent.parent / "data/LiTS/Training_Batch"
     features_dir = Path(__file__).parent.parent.parent / "data/LiTS/feat/hist"
-    dump_hist_feature(data_dir, features_dir, mode="train",bins=100,
+    dump_hist_feature(data_dir, features_dir, mode="train", bins=100,
                       xrng=(GRAY_MIN, GRAY_MAX), number=num)
     dump_hist_feature(data_dir, features_dir, mode="eval", bins=100,
                       xrng=(GRAY_MIN, GRAY_MAX), number=num)

@@ -30,12 +30,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 import tensorflow_estimator as tfes
 from tensorflow.python.platform import tf_logging as logging
 from tensorflow.contrib import data as contrib_data
+from tensorflow.python.util import deprecation
 
 from utils import image_ops
 from utils import distribution_utils
 from DataLoader import misc
 from DataLoader.Liver import nii_kits
 
+deprecation._PRINT_DEPRECATION_WARNINGS = False
 ModeKeys = tfes.estimator.ModeKeys
 Dataset = tf.data.Dataset
 pattern = str(Path(__file__).parent.parent.parent / "data/LiTS/png/volume-{:d}/{:03d}_im.png")
@@ -46,7 +48,7 @@ GRAY_MIN = -200
 GRAY_MAX = 250
 LIVER_PERCENT = 0.66
 TUMOR_PERCENT = 0.5
-RND_SCALE = (1., 1.5)
+RND_SCALE = (0.8, 1.4)
 
 
 def add_arguments(parser):
@@ -56,6 +58,9 @@ def add_arguments(parser):
     group.add_argument("--im_width", type=int, default=256)
     group.add_argument("--im_channel", type=int, default=3)
     group.add_argument("--noise_scale", type=float, default=0.1)
+    group.add_argument("--random_flip", type=int, default=1,
+                       help="Random flip while training. 0 for no flip, 1 for flip only left/right, "
+                            "2 for only up/down, 3 for left/right and up/down")
     group.add_argument("--eval_in_patches", action="store_true")
     group.add_argument("--eval_num_batches_per_epoch", type=int, default=100)
     group.add_argument("--eval_mirror", action="store_true")
@@ -223,6 +228,8 @@ def data_processing_train(im_files, seg_file, bbox, PID_ci, img_scale, lab_scale
 
     if random_noise:
         features["images"] = image_ops.random_noise(features["images"], config.noise_scale)
+        # Remove noise in empty slice
+        features["images"] *= tf.cast(tf.greater(tf.strings.length(im_files), 0), tf.float32)
         logging.info("Train: Add random noise, scale = {}".format(config.noise_scale))
     if random_flip_left_right:
         features["images"], labels = image_ops.random_flip_left_right(features["images"], labels)
@@ -249,8 +256,6 @@ def gen_train_batch(data_list,
     target_size = np.asarray((config.im_height, config.im_width), dtype=np.float32)
     force_liver = math.ceil(batch_size * liver_percent)
     force_tumor = math.ceil(batch_size * tumor_percent)
-    if random_scale[1] > random_scale[0]:
-        logging.info("Train: Add random zoom, scale = ({}, {})".format(*random_scale))
 
     while True:
         ci1 = np.random.choice(tumor_list_of_keys, force_tumor, True)
@@ -261,7 +266,7 @@ def gen_train_batch(data_list,
         tumor_counter = 0
         for j, i in enumerate(ci):
             case = d[i]
-            crop_size = (target_size * random.uniform(*random_scale)).astype(np.int32).tolist()
+            crop_size = (target_size * np.random.uniform(*random_scale, size=2)).astype(np.int32).tolist()
             size = case["size"]
             pid = case["PID"]
 
@@ -282,8 +287,8 @@ def gen_train_batch(data_list,
                 obj_bb = [size[1], size[2], 0, 0]   # Obj not exist
 
             # Compute crop region
-            rng_yl = max(obj_bb[2] - crop_size[0], 0)
-            rng_yr = min(obj_bb[0], size[1] - crop_size[0])
+            rng_yl = max(obj_bb[2] + 5 - crop_size[0], 0)
+            rng_yr = min(obj_bb[0] - 5, size[1] - crop_size[0])
             if rng_yl + 20 < rng_yr:
                 off_y = random.randint(rng_yl, rng_yr)
             else:
@@ -291,8 +296,8 @@ def gen_train_batch(data_list,
                 # we will crop part of object
                 off_y = random.randint(max(obj_bb[0] - 20, 0),
                                        min(int(obj_bb[0] * .75 + obj_bb[2] * .25), size[1] - crop_size[0]))
-            rng_xl = max(obj_bb[3] - crop_size[1], 0)
-            rng_xr = min(obj_bb[1], size[2] - crop_size[1])
+            rng_xl = max(obj_bb[3] + 5 - crop_size[1], 0)
+            rng_xr = min(obj_bb[1] - 5, size[2] - crop_size[1])
             if rng_xl + 20 < rng_xr:
                 off_x = random.randint(rng_xl, rng_xr)
             else:
@@ -325,6 +330,8 @@ def gen_train_batch(data_list,
 
 def get_dataset_for_train(data_list, liver_percent=0., tumor_percent=0., random_scale=(1., 1.), config=None):
     batch_size = distribution_utils.per_device_batch_size(config.batch_size, config.num_gpus)
+    if random_scale[1] > random_scale[0]:
+        logging.info("Train: Add random zoom, scale = ({}, {})".format(*random_scale))
 
     def train_gen():
         return gen_train_batch(data_list, batch_size, liver_percent, tumor_percent,
@@ -336,7 +343,13 @@ def get_dataset_for_train(data_list, liver_percent=0., tumor_percent=0., random_
                                                              tf.TensorShape([4]),
                                                              tf.TensorShape([])))
                .apply(tf.data.experimental.map_and_batch(
-                        lambda *args_: data_processing_train(*args_, IM_SCALE, LB_SCALE, config, True, True),
+                        lambda *args_: data_processing_train(*args_,
+                                                             img_scale=IM_SCALE,
+                                                             lab_scale=LB_SCALE,
+                                                             config=config,
+                                                             random_noise=True,
+                                                             random_flip_left_right=config.random_flip & 1 > 0,
+                                                             random_flip_up_down=config.random_flip & 2 > 0),
                         batch_size, num_parallel_batches=1))
                .prefetch(buffer_size=contrib_data.AUTOTUNE))
 
@@ -358,7 +371,13 @@ def get_dataset_for_eval_online(data_list, liver_percent=0., tumor_percent=0., c
                                                              tf.TensorShape([4]),
                                                              tf.TensorShape([])))
                .apply(tf.data.experimental.map_and_batch(
-                        lambda *args_: data_processing_train(*args_, IM_SCALE, LB_SCALE, config, False, False),
+                        lambda *args_: data_processing_train(*args_,
+                                                             img_scale=IM_SCALE,
+                                                             lab_scale=LB_SCALE,
+                                                             config=config,
+                                                             random_noise=False,
+                                                             random_flip_left_right=False,
+                                                             random_flip_up_down=False),
                         batch_size, num_parallel_batches=1))
                .prefetch(buffer_size=contrib_data.AUTOTUNE))
 
@@ -425,7 +444,7 @@ def get_dataset_for_eval_image(data_list, config=None):
                       "names": [pid],
                       "pads": [(batch_size - ((z2 - z1) % batch_size)) % batch_size],
                       "bboxes": [[x1, y1, z1, x2 - 1, y2 - 1, z2 - 1]],
-                      "mirror": False}
+                      "mirror": 0}
 
         num_of_batches = (z2 - z1 + eval_batch["pads"][0]) // batch_size
         for batch in range(num_of_batches):
@@ -456,14 +475,23 @@ def get_dataset_for_eval_image(data_list, config=None):
                 for k in range(c):
                     eval_batch["images"][j, :, :, k] = buffer[j + k]
 
+            yield copy.copy(eval_batch), lab_batch
             if config.eval_mirror:
-                yield copy.copy(eval_batch), lab_batch
-                tmp = copy.copy(eval_batch)
-                tmp["images"] = np.flip(tmp["images"], axis=2)
-                tmp["mirror"] = True
-                yield tmp, lab_batch
-            else:
-                yield copy.copy(eval_batch), lab_batch
+                if config.random_flip & 1 > 0:
+                    tmp = copy.copy(eval_batch)
+                    tmp["images"] = np.flip(tmp["images"], axis=2)
+                    tmp["mirror"] = 1
+                    yield tmp, None
+                if config.random_flip & 2 > 0:
+                    tmp = copy.copy(eval_batch)
+                    tmp["images"] = np.flip(tmp["images"], axis=1)
+                    tmp["mirror"] = 2
+                    yield tmp, None
+                if config.random_flip & 3 > 0:
+                    tmp = copy.copy(eval_batch)
+                    tmp["images"] = np.flip(np.flip(tmp["images"], axis=2), axis=1)
+                    tmp["mirror"] = 3
+                    yield tmp, None
 
 
 def get_dataset_for_eval_patches(data_list, step=2, config=None):

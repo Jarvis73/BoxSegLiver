@@ -76,6 +76,8 @@ def add_arguments(parser):
     group.add_argument("--adam_beta1", type=float)
     group.add_argument("--adam_beta2", type=float)
     group.add_argument("--adam_eps", type=float)
+    group.add_argument("--lr_patience", type=int, default=30,
+                       help="Learning rate patience for decay (unit: epoch)")
 
 
 def get_solver_params(args, warm_up=False, slow_start_step=None, slow_start_learning_rate=None):

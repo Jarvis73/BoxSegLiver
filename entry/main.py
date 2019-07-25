@@ -46,7 +46,7 @@ def _get_arguments():
     loss_metrics.add_arguments(parser)
 
     argv = sys.argv
-    if argv[1] == "liver":
+    if argv[1] == "liver" or argv[1] in ["-h", "--help"]:
         input_pipeline.add_arguments(parser)
         evaluator_liver.add_arguments(parser)
     else:
@@ -131,9 +131,10 @@ def main():
                                                   args.warm_start_from)
         train_hooks = [hooks.LogLearningRateHook(tag=args.tag,
                                                  every_n_steps=log_step_count_steps,
-                                                 output_dir=args.model_dir)]
+                                                 output_dir=args.model_dir,
+                                                 do_logging=False)]
         if args.learning_policy == "plateau":
-            lr_hook = hooks.ReduceLROnPlateauHook(lr_patience=30,
+            lr_hook = hooks.ReduceLROnPlateauHook(lr_patience=args.lr_patience,
                                                   tr_patience=50,
                                                   min_delta=1e-5,
                                                   every_n_steps=args.batches_per_epoch)

@@ -104,13 +104,20 @@ class EvaluateVolume(EvaluateBase):
         self.estimator = estimator
         self.model_dir = model_dir or estimator.model_dir
         self.params = params or estimator.params
+        self.config = self.params["args"]
         self._timer = timer.Timer()
         meta_file = Path(__file__).parent.parent / "DataLoader/Liver/prepare/meta.json"
         with meta_file.open() as f:
             meta = json.load(f)
         self.meta = {x["PID"]: x for x in meta}
-        self.eval_in_patches = self.params["args"].eval_in_patches
-        self.do_mirror = self.params["args"].eval_mirror
+        self.eval_in_patches = self.config.eval_in_patches
+        self.do_mirror = self.config.eval_mirror
+        if self.config.random_flip in [1, 2]:
+            self.mirror_div = 1. / 2
+        elif self.config.random_flip == 3:
+            self.mirror_div = 1. / 4
+        else:
+            self.mirror_div = 1.
 
         self.merge_tumor_to_liver = merge_tumor_to_liver
         self.largest = largest
@@ -130,7 +137,7 @@ class EvaluateVolume(EvaluateBase):
 
     @property
     def metrics_str(self):
-        return self.params["args"].metrics_eval
+        return self.config.metrics_eval
 
     @staticmethod
     def maybe_append(dst, src, name, clear=False):
@@ -246,8 +253,6 @@ class EvaluateVolume(EvaluateBase):
         pad = -1
         bbox = None
         cur_case = None
-        volume = None
-        labels = None
 
         self._timer.reset()
         self._timer.tic()
@@ -261,11 +266,15 @@ class EvaluateVolume(EvaluateBase):
 
             if cur_case == new_case:
                 # Append batch to collections
-                if not predict["mirror"]:
-                    logits3d.append(predict["Prob"])
+                if predict["mirror"] == 0:
+                    logits3d.append(predict["Prob"] * self.mirror_div)
                     labels3d.append(predict["labels"])
-                else:
-                    logits3d[-1] = (logits3d[-1] + np.flip(predict["Prob"], axis=2)) / 2
+                elif predict["mirror"] == 1:
+                    logits3d[-1] += np.flip(predict["Prob"], axis=2) * self.mirror_div
+                elif predict["mirror"] == 2:
+                    logits3d[-1] += np.flip(predict["Prob"], axis=1) * self.mirror_div
+                elif predict["mirror"] == 3:
+                    logits3d[-1] += np.flip(np.flip(predict["Prob"], axis=2), axis=1) * self.mirror_div
             else:
                 volume = np.concatenate(logits3d)
                 volume = np.argmax(volume, axis=-1)
@@ -445,16 +454,61 @@ class EvaluateVolume(EvaluateBase):
         if not checkpoint_path:
             raise FileNotFoundError("Missing checkpoint file in {} with status_file {}".format(
                 self.model_dir, latest_filename))
-        args = self.params["args"]
         model_args = self.params.get("model_args", ())
         model_kwargs = self.params.get("model_kwargs", {})
 
         def run_eval():
             with tf.Graph().as_default():
-                bs, h, w, c = args.batch_size, args.im_height, args.im_width, args.im_channel
+                bs, h, w, c = (self.config.batch_size, self.config.im_height,
+                               self.config.im_width, self.config.im_channel)
                 images = tf.placeholder(tf.float32, shape=(bs, h, w, c))
                 model_inputs = {"images": images}
-                model = self.params["model"](args)
+                model = self.params["model"](self.config)
+                self.params["model_instances"] = [model]
+                # build model
+                model(model_inputs, ModeKeys.EVAL, *model_args, **model_kwargs)
+                saver = tf.train.Saver()
+                sess = tf.Session()
+                # load weights
+                sess.run(tf.global_variables_initializer())
+                saver.restore(sess, checkpoint_path)
+
+                if self.eval_in_patches or self.do_mirror:
+                    predictions = {"Prob": model.probability}
+                else:
+                    predictions = model.predictions
+                for features, labels in input_fn(ModeKeys.EVAL, self.params):
+                    preds_eval = sess.run(predictions, {images: features.pop("images")})
+                    preds_eval.update(features)
+                    preds_eval["labels"] = labels
+                    yield preds_eval
+
+        if self.eval_in_patches:
+            tf.logging.info("Eval in patches ...")
+            return self._evaluate_patches(run_eval(), cases=cases, verbose=2, save=save)
+        else:
+            tf.logging.info("Eval in images ...")
+            if self.do_mirror:
+                return self._evaluate_images_do_mirror(run_eval(), cases=cases, verbose=2, save=save)
+            else:
+                return self._evaluate_images(run_eval(), cases=cases, verbose=2, save=save)
+
+    def run_g(self, input_fn, checkpoint_path=None, latest_filename=None, cases=None, save=False):
+        checkpoint_path = self.find_checkpoint_path(checkpoint_path, latest_filename)
+        if not checkpoint_path:
+            raise FileNotFoundError("Missing checkpoint file in {} with status_file {}".format(
+                self.model_dir, latest_filename))
+        model_args = self.params.get("model_args", ())
+        model_kwargs = self.params.get("model_kwargs", {})
+
+        def run_eval():
+            with tf.Graph().as_default():
+                # Force batch size to be 1
+                bs, h, w, c = (1, self.config.im_height,
+                               self.config.im_width, self.config.im_channel)
+                images = tf.placeholder(tf.float32, shape=(bs, h, w, c))
+                model_inputs = {"images": images}
+                model = self.params["model"](self.config)
                 self.params["model_instances"] = [model]
                 # build model
                 model(model_inputs, ModeKeys.EVAL, *model_args, **model_kwargs)
@@ -545,7 +599,7 @@ class EvaluateVolume(EvaluateBase):
         if self.use_sg_reduce_fp:
             logits3d["Tumor"] = arr_ops.reduce_fp_with_guide(np.squeeze(labels3d["Tumor"], axis=-1),
                                                              logits3d["Tumor"],
-                                                             guide=self.params["args"].guide)
+                                                             guide="middle")
 
         # Calculate 3D metrics
         cur_pairs = {}
@@ -690,6 +744,12 @@ def _compare(cur_result,
         else:
             return False
     return False
+
+
+class TumorManagerV2(object):
+    def __init__(self, tumor_info):
+        self._tumor_info = tumor_info
+
 
 
 class TumorManager(object):
