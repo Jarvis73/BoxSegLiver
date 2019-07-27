@@ -20,6 +20,7 @@ import functools
 import numpy as np
 import scipy.ndimage as ndi
 from medpy import metric as mtr     # pip install medpy
+from collections import defaultdict
 
 WARNING_ONCE = False
 
@@ -347,7 +348,7 @@ def get_largest_component(inputs, rank, connectivity=1):
     return merge_labels(labeled_res, [-1, int(arg_min[-1]) + 1])
 
 
-def compute_robust_moments(binary_image, isotropic=False, index=None, min_std=5.0):
+def compute_robust_moments(binary_image, isotropic=False, indexing="ij", min_std=0.):
     """
     Compute robust center and standard deviation of a binary image(0: background, 1: foreground).
 
@@ -359,8 +360,11 @@ def compute_robust_moments(binary_image, isotropic=False, index=None, min_std=5.
         Input a image
     isotropic: boolean
         Compute isotropic standard deviation or not.
-    index: str
-        "xy" or "ij", default is "xy"
+    indexing: {'xy', 'ij'}, optional
+        Cartesian ('xy', default) or matrix ('ij') indexing of output.
+        See Notes for more details.
+    min_std: float
+        Set stddev lower bound
 
     Returns
     -------
@@ -380,7 +384,6 @@ def compute_robust_moments(binary_image, isotropic=False, index=None, min_std=5.
     if points.shape[1] == 0:
         return np.array([-1.0] * ndim, dtype=np.float32), np.array([-1.0] * ndim, dtype=np.float32)
     points = np.transpose(points)
-    points = np.fliplr(points)
     center = np.median(points, axis=0)
 
     # Compute median absolute deviation(short for mad) to estimate standard deviation
@@ -393,10 +396,10 @@ def compute_robust_moments(binary_image, isotropic=False, index=None, min_std=5.
         mad = np.median(diff, axis=0)
     std_dev = 1.4826 * mad
     std_dev = np.maximum(std_dev, [min_std] * ndim)
-    if not index or index == "xy":
-        return center, std_dev
-    elif index == "ij":
+    if not indexing or indexing == "xy":
         return center[::-1], std_dev[::-1]
+    elif indexing == "ij":
+        return center, std_dev
     else:
         raise ValueError("Wrong index value `{}`, must be one of [xy, ij]".format(index))
 
@@ -410,18 +413,47 @@ def create_gaussian_distribution(shape, center, stddev):
     return np.clip(d, 0, 1).astype(np.float32)
 
 
-def create_gaussian_distribution_v2(shape, center, stddev):
-    center = np.asarray(center, np.float32)
-    stddev = np.asarray(stddev, np.float32)
+def create_gaussian_distribution_v2(shape, centers, stddevs, indexing="ij"):
+    """
+    Parameters
+    ----------
+    shape: list
+        two values
+    centers: ndarray
+        Float ndarray with shape [n, d], d means (x, y, ...)
+    stddevs: ndarray
+        Float ndarray with shape [n, d], d means (x, y, ...)
+    indexing: {'xy', 'ij'}, optional
+        Cartesian ('xy', default) or matrix ('ij') indexing of output.
+        See Notes for more details.
+
+    TODO(zjw) Warning: indexing='xy' need test
+
+    Returns
+    -------
+    A batch of spatial guide image with shape [h, w, 1] for 2D and [d, h, w, 1] for 3D
+
+    Notes
+    -----
+    -1s in center and stddev are padding value and almost don't affect spatial guide
+    """
+    centers = np.asarray(centers, np.float32)
+    stddevs = np.asarray(stddevs, np.float32)
+    assert centers.ndim == 2
+    assert centers.shape == stddevs.shape
     coords = [np.arange(0, s) for s in shape]
-    coords = np.stack(np.meshgrid(*coords, indexing="ij"), axis=-1)
-    normalizer = 2 * (stddev * stddev)
-    d = np.exp(-np.sum((coords - center) ** 2 / normalizer, axis=-1))
-    return d.astype(np.float32)
+    coords = np.tile(
+        np.stack(np.meshgrid(*coords, indexing=indexing), axis=-1)[None],
+        reps=[centers.shape[0]] + [1] * (centers.shape[1] + 1))
+    coords = coords.astype(np.float32)
+    normalizer = 2 * stddevs * stddevs
+    d = np.exp(-np.sum((coords - centers) ** 2 / normalizer, axis=-1, keepdims=True))
+    return np.max(d, axis=0)
 
 
 def get_gd_image_single_obj(labels, center_perturb=0.2, stddev_perturb=0.4, blank_prob=0,
-                            partial=False, partial_slice="first", only_moments=False, min_std=5.0):
+                            partial=False, partial_slice="first", only_moments=False,
+                            min_std=0., indexing="xy"):
     """
     Get gaussian distribution image with some perturbation. All points assigned 1 are considered
     to be the same object.
@@ -444,6 +476,11 @@ def get_gd_image_single_obj(labels, center_perturb=0.2, stddev_perturb=0.4, blan
         Which slice to annotate spatial guide when partial is True. ["first", "middle"] are supported.
     only_moments: bool
         Only return moments
+    min_std: float
+        Set stddev lower bound
+    indexing: {'xy', 'ij'}, optional
+        Cartesian ('xy', default) or matrix ('ij') indexing of output.
+        See Notes for more details.
 
     Returns
     -------
@@ -477,7 +514,7 @@ def get_gd_image_single_obj(labels, center_perturb=0.2, stddev_perturb=0.4, blan
         obj_lab = labels
         obj_ndim = ndim
 
-    center, std = compute_robust_moments(obj_lab, min_std=min_std)
+    center, std = compute_robust_moments(obj_lab, indexing=indexing, min_std=min_std)
     center_p_ratio = np.random.uniform(-center_perturb, center_perturb, obj_ndim)
     center_p = center_p_ratio * std + center
     std_p_ratio = np.random.uniform(1.0 / (1 + stddev_perturb), 1.0 + stddev_perturb, obj_ndim)
@@ -485,7 +522,7 @@ def get_gd_image_single_obj(labels, center_perturb=0.2, stddev_perturb=0.4, blan
     if only_moments:
         return idx, center_p, std_p
 
-    cur_gd = create_gaussian_distribution(obj_lab.shape, center_p, std_p)
+    cur_gd = create_gaussian_distribution_v2(obj_lab.shape, center_p, std_p, indexing=indexing)
 
     if partial:
         gd = np.zeros_like(labels, dtype=np.float32)
@@ -616,15 +653,16 @@ def get_moments_multi_objs(labels,
                            blank_prob=0,
                            connectivity=1,
                            partial=False,
-                           partial_slice="first"):
+                           partial_slice="middle",
+                           indexing="ij",
+                           min_std=0.):
     """
     Get objects' moments with some perturbation. Only connected points assigned 1
     are considered to be the same object.
 
-    Only support 2D and 3D array.
+    Only support 3D array.
     """
-    global WARNING_ONCE
-
+    assert labels.ndim == 3
     labels = np.asarray(labels, dtype=np.uint8)
     if not np.any(labels):
         # return a blank gd image
@@ -632,62 +670,31 @@ def get_moments_multi_objs(labels,
 
     obj_labels = merge_labels(labels, [0, obj_value])
 
+    # Label image and find all objects
+    disc = ndi.generate_binary_structure(3, connectivity=connectivity)
+    labeled_image, num_obj = ndi.label(obj_labels, structure=disc)
+    slicers = ndi.find_objects(labeled_image)
+
     def gen_obj_image():
         for slicer in slicers:
             yield labeled_image[slicer], slices_to_bbox(slicer)
 
-    ndim = labels.ndim
-    if ndim == 2:
-        shape_xy = np.asarray(labels.shape)[::-1]
-        # Label image and find all objects
-        disc = ndi.generate_binary_structure(2, connectivity=connectivity)
-        labeled_image, num_obj = ndi.label(obj_labels, structure=disc)
-        slicers = ndi.find_objects(labeled_image)
-        # Compute moments for each object
-        ctr_std = []
-        for obj_image, bb in gen_obj_image():
-            _, ctr, std = get_gd_image_single_obj(obj_image, 0., 0., blank_prob,
-                                                  partial=partial,
-                                                  partial_slice=partial_slice,
-                                                  only_moments=True)
-            # [x, y, x, y]
-            ctr_std.append(np.concatenate(((ctr + np.array(bb[1::-1])) / shape_xy,
-                                           std / shape_xy), axis=0))
-        aligned_ctr_std = np.asarray(ctr_std, np.float32).reshape(-1, 4)
-    elif ndim == 3:
-        shape_xy = np.asarray(labels.shape[1:])[::-1]
-        # Label image and find all objects
-        disc = ndi.generate_binary_structure(3, connectivity=connectivity)
-        labeled_image, num_obj = ndi.label(obj_labels, structure=disc)
-        slicers = ndi.find_objects(labeled_image)
-        # Compute moments for each object
-        indices = []
-        ctr_std = []
-        for obj_image, bb in gen_obj_image():
-            idx, ctr, std = get_gd_image_single_obj(obj_image, 0., 0., blank_prob,
-                                                    partial=partial,
-                                                    partial_slice=partial_slice,
-                                                    only_moments=True)
-            # [x, y, x, y]
-            ctr_std.append(np.concatenate(((ctr + np.array(bb[2:0:-1])) / shape_xy,
-                                           std / shape_xy), axis=0))
-            indices.append(idx + bb[0])
-        ctr_std = np.asarray(ctr_std, np.float32).reshape(-1, 4)
+    # Compute moments for each object
+    prior_dict = defaultdict(list)
+    for obj_image, bb in gen_obj_image():
+        idx, ctr, std = get_gd_image_single_obj(obj_image, 0., 0., blank_prob,
+                                                partial=partial,
+                                                partial_slice=partial_slice,
+                                                only_moments=True,
+                                                min_std=min_std,
+                                                indexing=indexing)
+        ctr = ctr.tolist()  # Convert to list for saving to json
+        std = std.tolist()
+        prior_dict[str(idx + bb[0])].append({"z": [bb[0], bb[3]],
+                                             "center": [ctr[1] + bb[1], ctr[0] + bb[2]],
+                                             "stddev": std[::-1]})
 
-        middle_slice_id = np.bincount(indices, minlength=labels.shape[0])
-        aligned_ctr_std = np.empty(shape=(labels.shape[0], middle_slice_id.max(), 4), dtype=np.float32)
-        aligned_ctr_std[:, :, 0:2] = -2  # center
-        aligned_ctr_std[:, :, 2:4] = 0.00001  # stddev
-
-        books = np.zeros((labels.shape[0]), dtype=np.int32)
-        for i, ind in enumerate(indices):
-            if ind != -1:
-                aligned_ctr_std[ind, books[ind]] = ctr_std[i]
-                books[ind] += 1
-    else:
-        raise ValueError("`labels` must be a 2D/3D array")
-
-    return aligned_ctr_std
+    return prior_dict
 
 
 def get_guide_image(mask, obj_val=None, guide="first", tile_guide=False):

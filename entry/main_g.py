@@ -30,11 +30,12 @@ from core import solver
 from core import models
 from core import estimator as estimator_lib
 from core import hooks
-from DataLoader.Liver import input_pipeline
+from DataLoader.Liver import input_pipeline_g
 from evaluators import evaluator_liver
 
 ModeKeys = tfes.estimator.ModeKeys
-TF_RANDOM_SEED = None
+TF_RANDOM_SEED = 1234
+input_pipeline = input_pipeline_g
 
 
 def _get_arguments():
@@ -95,6 +96,8 @@ def main():
 
     session_config = _get_session_config(args)
 
+    if args.num_gpus < 2:
+        args.distribution_strategy = "off"
     distribution_strategy = distribution_utils.get_distribution_strategy(
         distribution_strategy=args.distribution_strategy,
         num_gpus=args.num_gpus,
@@ -142,7 +145,9 @@ def main():
 
         if args.eval_per_epoch:
             evaluator_lib = eval("evaluator_{}".format(subcommand))
-            evaluator = evaluator_lib.get_evaluator(args.evaluator, estimator=estimator)
+            evaluator = evaluator_lib.get_evaluator(args.evaluator,
+                                                    estimator=estimator,
+                                                    use_sg_reduce_fp=False)
             eval_hook = hooks.EvaluatorHook(evaluator,
                                             checkpoint_dir=estimator.model_dir,
                                             compare_fn=functools.partial(evaluator.compare,
@@ -164,12 +169,15 @@ def main():
         params = {"args": args}
         params.update(models.get_model_params(args))
         evaluator_lib = eval("evaluator_{}".format(subcommand))
-        evaluator = evaluator_lib.get_evaluator(args.evaluator, model_dir=args.model_dir, params=params)
-        evaluator.run(input_pipeline.input_fn,
-                      checkpoint_path=args.ckpt_path,
-                      latest_filename=(args.load_status_file if not args.eval_final else None),
-                      cases=args.eval_num,
-                      save=args.save_predict)
+        evaluator = evaluator_lib.get_evaluator(args.evaluator,
+                                                model_dir=args.model_dir,
+                                                params=params,
+                                                use_sg_reduce_fp=True)
+        evaluator.run_g(input_pipeline.input_fn,
+                        checkpoint_path=args.ckpt_path,
+                        latest_filename=(args.load_status_file if not args.eval_final else None),
+                        cases=args.eval_num,
+                        save=args.save_predict)
 
 
 if __name__ == "__main__":

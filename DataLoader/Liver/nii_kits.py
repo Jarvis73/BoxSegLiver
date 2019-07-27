@@ -18,18 +18,22 @@ import numpy as np
 import nibabel as nib
 
 
-def read_lits(num, obj, file_name):
+def read_lits(num, obj, file_name, only_header=False):
     if obj == "vol":
         return read_nii(file_name, out_dtype=np.int16,
-                        special=True if 28 <= int(num) < 48 else False)
+                        special=True if 28 <= int(num) < 48 else False,
+                        only_header=only_header)
     if obj == "lab":
         return read_nii(file_name, out_dtype=np.uint8,
-                        special=True if 28 <= int(num) < 52 else False)
+                        special=True if 28 <= int(num) < 52 else False,
+                        only_header=only_header)
 
 
-def read_nii(file_name, out_dtype=np.int16, special=False):
+def read_nii(file_name, out_dtype=np.int16, special=False, only_header=False):
     nib_vol = nib.load(str(file_name))
     vh = nib_vol.header
+    if only_header:
+        return vh
     affine = vh.get_best_affine()
     data = nib_vol.get_fdata().astype(out_dtype).transpose(2, 1, 0)
     if special:

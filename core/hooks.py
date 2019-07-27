@@ -83,7 +83,7 @@ class EvaluatorHook(session_run_hook.SessionRunHook):
                  evaluator,
                  checkpoint_dir=None,
                  compare_fn=None,
-                 tag=None,
+                 prefix=None,
                  eval_n_secs=None,
                  eval_n_steps=None,
                  saver=None,
@@ -93,7 +93,7 @@ class EvaluatorHook(session_run_hook.SessionRunHook):
         """Initializes a `CheckpointSaverHook`.
 
         Args:
-          tag: `str`, model tag
+          prefix: `str`, summary prefix
           evaluator: for evaluate model
           checkpoint_dir: `str`, base directory for the checkpoint files.
           compare_fn: `function`, compare function for the better results
@@ -111,7 +111,7 @@ class EvaluatorHook(session_run_hook.SessionRunHook):
         logging.info("Create BestCheckpointSaverHook.")
         if not isinstance(evaluator, evaluator_base.EvaluateBase):
             raise TypeError("`evaluator` must be an EvaluateBase instance")
-        self._summary_tag = tag + "/Eval/{}" if tag else "Eval/{}"
+        self._summary_tag = prefix + "/Eval/{}" if prefix else "Eval/{}"
         self._evaluator = evaluator
         self._compare_fn = compare_fn
         self._saver = saver
@@ -419,7 +419,7 @@ class EvaluatorHook(session_run_hook.SessionRunHook):
 
 class LogLearningRateHook(session_run_hook.SessionRunHook):
     def __init__(self,
-                 tag,
+                 prefix,
                  every_n_steps=100,
                  every_n_secs=None,
                  output_dir=None,
@@ -429,7 +429,7 @@ class LogLearningRateHook(session_run_hook.SessionRunHook):
                                                                 every_secs=every_n_secs)
         self._summary_writer = summary_writer
         self._output_dir = output_dir
-        self._summary_tag = "{}/learning rate".format(tag)
+        self._summary_tag = "{}/learning rate".format(prefix)
         self._steps_per_run = 1
         self.do_logging = do_logging
 

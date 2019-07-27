@@ -116,12 +116,11 @@ data/*.json
 logs/
 *deprecated*
 model_dir/
-run_scripts/*
-!run_scripts/001_dist.sh
-!run_scripts/001_unet.sh
+run_scripts/*.sh
 images/
 notebooks/
 grabcut.py
 data/NF/*
 nf_output/
 prepare/
+!run_scripts/template/*

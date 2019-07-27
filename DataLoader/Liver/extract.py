@@ -14,7 +14,6 @@
 #
 # =================================================================================
 
-import collections
 import json
 # noinspection PyUnresolvedReferences
 import pprint
@@ -121,7 +120,7 @@ def nii_3d_to_png(in_path, out_path):
             start += n_obj_
             for k, sli_ in enumerate(slices_):
                 region_ = slice_[sli_] == 2
-                center_, stddev_ = array_kits.compute_robust_moments(region_, index="ij", min_std=0.)
+                center_, stddev_ = array_kits.compute_robust_moments(region_, indexing="ij", min_std=0.)
                 center_[0] += objects_[k][0]
                 center_[1] += objects_[k][1]
                 tumor_slices_centers.append(center_.tolist())
@@ -245,16 +244,59 @@ def run_dump_hist_feature(num=-1):
                       xrng=(GRAY_MIN, GRAY_MAX), number=num)
 
 
+def simulate_user_prior(simul_name, in_path):
+    """
+    We assume user labels the middle slice of all the tumors by an ellipse, which can
+    be represented by a center and a stddev. Meanwhile tumor position in z direction
+    is also provided for better performance.
+    """
+    prepare_dir = Path(__file__).parent / "prepare"
+
+    # Check existence
+    obj_file = prepare_dir / simul_name
+    if obj_file.exists():
+        with obj_file.open() as f:
+            dataset_dict = json.load(f)
+        return dataset_dict
+
+    src_path = Path(in_path)
+
+    all_prior_dict = {}
+    for i, lab_case in enumerate(sorted(src_path.glob("segmentation-*.nii"),
+                                        key=lambda x: int(str(x).split(".")[0].split("-")[-1]))):
+        print("{:03d} {:47s}".format(i, str(lab_case)))
+        pid = int(lab_case.stem.split("-")[-1])
+
+        _, labels = nii_kits.read_lits(pid, "vol", lab_case)
+        all_prior_dict[str(pid)] = array_kits.get_moments_multi_objs(
+                labels, obj_value=2, partial=True, partial_slice="middle")
+        for k, v_list in all_prior_dict[str(pid)].items():
+            for j, v in enumerate(v_list):
+                all_prior_dict[str(pid)][k][j]["stddev"] = [round(x, 3) for x in v["stddev"]]
+
+    with obj_file.open("w") as f:
+        json.dump(all_prior_dict, f)
+
+
+def run_simulate_user_prior():
+    # data_dir = "D:/Dataset/LiTS/Training_Batch"
+    data_dir = Path(__file__).parent.parent.parent / "data/LiTS/Training_Batch"
+    simulate_user_prior("prior.json", data_dir)
+
+
 if __name__ == "__main__":
     cmd = input("Please choice function:\n\t"
                 "a: exit()\n\t"
                 "b: run_nii_3d_to_png()\n\t"
-                "c: run_dump_hist_feature() [A/b/c]")
+                "c: run_dump_hist_feature()\n\t"
+                "d: run_simulate_user_prior [A/b/c/d]")
     cmd = cmd.lower()
 
     if cmd == "b":
         run_nii_3d_to_png()
     elif cmd == "c":
         run_dump_hist_feature()
+    elif cmd == "d":
+        run_simulate_user_prior()
 
     print("Exit")

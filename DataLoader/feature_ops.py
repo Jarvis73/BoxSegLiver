@@ -17,9 +17,7 @@
 import numpy as np
 
 
-def hist_aug(feat, **kwargs):
-    if "hist_noise" in kwargs and kwargs["hist_noise"]:
-        feat += np.random.normal(loc=0., scale=1., size=feat.shape) * kwargs.get("hist_noise_scale", 0.005)
+def hist_preprocess(feat, **kwargs):
     if "hist_scale" in kwargs:
         feat *= kwargs["hist_scale"]
-    return feat
+    return feat.astype(np.float32)

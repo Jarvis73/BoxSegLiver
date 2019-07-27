@@ -1,5 +1,8 @@
+import tqdm
 import tensorflow as tf
 from io import BytesIO
+from pathlib import Path
+import argparse
 
 import matplotlib
 matplotlib.use('Agg')
@@ -66,3 +69,57 @@ def summary_image(writer, iter_, tag, images, max_outputs=3):
     writer.add_summary(summary_value, int(iter_))
 
     return
+
+
+def change_summary_prefix(event_file, write_dir, new_prefix=None, remove_prefix=False,
+                          keep_fields=("simple_value",)):
+    write_dir = Path(write_dir)
+    write_dir.mkdir(parents=True, exist_ok=True)
+
+    writer = tf.summary.FileWriter(write_dir)
+
+    def modify(value):
+        if remove_prefix:
+            new_tag = "/".join(value.tag.split("/")[1:])
+            value.tag = new_tag
+        elif new_prefix:
+            new_tag = "/".join([new_prefix] + value.tag.split("/")[1:])
+            value.tag = new_tag
+        # if value.WhichOneof("value") == "simple_value":
+        #     value.simple_value += 0.1
+        return value
+
+    total = 0
+    for _ in tf.train.summary_iterator(event_file):
+        total += 1
+
+    for event in tqdm.tqdm(tf.train.summary_iterator(event_file), total=total):
+        event_type = event.WhichOneof("what")
+        if event_type != "summary":
+            writer.add_event(event)
+        else:
+            wall_time = event.wall_time
+            step = event.step
+            filtered_values = [modify(value) if new_prefix or remove_prefix else value
+                               for value in event.summary.value if value.WhichOneof("value") in keep_fields]
+            summary = tf.Summary(value=filtered_values)
+            filtered_event = tf.summary.Event(summary=summary, wall_time=wall_time, step=step)
+            writer.add_event(filtered_event)
+    writer.close()
+
+
+def arg_parser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-f", "--file", type=str, required=True, help="Event file")
+    parser.add_argument("-o", "--output_dir", type=str, required=True, help="Output directory")
+    parser.add_argument("-p", "--new_prefix", type=str, help="New prefix")
+    parser.add_argument("-r", "--remove_prefix", action="store_true", help="Remove current prefix")
+    parser.add_argument("-k", "--keep_fields", type=str, nargs="+", default=["simple_value"])
+    args = parser.parse_args()
+    return args
+
+
+if __name__ == "__main__":
+    args = arg_parser()
+    change_summary_prefix(args.file, args.output_dir, args.new_prefix, args.remove_prefix,
+                          args.keep_fields)

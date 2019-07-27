@@ -26,12 +26,6 @@ ModeKeys = tfes.estimator.ModeKeys
 metrics = losses
 
 
-def _check_size_type(size):
-    if size < 0:
-        return None
-    return size
-
-
 class UNet(base.BaseNet):
     def __init__(self, args, name=None):
         """ Don't create ops/tensors in __init__() """
@@ -65,8 +59,8 @@ class UNet(base.BaseNet):
         num_down_samples = kwargs.get("num_down_samples", 4)
 
         # Tensorflow can not infer input tensor shape when constructing graph
-        self.height = _check_size_type(self.height)
-        self.width = _check_size_type(self.width)
+        self.height = base._check_size_type(self.height)
+        self.width = base._check_size_type(self.width)
         self._inputs["images"].set_shape([self.bs, self.height, self.width, self.channel])
         if "labels" in self._inputs:
             self._inputs["labels"].set_shape([self.bs, None, None])

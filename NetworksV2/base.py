@@ -24,6 +24,12 @@ import loss_metrics as metrics
 ModeKeys = tfes.estimator.ModeKeys
 
 
+def _check_size_type(size):
+    if size < 0:
+        return None
+    return size
+
+
 class BaseNet(object):
     def __init__(self, args):
         # Private

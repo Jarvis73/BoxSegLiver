@@ -15,29 +15,12 @@
 # =================================================================================
 import argparse
 from pathlib import Path
-from tensorflow.python.estimator.model_fn import ModeKeys
-from tensorflow.python.platform import tf_logging as logging
 
 
 class CustomKeys(object):
     LEARNING_RATE = "learning_rate"
     LOSS_MEAN = "total_loss_mean"
     LR_UPDATE_OPS = "lr_update_ops"
-
-
-def _try_to_find_ckpt(path, args):
-    path = Path(path)
-
-    if path.exists() or path.with_suffix(path.suffix + ".index").exists():   # Absolute path
-        return str(path)
-    cur_path = Path(__file__).parent / path
-    if cur_path.exists() or cur_path.with_suffix(path.suffix + ".index").exists():   # Relative path
-        return str(cur_path)
-    model_dir = "model_dir" if not args.model_dir else args.model_dir
-    cur_path = Path(__file__).parent / model_dir / path
-    if cur_path.exists() or cur_path.with_suffix(path.suffix + ".index").exists():   # Relative path
-        return str(cur_path)
-    raise FileNotFoundError(path)
 
 
 def add_arguments(parser):
@@ -49,27 +32,24 @@ def add_arguments(parser):
     group.add_argument("--tag",
                        type=str,
                        required=True, help="Configuration tag(like UID)")
-    group.add_argument("--train_without_eval",
-                       action="store_true",
-                       required=False, help="Evaluate model during training")
     group.add_argument("--model_dir",
                        type=str,
-                       default="",
-                       required=False, help="Directory to save model parameters, graph and etc")
+                       default="", help="Directory to save model parameters, graph and etc")
     group.add_argument("-s", "--save_predict",
-                       action="store_true",
-                       required=False, help="Save prediction to file")
+                       action="store_true", help="Save prediction to file")
     group.add_argument("--warm_start_from",
-                       type=str,
-                       required=False, help="Warm start the model from a checkpoint")
+                       type=str, help="Warm start the model from a checkpoint")
     group.add_argument("-l", "--load_status_file",
                        type=str,
-                       default="checkpoint_best",
-                       required=False, help="Status file to locate checkpoint file. Use for restore"
-                                            "parameters.")
+                       default="checkpoint", help="Status file to locate checkpoint file. Use for restore"
+                                                  "parameters.")
     group.add_argument("--out_file",
-                       type=str,
-                       required=False, help="Logging file name to replace default.")
+                       type=str, help="Logging file name to replace default.")
+    group.add_argument("--summary_prefix", type=str,
+                       help="A string that will be prepend to the summary tags. It is useful for "
+                            "differentiating experiments with different prefix or merge several "
+                            "experiments into a single label with the same prefix. Default is set"
+                            "to experiment tag.")
 
     group = parser.add_argument_group(title="Device Arguments")
     group.add_argument("--distribution_strategy",
@@ -93,11 +73,22 @@ def add_arguments(parser):
                        required=False, help="Used for per_process_gpu_memory_fraction")
 
 
+def _try_to_find_ckpt(path, args):
+    path = Path(path)
+
+    if path.exists() or path.with_suffix(path.suffix + ".index").exists():   # Absolute path
+        return str(path)
+    cur_path = Path(__file__).parent / path
+    if cur_path.exists() or cur_path.with_suffix(path.suffix + ".index").exists():   # Relative path
+        return str(cur_path)
+    model_dir = "model_dir" if not args.model_dir else args.model_dir
+    cur_path = Path(__file__).parent / model_dir / path
+    if cur_path.exists() or cur_path.with_suffix(path.suffix + ".index").exists():   # Relative path
+        return str(cur_path)
+    raise FileNotFoundError(path)
+
+
 def check_args(args, parser):
-
-    if hasattr(args, "zoom_scale") and args.zoom_scale < 1:
-        raise parser.error("Asserting {} >= 1 failed!".format(args.zoom_scale))
-
     if args.loss_weight_type == "numerical":
         if not args.loss_numeric_w:
             raise parser.error("loss_weight_type==numerical need parameter: --loss_numeric_w")
@@ -118,42 +109,11 @@ def check_args(args, parser):
             if parts[0] not in args.classes or parts[1] not in args.metrics_eval:
                 raise ValueError("Wrong secondary_metric: {}".format(args.secondary_metric))
 
-    if args.mode == ModeKeys.TRAIN and hasattr(args, "dataset_for_train"):
-        if not args.dataset_for_train:
-            raise parser.error("TRAIN mode need parameter: --dataset_for_train")
-        for x in args.dataset_for_train:
-            record = Path(__file__).parent / "data" / x
-            if not record.exists():
-                raise parser.error("File not found: " + str(record))
-
-    if args.mode == ModeKeys.EVAL and hasattr(args, "dataset_for_eval"):
-        if not args.dataset_for_eval:
-            raise parser.error("EVAL mode need parameter: --dataset_for_eval")
-        for x in args.dataset_for_eval:
-            record = Path(__file__).parent / "data" / x
-            if not record.exists():
-                raise parser.error("File not found: " + str(record))
-
-    if hasattr(args, "use_spatial_guide") and args.use_spatial_guide and args.im_channel <= 1:
-        raise ValueError("When using spatial guide, im_channel should be at least 2, got {}"
-                         .format(args.im_channel))
-
-    if hasattr(args, "use_fewer_guide") and args.use_fewer_guide:
-        args.batch_size = 1
-        logging.info("Using fewer guides will force batch_size = 1.")
-
-    # TODO(ZJW): For compatibility
-    if hasattr(args, "triplet") and args.triplet:
-        if args.input_group == 1:
-            args.input_group = 3
-        args.triplet = False
-
     if args.warm_start_from:
         args.warm_start_from = _try_to_find_ckpt(args.warm_start_from, args)
 
-    # TODO(ZJW): For compatibility
-    if hasattr(args, "eval_3d") and args.eval_3d:
-        args.evaluator = "Volume"
+    if not args.summary_prefix:
+        args.summary_prefix = args.tag
 
 
 def fill_default_args(args):

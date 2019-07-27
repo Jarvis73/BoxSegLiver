@@ -22,13 +22,12 @@ from pathlib import Path
 from tensorflow.python import pywrap_tensorflow as pt
 
 from NetworksV2.UNet import UNet
-from core import hooks
+from NetworksV2.GUNet import GUNet
 
 ModeKeys = tfes.estimator.ModeKeys
-
 # Available models
 MODEL_ZOO = [
-    UNet,
+    UNet, GUNet
 ]
 
 
@@ -84,9 +83,17 @@ def get_model_params(args, build_metrics=False, build_summaries=False):
 
     if not args.model_config:
         args.model_config = args.model + ".yml"
+
+    # Try to find model config file in NetworksV2/ and NetworksV2/ext_config/ directories
     model_config_path = Path(__file__).parent.parent / "NetworksV2" / args.model_config
+    if not model_config_path.exists():
+        model_config_path = model_config_path.parent / "ext_config" / args.model_config
+        if not model_config_path.exists():
+            raise ValueError("Cannot find model config file %s" % args.model_config)
+
     with model_config_path.open() as f:
         params["model_kwargs"] = yaml.load(f, Loader=yaml.Loader)
+        tf.logging.info("Load model configuration from %s" % str(model_config_path))
 
     params["model_kwargs"]["build_metrics"] = build_metrics
     params["model_kwargs"]["build_summaries"] = build_summaries
@@ -176,7 +183,7 @@ def model_fn(features, labels, mode, params, config):
     kwargs = {"loss": loss,
               "train_op": train_op,
               "predictions": predictions}
-    tfes.estimator.Estimator
+
     #############################################################################
     # Initialize partial graph variables by init_fn
     # init_fn = init_partial_model(model, args)

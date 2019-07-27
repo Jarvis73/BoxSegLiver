@@ -14,6 +14,8 @@
 #
 # =================================================================================
 
+import json
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -69,3 +71,34 @@ def read_or_create_k_folds(path, list_, k_split=None, seed=None):
         for fold in k_folds:
             print(",".join(fold))
     return k_folds
+
+
+def load_meta(dataset, find_path):
+    """
+    Try to load meta.json
+
+    Parameters
+    ----------
+    dataset: str
+        The same with folder name in `<PROJECT>/DataLoader`
+    find_path: str
+        Path after `<PROJECT>/data` to find meta.json
+
+    For example:
+        load_meta("Liver", "LiTS/png")
+
+    Returns
+    -------
+    meta dict
+    """
+    prepare_dir = Path(__file__).parent / dataset / "prepare"
+    # Load meta.json
+    meta_file = prepare_dir / "meta.json"
+    if not meta_file.exists():
+        src_meta = Path(__file__).parent.parent / "data" / find_path / "meta.json"
+        if not src_meta.exists():
+            raise FileNotFoundError(str(src_meta))
+        shutil.copyfile(str(src_meta), str(meta_file))
+    with meta_file.open() as f:
+        meta = json.load(f)
+    return meta

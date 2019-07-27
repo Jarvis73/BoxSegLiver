@@ -730,7 +730,7 @@ class CustomEstimator(object):
             g = ops.get_default_graph()
             local_init_ops = [x.initializer for x in g.get_collection(ops.GraphKeys.METRIC_VARIABLES)
                               if "total_loss" in x.op.name]
-            summary.scalar(self._params["args"].tag + '/Losses/total_loss', value)
+            summary.scalar(self._params["args"].summary_prefix + '/Losses/total_loss', value)
             worker_hooks.append(hooks_lib.AverageTensorHook(update_op, local_init_ops,
                                                             every_n_steps=self._config.save_summary_steps))
         worker_hooks.extend(hooks)

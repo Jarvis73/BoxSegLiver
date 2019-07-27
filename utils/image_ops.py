@@ -363,6 +363,10 @@ def create_spatial_guide_2d(shape, center, stddev):
     -------
     A batch of spatial guide image
 
+    Warnings
+    --------
+    User must make sure stddev doesn't contain zero.
+
     Notes
     -----
     -1s in center and stddev are padding value and almost don't affect spatial guide
@@ -377,6 +381,5 @@ def create_spatial_guide_2d(shape, center, stddev):
     center = tf.expand_dims(tf.expand_dims(center, axis=-2), axis=-2)       # [n, 1, 1, 2]
     stddev = tf.expand_dims(tf.expand_dims(stddev, axis=-2), axis=-2)       # [n, 1, 1, 2]
     normalizer = 2. * stddev * stddev                                       # [n, 1, 1, 2]
-    d = tf.exp(-tf.reduce_sum((coords - center) ** 2 / normalizer, axis=-1))    # [n, h, w]
-    guide = tf.reduce_max(tf.clip_by_value(d, 0, 1), axis=1)                    # [h, w]
-    return tf.expand_dims(guide, axis=-1)                                   # [h, w, 1]
+    d = tf.exp(-tf.reduce_sum((coords - center) ** 2 / normalizer, axis=-1, keepdims=True))    # [n, h, w]
+    return tf.reduce_max(d, axis=0)               # [h, w, 1]

@@ -52,9 +52,9 @@ python main.py --help
   * `--test_fold`: which fold for validating, others for training
 
 * Optional Parameters:
-  * --zoom_scale 1.2 (for data augmentation)
+  * --random_flip 3 --noise_scale 0.05 (data augmentation)
   * --im_height 256 --im_width 256 (specify training image size, -1 if not specified)
-  * --im_channel 1 (specify image channel)
+  * --im_channel 3 (specify image channel)
   * --num_of_total_steps (number of max training steps)
   * --primary_metric ("<class>/<metric>", such as "Liver/Dice")
   * --weight_decay_rate (weight decay rate)
@@ -64,7 +64,14 @@ python main.py --help
 * Other Parameters:
   * Please run `python main.py --help` for details
 
-**C. Add execution permission for your bash file: `chmod u+x ./run_scripts/train_unet.sh`**
+**C. Add execution permission for your bash file**
+
+```bash
+chmod u+x ./run_scripts/001_unet.sh
+```
+
+**D. Begin train/evaluate model**
+
 * training
 ```bash
 ./run_scripts/001_unet.sh train 0
@@ -73,11 +80,11 @@ python main.py --help
 * evaluation
 ```bash
 # evaluation with best checkpoint
-./run_scripts/train_unet.sh eval 0 --load_status_file checkpoint_best
+./run_scripts/001_unet.sh eval 0 --load_status_file checkpoint_best
 # evaluation with final checkpoint
-./run_scripts/train_unet.sh eval 0 --eval_final
+./run_scripts/001_unet.sh eval 0 --eval_final
 # evaluating and saving predictions
-./run_scripts/train_unet.sh eval 0 --save_predict
+./run_scripts/001_unet.sh eval 0 --save_predict
 ```
 * other parameters...
 
