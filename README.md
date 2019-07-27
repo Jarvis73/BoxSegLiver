@@ -92,7 +92,7 @@ chmod u+x ./run_scripts/my_config.sh
 ```
 * other parameters...
 
-### 3. Train/Evaluate GUNet model ?
+### 3. Train/Evaluate GUNet model
 
 **A. For help**
 ```bash
@@ -136,9 +136,11 @@ Then add execution permission for your bash file & begin train/evaluate model th
 
 - [x] UNet
 - [ ] Attention UNet
-- [x] OSMN
+- [x] GUNet
+- [ ] G-AttentionUNet
 
-- [x] Balance dataset
 - [ ] Pre-trained backbone
-- [ ] Spatial guide
-- [x] Gaussian distribution
+- [x] Context guide
+- [x] Histogram context
+- [ ] Other context
+- [x] Spatial guide
