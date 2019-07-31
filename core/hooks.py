@@ -124,10 +124,12 @@ class EvaluatorHook(session_run_hook.SessionRunHook):
         self._better_result = None
 
         if self._save_best:
+            logging.info("Enable --> save best checkpoint!")
             self._save_path = os.path.join(checkpoint_dir, checkpoint_basename)
             self._need_save = False
             self._last_step_in_get_saver = 0
             if self._save_interval:
+                logging.info("       --> save best checkpoint in each interval of %d steps!" % self._save_interval)
                 saved_steps = [-1]
                 for x in self._get_best_result_dump_file(name="best_result_*", use_glob=True):
                     saved_steps.append(int(x.stem.split("_")[-1]))
@@ -172,8 +174,8 @@ class EvaluatorHook(session_run_hook.SessionRunHook):
 
     def _evaluate(self, session, step):
         results = self._evaluator.run_with_session(session)
-        if self._save_interval and (step // self._step_interval !=
-                                    self._last_step_in_get_saver // self._step_interval):
+        if self._save_interval and (step // self._save_interval !=
+                                    self._last_step_in_get_saver // self._save_interval):
             # Reset self._better_result for new interval.
             self._better_result = None
 
@@ -193,7 +195,8 @@ class EvaluatorHook(session_run_hook.SessionRunHook):
         if not self._need_save:
             return False
         self._need_save = False
-        logging.info("Saving (best) checkpoints for %d into %s.", step, self._save_path)
+        logging.info("Saving (best) checkpoints for %d into %s (checkpoint_best).",
+                     step - 1, self._save_path)
 
         # We must use a different latest_filename comparing with the default "checkpoint"
         self._get_saver().save(session, self._save_path, global_step=step,
@@ -210,10 +213,11 @@ class EvaluatorHook(session_run_hook.SessionRunHook):
         if not self._need_save:
             return False
         self._need_save = False
-        logging.info("Saving (best) checkpoints for %d into %s.", step, self._save_path)
 
         # We must use a different latest_filename comparing with the default "checkpoint"
-        end_point = (step // self._step_interval + 1) * self._step_interval
+        end_point = (step // self._save_interval + 1) * self._save_interval
+        logging.info("Saving (best) checkpoints for step %d into %s (%s).",
+                     step - 1, self._save_path, "checkpoint_best_%d" % end_point)
         self._get_saver(step).save(session, self._save_path, global_step=step,
                                    write_meta_graph=False,
                                    latest_filename="checkpoint_best_{}".format(end_point))
@@ -254,8 +258,8 @@ class EvaluatorHook(session_run_hook.SessionRunHook):
 
     def _get_saver(self, step=None):
         if self._saver is not None and (
-                step is None or (step // self._step_interval ==
-                                 self._last_step_in_get_saver // self._step_interval)):
+                step is None or (step // self._save_interval ==
+                                 self._last_step_in_get_saver // self._save_interval)):
             self._last_step_in_get_saver = step
             return self._saver
 

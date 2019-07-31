@@ -165,19 +165,27 @@ def bbox_to_slices(bbox):
     return tuple(slices)
 
 
-def slices_to_bbox(slices):
+def slices_to_bbox(slices, indexing="ij"):
     """
 
     Parameters
     ----------
     slices: list of slice
+    indexing: {'xy', 'ij'}, optional
+        Cartesian ('xy') or matrix ('ij', default) indexing of output.
+        See Notes for more details.
 
     Returns
     -------
     bbox: [start1, start2, ..., stop1, stop2, ...]
 
     """
-    return [x.start for x in slices] + [x.stop for x in slices]
+    if indexing == "ij":
+        return [x.start for x in slices] + [x.stop for x in slices]
+    elif indexing == "xy":
+        return [x.start for x in reversed(slices)] + [x.stop for x in reversed(slices)]
+    else:
+        raise ValueError("Valid values for `indexing` are 'xy' and 'ij'.")
 
 
 def bbox_to_shape(bbox):
@@ -361,7 +369,7 @@ def compute_robust_moments(binary_image, isotropic=False, indexing="ij", min_std
     isotropic: boolean
         Compute isotropic standard deviation or not.
     indexing: {'xy', 'ij'}, optional
-        Cartesian ('xy', default) or matrix ('ij') indexing of output.
+        Cartesian ('xy') or matrix ('ij', default) indexing of output.
         See Notes for more details.
     min_std: float
         Set stddev lower bound
@@ -383,8 +391,8 @@ def compute_robust_moments(binary_image, isotropic=False, indexing="ij", min_std
     points = np.asarray(coords).astype(np.float32)
     if points.shape[1] == 0:
         return np.array([-1.0] * ndim, dtype=np.float32), np.array([-1.0] * ndim, dtype=np.float32)
-    points = np.transpose(points)
-    center = np.median(points, axis=0)
+    points = np.transpose(points)       # [pts, 2], 2: (i, j)
+    center = np.median(points, axis=0)  # [2]
 
     # Compute median absolute deviation(short for mad) to estimate standard deviation
     if isotropic:
@@ -401,7 +409,7 @@ def compute_robust_moments(binary_image, isotropic=False, indexing="ij", min_std
     elif indexing == "ij":
         return center, std_dev
     else:
-        raise ValueError("Wrong index value `{}`, must be one of [xy, ij]".format(index))
+        raise ValueError("Valid values for `indexing` are 'xy' and 'ij'.")
 
 
 def create_gaussian_distribution(shape, center, stddev):
@@ -413,7 +421,7 @@ def create_gaussian_distribution(shape, center, stddev):
     return np.clip(d, 0, 1).astype(np.float32)
 
 
-def create_gaussian_distribution_v2(shape, centers, stddevs, indexing="ij"):
+def create_gaussian_distribution_v2(shape, centers, stddevs, indexing="ij", keepdims=False):
     """
     Parameters
     ----------
@@ -424,8 +432,10 @@ def create_gaussian_distribution_v2(shape, centers, stddevs, indexing="ij"):
     stddevs: ndarray
         Float ndarray with shape [n, d], d means (x, y, ...)
     indexing: {'xy', 'ij'}, optional
-        Cartesian ('xy', default) or matrix ('ij') indexing of output.
+        Cartesian ('xy') or matrix ('ij', default) indexing of output.
         See Notes for more details.
+    keepdims: bool
+        Keep final dimension
 
     TODO(zjw) Warning: indexing='xy' need test
 
@@ -437,23 +447,25 @@ def create_gaussian_distribution_v2(shape, centers, stddevs, indexing="ij"):
     -----
     -1s in center and stddev are padding value and almost don't affect spatial guide
     """
-    centers = np.asarray(centers, np.float32)
-    stddevs = np.asarray(stddevs, np.float32)
-    assert centers.ndim == 2
-    assert centers.shape == stddevs.shape
+    centers = np.asarray(centers, np.float32)                                   # [n, 2]    if dimension=2
+    stddevs = np.asarray(stddevs, np.float32)                                   # [n, 2]
+    assert centers.ndim == 2, centers.shape
+    assert centers.shape == stddevs.shape, (centers.shape, stddevs.shape)
     coords = [np.arange(0, s) for s in shape]
     coords = np.tile(
         np.stack(np.meshgrid(*coords, indexing=indexing), axis=-1)[None],
-        reps=[centers.shape[0]] + [1] * (centers.shape[1] + 1))
+        reps=[centers.shape[0]] + [1] * (centers.shape[1] + 1))                 # [n, h, w, 2]
     coords = coords.astype(np.float32)
-    normalizer = 2 * stddevs * stddevs
-    d = np.exp(-np.sum((coords - centers) ** 2 / normalizer, axis=-1, keepdims=True))
-    return np.max(d, axis=0)
+    centers = centers[..., None, None, :]                                       # [n, 1, 1, 2]
+    stddevs = stddevs[..., None, None, :]                                       # [n, 1, 1, 2]
+    normalizer = 2 * stddevs * stddevs                                          # [n, 1, 1, 2]
+    d = np.exp(-np.sum((coords - centers) ** 2 / normalizer, axis=-1, keepdims=keepdims))   # [n, h, w, 1] / [n, h, w]
+    return np.max(d, axis=0)                                                    # [h, w, 1] / [h, w]
 
 
 def get_gd_image_single_obj(labels, center_perturb=0.2, stddev_perturb=0.4, blank_prob=0,
                             partial=False, partial_slice="first", only_moments=False,
-                            min_std=0., indexing="xy"):
+                            min_std=0., indexing="ij", keepdims=False):
     """
     Get gaussian distribution image with some perturbation. All points assigned 1 are considered
     to be the same object.
@@ -479,8 +491,10 @@ def get_gd_image_single_obj(labels, center_perturb=0.2, stddev_perturb=0.4, blan
     min_std: float
         Set stddev lower bound
     indexing: {'xy', 'ij'}, optional
-        Cartesian ('xy', default) or matrix ('ij') indexing of output.
+        Cartesian ('xy') or matrix ('ij', default) indexing of output.
         See Notes for more details.
+    keepdims: bool
+        Keep final dimension
 
     Returns
     -------
@@ -522,7 +536,8 @@ def get_gd_image_single_obj(labels, center_perturb=0.2, stddev_perturb=0.4, blan
     if only_moments:
         return idx, center_p, std_p
 
-    cur_gd = create_gaussian_distribution_v2(obj_lab.shape, center_p, std_p, indexing=indexing)
+    cur_gd = create_gaussian_distribution_v2(obj_lab.shape, [center_p], [std_p], indexing=indexing,
+                                             keepdims=keepdims)
 
     if partial:
         gd = np.zeros_like(labels, dtype=np.float32)
@@ -545,6 +560,8 @@ def get_gd_image_multi_objs(labels,
                             fake_range_value=0,
                             ret_bbox=False,
                             partial_slice="first",
+                            keepdims=False,
+                            min_std=0.,
                             **kwargs):
     """
     Get gaussian distribution image with some perturbation. Only connected points assigned 1
@@ -582,6 +599,9 @@ def get_gd_image_multi_objs(labels,
         Whether or not return bboxes of the objects
     partial_slice: str
         Which slice to annotate spatial guide when partial is True. ["first", "middle"] are supported.
+    keepdims: bool
+        Keep final dimension
+    min_std: float
     kwargs: dict
         Parameters passed to bbox_from_mask()
 
@@ -613,7 +633,7 @@ def get_gd_image_multi_objs(labels,
     gds, stds = [], []
     for obj_image in gen_obj_image():
         gd, _, std = get_gd_image_single_obj(obj_image, center_perturb, stddev_perturb, blank_prob,
-                                             partial, partial_slice)
+                                             partial, partial_slice, keepdims=keepdims, min_std=min_std)
         gds.append(gd)
         stds.append(std)
 
@@ -677,7 +697,7 @@ def get_moments_multi_objs(labels,
 
     def gen_obj_image():
         for slicer in slicers:
-            yield labeled_image[slicer], slices_to_bbox(slicer)
+            yield labeled_image[slicer], slices_to_bbox(slicer, indexing=indexing)
 
     # Compute moments for each object
     prior_dict = defaultdict(list)
@@ -688,11 +708,15 @@ def get_moments_multi_objs(labels,
                                                 only_moments=True,
                                                 min_std=min_std,
                                                 indexing=indexing)
+        if indexing == "ij":
+            coord1, coord2, z1, z2 = bb[1], bb[2], bb[0], bb[3]     # y, x, z1, z2
+        else:
+            coord1, coord2, z1, z2 = bb[0], bb[1], bb[2], bb[5]     # x, y, z1, z2
         ctr = ctr.tolist()  # Convert to list for saving to json
         std = std.tolist()
-        prior_dict[str(idx + bb[0])].append({"z": [bb[0], bb[3]],
-                                             "center": [ctr[1] + bb[1], ctr[0] + bb[2]],
-                                             "stddev": std[::-1]})
+        prior_dict[str(idx + bb[0])].append({"z": [z1, z2],
+                                             "center": [ctr[0] + coord1, ctr[1] + coord2],
+                                             "stddev": std})
 
     return prior_dict
 

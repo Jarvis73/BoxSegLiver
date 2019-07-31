@@ -284,33 +284,32 @@ class GUNet(base.BaseNet):
                     split = tf.split(self.probability, self.num_classes, axis=-1)
                     if self.ret_prob:
                         for i in range(1, self.num_classes):
-                            self._layers[self.classes[i] + "Prob"] = split[i]
+                            self.predictions[self.classes[i] + "Prob"] = split[i]
                     if self.ret_pred:
                         zeros = tf.zeros_like(split[0], dtype=tf.uint8)
                         ones = tf.ones_like(zeros, dtype=tf.uint8)
                         for i in range(1, self.num_classes):
                             obj = self.classes[i] + "Pred"
-                            self._layers[obj] = tf.where(split[i] > 0.5, ones, zeros, name=obj)
-                            self._image_summaries[obj] = self._layers[obj]
+                            self.predictions[obj] = tf.where(split[i] > 0.5, ones, zeros, name=obj)
+                            self._image_summaries[obj] = self.predictions[obj]
 
     def _build_loss(self):
-        self._inputs["labels"].set_shape([self.bs, self.height, self.width])
-        w_param = self._get_weights_params()
-        if self.args.loss_type == "xentropy":
-            losses.weighted_sparse_softmax_cross_entropy(logits=self._layers["logits"],
-                                                         labels=self._inputs["labels"],
-                                                         w_type=self.args.loss_weight_type, **w_param)
-        elif self.args.loss_type == "dice":
-            losses.weighted_dice_loss(logits=self.probability,
-                                      labels=self._inputs["labels"],
-                                      w_type=self.args.loss_weight_type, **w_param)
-        else:
-            raise ValueError("Not supported loss_type: {}".format(self.args.loss_type))
-
         with tf.name_scope("Losses/"):
+            self._inputs["labels"].set_shape([self.bs, self.height, self.width])
+            w_param = self._get_weights_params()
+            if self.args.loss_type == "xentropy":
+                losses.weighted_sparse_softmax_cross_entropy(logits=self._layers["logits"],
+                                                             labels=self._inputs["labels"],
+                                                             w_type=self.args.loss_weight_type, **w_param)
+            elif self.args.loss_type == "dice":
+                losses.weighted_dice_loss(logits=self.probability,
+                                          labels=self._inputs["labels"],
+                                          w_type=self.args.loss_weight_type, **w_param)
+            else:
+                raise ValueError("Not supported loss_type: {}".format(self.args.loss_type))
+
             total_loss = tf.losses.get_total_loss()
-            tf.losses.add_loss(total_loss)
-            return total_loss
+        return total_loss
 
     def _build_metrics(self):
         if not self.ret_pred:
@@ -324,7 +323,7 @@ class GUNet(base.BaseNet):
                 split_labels = tf.split(one_hot_label, self.num_classes, axis=-1)
             for i in range(1, self.num_classes):
                 obj = self.classes[i]
-                logits = self._layers[obj + "Pred"]
+                logits = self.predictions[obj + "Pred"]
                 labels = split_labels[i]
                 for met in self.args.metrics_train:
                     metric_func = eval("metrics.metric_" + met.lower())
@@ -366,6 +365,7 @@ class GUNet(base.BaseNet):
             tf.summary.image("{}/{}".format(self.args.tag, labels.op.name), labels_uint8,
                              max_outputs=1, collections=[self.DEFAULT])
 
-            for key, value in self._image_summaries.items():
-                tf.summary.image("{}/{}".format(self.args.tag, key), value * 255,
-                                 max_outputs=1, collections=[self.DEFAULT])
+            with tf.name_scope("SumPred"):
+                for key, value in self._image_summaries.items():
+                    tf.summary.image("{}/{}".format(self.args.tag, key), value * 255,
+                                     max_outputs=1, collections=[self.DEFAULT])

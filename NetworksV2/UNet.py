@@ -113,22 +113,21 @@ class UNet(base.BaseNet):
                         self._image_summaries[obj] = self.predictions[obj]
 
     def _build_loss(self):
-        w_param = self._get_weights_params()
-        if self.args.loss_type == "xentropy":
-            losses.weighted_sparse_softmax_cross_entropy(logits=self._layers["logits"],
-                                                         labels=self._inputs["labels"],
-                                                         w_type=self.args.loss_weight_type, **w_param)
-        elif self.args.loss_type == "dice":
-            losses.weighted_dice_loss(logits=self.probability,
-                                      labels=self._inputs["labels"],
-                                      w_type=self.args.loss_weight_type, **w_param)
-        else:
-            raise ValueError("Not supported loss_type: {}".format(self.args.loss_type))
-
         with tf.name_scope("Losses/"):
+            w_param = self._get_weights_params()
+            if self.args.loss_type == "xentropy":
+                losses.weighted_sparse_softmax_cross_entropy(logits=self._layers["logits"],
+                                                             labels=self._inputs["labels"],
+                                                             w_type=self.args.loss_weight_type, **w_param)
+            elif self.args.loss_type == "dice":
+                losses.weighted_dice_loss(logits=self.probability,
+                                          labels=self._inputs["labels"],
+                                          w_type=self.args.loss_weight_type, **w_param)
+            else:
+                raise ValueError("Not supported loss_type: {}".format(self.args.loss_type))
+
             total_loss = tf.losses.get_total_loss()
-            tf.losses.add_loss(total_loss)
-            return total_loss
+        return total_loss
 
     def _build_metrics(self):
         if not self.ret_pred:
@@ -167,6 +166,7 @@ class UNet(base.BaseNet):
         tf.summary.image("{}/{}".format(self.args.tag, "Target"), labels_uint8,
                          max_outputs=1, collections=[self.DEFAULT])
 
-        for key, value in self._image_summaries.items():
-            tf.summary.image("{}/{}".format(self.args.tag, key), value * 255,
-                             max_outputs=1, collections=[self.DEFAULT])
+        with tf.name_scope("SumPred"):
+            for key, value in self._image_summaries.items():
+                tf.summary.image("{}/{}".format(self.args.tag, key), value * 255,
+                                 max_outputs=1, collections=[self.DEFAULT])

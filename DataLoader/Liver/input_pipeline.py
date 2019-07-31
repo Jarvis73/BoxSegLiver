@@ -40,6 +40,7 @@ from DataLoader.Liver import nii_kits
 deprecation._PRINT_DEPRECATION_WARNINGS = False
 ModeKeys = tfes.estimator.ModeKeys
 Dataset = tf.data.Dataset
+PROJ_ROOT = Path(__file__).parent.parent.parent
 pattern = str(Path(__file__).parent.parent.parent / "data/LiTS/png/volume-{:d}/{:03d}_im.png")
 lb_pattern = str(Path(__file__).parent.parent.parent / "data/LiTS/png/volume-{:d}/{:03d}_lb.png")
 IM_SCALE = 128 * 450
@@ -191,7 +192,7 @@ def input_fn(mode, params):
             if args.eval_in_patches:
                 return get_dataset_for_eval_patches(dataset, config=args)
             else:
-                return get_dataset_for_eval_image(dataset, config=args)
+                return get_dataset_for_eval_image_v2(dataset, config=args)
 
 
 #####################################
@@ -386,7 +387,8 @@ def get_dataset_for_eval_online(data_list, liver_percent=0., tumor_percent=0., c
 
 def data_processing_eval(img, x1, y1, x2, y2, dsize, im_scale):
     img = img[y1:y2, x1:x2]
-    img = cv2.resize(img, dsize, interpolation=cv2.INTER_LINEAR)
+    if (y2 - y1, x2 - x1) != dsize:
+        img = cv2.resize(img, dsize, interpolation=cv2.INTER_LINEAR)
     return img / im_scale
 
 
@@ -429,24 +431,32 @@ def parse_case(case, align, padding, padding_z, min_shape=None):
 
 
 def get_dataset_for_eval_image(data_list, config=None):
-    align = 16
+    # TODO(zjw): should load data from nii volumes
+    align = 16      # Necessary if not resize for batching
     padding = 25
     padding_z = 0
 
     batch_size = config.batch_size
     c = config.im_channel
     psize = config.im_height, config.im_width
+    no_resize = False
+    if config.im_height <= 0 or config.im_width <= 0:
+        logging.info("Disable image resize for evaluating")
+        no_resize = True
 
     for ci, case in enumerate(data_list[config.eval_skip_num:]):
         pid, d, h, w, z1, y1, x1, z2, y2, x2 = parse_case(case, align, padding, padding_z)
+        if no_resize:
+            psize = (y2 - y1, x2 - x1)
 
         eval_batch = {"images": np.empty((batch_size, *psize, c), dtype=np.float32),
-                      "names": [pid],
-                      "pads": [(batch_size - ((z2 - z1) % batch_size)) % batch_size],
-                      "bboxes": [[x1, y1, z1, x2 - 1, y2 - 1, z2 - 1]],
-                      "mirror": 0}
+                      "names": pid,
+                      "pads": (batch_size - ((z2 - z1) % batch_size)) % batch_size,
+                      "bboxes": [x1, y1, z1, x2 - 1, y2 - 1, z2 - 1],
+                      "mirror": 0,
+                      "reshape_ori": not no_resize}
 
-        num_of_batches = (z2 - z1 + eval_batch["pads"][0]) // batch_size
+        num_of_batches = (z2 - z1 + eval_batch["pads"]) // batch_size
         for batch in range(num_of_batches):
             lab_batch = np.empty((batch_size, h, w), dtype=np.uint8)
             start_id = z1 + batch * batch_size
@@ -492,6 +502,118 @@ def get_dataset_for_eval_image(data_list, config=None):
                     tmp["images"] = np.flip(np.flip(tmp["images"], axis=2), axis=1)
                     tmp["mirror"] = 3
                     yield tmp, None
+
+
+def parse_case_eval(case, align, padding, padding_z, im_channel, parse_label=True):
+    """ Return cropped normalized volume (y, x, z) with type float32 and
+               cropped segmentation (z, y, x) with type uint8 """
+    d, h, w = case["size"]
+    z1 = max(case["bbox"][0] - padding_z, 0)
+    z2 = min(case["bbox"][3] + padding_z, d)
+    y1 = max(case["bbox"][1] - padding, 0)
+    x1 = max(case["bbox"][2] - padding, 0)
+    y2 = min(case["bbox"][4] + padding, h)
+    x2 = min(case["bbox"][5] + padding, w)
+    cy = (y1 + y2 - 1) / 2
+    cx = (x1 + x2 - 1) / 2
+    sz_y = int(math.ceil((y2 - y1) / align)) * align
+    sz_x = int(math.ceil((x2 - x1) / align)) * align
+    y1 = max(int(cy - (sz_y - 1) / 2), 0)
+    x1 = max(int(cx - (sz_x - 1) / 2), 0)
+    y2 = min(y1 + sz_y, h)
+    x2 = min(x1 + sz_x, w)
+    if (y2 - y1) % align != 0 or (x2 - x1) % align != 0:
+        y1 = y2 - sz_y
+        x1 = x2 - sz_x
+        if y1 < 0 or x1 < 0:
+            print("\nWarning: bbox aligns with {} failed! point1 ({}, {}) point2 ({}, {})\n"
+                  .format(align, x1, y1, x2, y2))
+
+    obj_num = int(case["vol_case"][:-4].split("-")[-1])
+    _, volume = nii_kits.read_lits(obj_num, "vol", PROJ_ROOT / case["vol_case"])
+    left_half_channel = (im_channel - 1) // 2
+    right_half_channel = im_channel - 1 - left_half_channel
+    left_pad = left_half_channel - z1 if z1 < left_half_channel else 0
+    right_pad = z2 + right_half_channel - d if z2 + right_half_channel > d else 0
+    crop_z1 = max(0, z1 - left_half_channel)
+    crop_z2 = min(d, z2 + right_half_channel)
+    volume = volume[crop_z1:crop_z2, y1:y2, x1:x2]
+    cd, ch, cw = volume.shape  # cd: cropped depth
+    if left_pad > 0 or right_pad > 0:
+        volume = np.concatenate((np.zeros((left_pad, ch, cw), dtype=volume.dtype),
+                                 volume,
+                                 np.zeros((right_pad, ch, cw), dtype=volume.dtype)), axis=0)
+        cd, ch, cw = volume.shape
+    volume = (np.clip(volume, GRAY_MIN, GRAY_MAX) - GRAY_MIN) / (GRAY_MAX - GRAY_MIN)
+    volume = volume.transpose((1, 2, 0)).astype(np.float32)  # (y, x, z) for convenient
+
+    segmentation = None
+    if parse_label:
+        _, segmentation = nii_kits.read_lits(obj_num, "lab", PROJ_ROOT / case["lab_case"])
+        segmentation = segmentation.astype(np.uint8)[z1:z2, y1:y2, x1:x2]
+
+    bbox = [x1, y1, z1, x2 - 1, y2 - 1, z2 - 1]
+    oshape = [d, h, w]
+    cshape = [cd, ch, cw]
+    return case["PID"], case["vol_case"], case["lab_case"], bbox, oshape, cshape, \
+        left_half_channel, right_half_channel, volume, segmentation
+
+
+def get_dataset_for_eval_image_v2(data_list, config=None):
+    align = 16      # Necessary if not resize for batching
+    padding = 25
+    padding_z = 0
+
+    batch_size = config.batch_size
+    c = config.im_channel
+    pshape = config.im_height, config.im_width
+    resize = True
+    if config.im_height <= 0 or config.im_width <= 0:
+        logging.info("Disable image resize for evaluating")
+        resize = False
+
+    for ci, case in enumerate(data_list[config.eval_skip_num:]):
+        pid, _, seg_path, bbox, oshape, cshape, lhc, rhc, volume, segmentation = \
+            parse_case_eval(case, align, padding, padding_z, c, parse_label=config.mode != ModeKeys.PREDICT)
+        if not resize:
+            pshape = cshape[1:]
+
+        eval_batch = {"images": np.empty((batch_size, *pshape, c), dtype=np.float32),
+                      "names": pid,
+                      "mirror": 0}
+
+        pads = (batch_size - ((bbox[5] - bbox[2] + 1) % batch_size)) % batch_size
+        if pads > 0:
+            volume = np.concatenate((volume, np.zeros((*cshape[1:], pads), volume.dtype)), axis=-1)
+        if resize:
+            volume = cv2.resize(volume, pshape, interpolation=cv2.INTER_LINEAR)
+
+        num_of_batches = (volume.shape[-1] - lhc - rhc) // batch_size
+        assert volume.shape[-1] - lhc - rhc == batch_size * num_of_batches, \
+            "Wrong padding: volume length: {}, lhc: {}, rhc: {}, batch_size: {}, num_of_batches: {}".format(
+                volume.shape[-1], lhc, rhc, batch_size, num_of_batches)
+        for idx in range(lhc, volume.shape[-1] - rhc, batch_size):
+            for j in range(batch_size):
+                eval_batch["images"][j] = volume[:, :, idx + j - lhc:idx + j + rhc + 1]
+            yield copy.copy(eval_batch), None
+
+            if config.eval_mirror:
+                if config.random_flip & 1 > 0:
+                    tmp = copy.copy(eval_batch)
+                    tmp["images"] = np.flip(tmp["images"], axis=2)
+                    tmp["mirror"] = 1
+                    yield tmp, None
+                if config.random_flip & 2 > 0:
+                    tmp = copy.copy(eval_batch)
+                    tmp["images"] = np.flip(tmp["images"], axis=1)
+                    tmp["mirror"] = 2
+                    yield tmp, None
+                if config.random_flip & 3 > 0:
+                    tmp = copy.copy(eval_batch)
+                    tmp["images"] = np.flip(np.flip(tmp["images"], axis=2), axis=1)
+                    tmp["mirror"] = 3
+                    yield tmp, None
+        yield None, (segmentation, seg_path, pads, bbox, resize)
 
 
 def get_dataset_for_eval_patches(data_list, step=2, config=None):

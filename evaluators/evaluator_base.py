@@ -75,8 +75,7 @@ class EvaluateBase(object):
             input_fn,
             predict_keys=None,
             hooks=None,
-            checkpoint_path=None,
-            cases=None):
+            checkpoint_path=None):
         """
         Evaluate model.
 

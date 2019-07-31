@@ -34,7 +34,7 @@ from DataLoader.Liver import input_pipeline_g
 from evaluators import evaluator_liver
 
 ModeKeys = tfes.estimator.ModeKeys
-TF_RANDOM_SEED = 1234
+TF_RANDOM_SEED = None
 input_pipeline = input_pipeline_g
 
 
@@ -155,7 +155,8 @@ def main():
                                                                          secondary_metric=args.secondary_metric),
                                             prefix=args.summary_prefix,
                                             eval_n_steps=args.batches_per_epoch,
-                                            save_best=True)
+                                            save_best=args.save_best,
+                                            save_interval=args.save_interval)
             train_hooks.append(eval_hook)
 
         steps, max_steps = ((args.num_of_steps, None)
@@ -165,7 +166,7 @@ def main():
                         steps=steps,
                         max_steps=max_steps)
 
-    elif args.mode == ModeKeys.EVAL:
+    elif args.mode in [ModeKeys.EVAL, ModeKeys.PREDICT]:
         params = {"args": args}
         params.update(models.get_model_params(args))
         evaluator_lib = eval("evaluator_{}".format(subcommand))
@@ -176,7 +177,6 @@ def main():
         evaluator.run_g(input_pipeline.input_fn,
                         checkpoint_path=args.ckpt_path,
                         latest_filename=(args.load_status_file if not args.eval_final else None),
-                        cases=args.eval_num,
                         save=args.save_predict)
 
 

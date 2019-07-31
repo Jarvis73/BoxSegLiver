@@ -43,17 +43,18 @@ Dataset = tf.data.Dataset
 PROJ_ROOT = Path(__file__).parent.parent.parent
 pattern = str(PROJ_ROOT / "data/LiTS/png/volume-{:d}/{:03d}_im.png")
 lb_pattern = str(PROJ_ROOT / "data/LiTS/png/volume-{:d}/{:03d}_lb.png")
-LB_SCALE = 64
 GRAY_MIN = -200
 GRAY_MAX = 250
-IM_SCALE = 128 * (GRAY_MAX - GRAY_MIN)
+IM_SCALE = 64
+LB_SCALE = 64
 LIVER_PERCENT = 0.66
 TUMOR_PERCENT = 0.5
-RND_SCALE = (0.8, 1.4)
+RND_SCALE = (1.0, 1.4)
+RND_WINDOW_LEVEL = (50, 15)
 
-RND_SEED = 1234     # For debug
-random.seed(1234)
-np.random.seed(1234)
+RND_SEED = None     # For debug
+# random.seed(1234)
+# np.random.seed(1234)
 
 
 def add_arguments(parser):
@@ -62,7 +63,10 @@ def add_arguments(parser):
     group.add_argument("--im_height", type=int, default=256)
     group.add_argument("--im_width", type=int, default=256)
     group.add_argument("--im_channel", type=int, default=3)
+    group.add_argument("--filter_size", type=int, default=0, help="Filter tumors small than the given size")
     group.add_argument("--noise_scale", type=float, default=0.1)
+    group.add_argument("--random_window_level", type=int, nargs=2, default=RND_WINDOW_LEVEL)
+    group.add_argument("--zoom_scale", type=float, nargs=2, default=RND_SCALE)
     group.add_argument("--random_flip", type=int, default=1,
                        help="Random flip while training. 0 for no flip, 1 for flip only left/right, "
                             "2 for only up/down, 3 for left/right and up/down")
@@ -91,6 +95,8 @@ def add_arguments(parser):
                        help="Random perturbation scale of the spatial guide centers")
     group.add_argument("--stddev_random_ratio", type=float, default=0.4,
                        help="Random perturbation scale of the spatial guide stddevs")
+    group.add_argument("--min_std", type=float, default=2.,
+                       help="Minimum stddev for spatial guide")
     group.add_argument("--save_sp_guide", action="store_true", help="Save spatial guide")
 
 
@@ -173,8 +179,8 @@ def _get_datasets(test_fold=-1, filter_size=0, choices=None, exclude=None):
     return dataset_dict
 
 
-def _collect_datasets(test_fold, mode, filter_only_liver_in_val=True):
-    dataset_dict = _get_datasets(test_fold, filter_size=0)
+def _collect_datasets(test_fold, mode, filter_tumor_size=0, filter_only_liver_in_val=True):
+    dataset_dict = _get_datasets(test_fold, filter_size=filter_tumor_size)
     if mode == "train":
         return dataset_dict["train"]
     else:
@@ -194,10 +200,15 @@ def input_fn(mode, params):
 
     args = params["args"]
     dataset = _collect_datasets(args.test_fold, mode,
+                                filter_tumor_size=args.filter_size,
                                 filter_only_liver_in_val=params.get("filter_only_liver_in_val", True))
     if len(dataset) == 0:
         raise ValueError("No valid dataset found!")
-
+    logging.info("{}: {} Liver CTs ({} slices, {} slices contain livers, {} slices contain tumors)"
+                 .format(mode[:1].upper() + mode[1:], len(dataset),
+                         sum([x["size"][0] for x in dataset]),
+                         sum([x["bbox"][3] - x["bbox"][0] for x in dataset]),
+                         sum([len(x["tumor_slices_index"]) for x in dataset])))
     # Parse context_list
     context_list = []
     if args.use_context and args.context_list is not None:
@@ -218,7 +229,7 @@ def input_fn(mode, params):
             return get_dataset_for_train(dataset,
                                          liver_percent=LIVER_PERCENT,
                                          tumor_percent=TUMOR_PERCENT,
-                                         random_scale=RND_SCALE,
+                                         random_scale=args.zoom_scale,
                                          context_guide=args.use_context,
                                          context_list=tuple(context_list),
                                          spatial_guide=args.use_spatial,
@@ -262,8 +273,8 @@ def input_fn(mode, params):
 #####################################
 
 
-def data_processing_train(im_files, seg_file, bbox, PID_ci, guide, img_scale, lab_scale, config,
-                          random_noise, random_flip_left_right, random_flip_up_down,
+def data_processing_train(im_files, seg_file, bbox, PID_ci, img_clip, guide, img_scale, lab_scale,
+                          config, random_noise, random_flip_left_right, random_flip_up_down,
                           mode="Train", **kwargs):
     off_x, off_y, height, width = bbox[0], bbox[1], bbox[2], bbox[3]
 
@@ -276,9 +287,13 @@ def data_processing_train(im_files, seg_file, bbox, PID_ci, guide, img_scale, la
     img = tf.image.crop_to_bounding_box(img, off_x, off_y, height, width)
     img = tf.image.resize_bilinear(img, (config.im_height, config.im_width), align_corners=True)
     img = tf.transpose(tf.squeeze(img, axis=-1), perm=(1, 2, 0))
-    img = tf.cast(img, tf.float32) / img_scale
+    img = tf.cast(img, tf.float32)
+    clip_min, clip_max = tf.split(img_clip, 2)
+    img = (tf.clip_by_value(img, clip_min, clip_max) - clip_min) / (clip_max - clip_min)
 
-    seg = tf.image.decode_png(tf.io.read_file(seg_file), dtype=tf.uint8)
+    seg = tf.cond(tf.greater(tf.strings.length(seg_file), 0),
+                  lambda: tf.image.decode_png(tf.io.read_file(seg_file), dtype=tf.uint8),
+                  lambda: tf.zeros((512, 512, 1), dtype=tf.uint8))
     seg = tf.image.crop_to_bounding_box(seg, off_x, off_y, height, width)
     seg = tf.expand_dims(seg, axis=0)
     seg = tf.image.resize_nearest_neighbor(seg, (config.im_height, config.im_width), align_corners=True)
@@ -336,6 +351,7 @@ def gen_train_batch(data_list,
                     spatial_guide=False,
                     spatial_random=0.,
                     spatial_inner_random=False,
+                    random_window_level=False,
                     config=None,
                     **kwargs):
     """ All coordinates are ij index """
@@ -351,8 +367,6 @@ def gen_train_batch(data_list,
     target_size = np.asarray((config.im_height, config.im_width), dtype=np.float32)
     force_liver = math.ceil(batch_size * liver_percent)
     force_tumor = math.ceil(batch_size * tumor_percent)
-    # empty_guide = np.ones((args.im_height, args.im_width, 1), dtype=np.float32) * 0.5 \
-    #     if spatial_guide else None
     empty_mmts = np.zeros((0, 2), dtype=np.float32)
 
     while True:
@@ -416,7 +430,7 @@ def gen_train_batch(data_list,
                 left_half_channel = (config.im_channel - 1) // 2
                 for k in range(1, left_half_channel + 1):
                     previous_slice = selected_slice - k
-                    if previous_slice >= 0:
+                    if 0 <= previous_slice < size[0]:
                         selected_slices.insert(0, pattern.format(pid, previous_slice))
                     else:
                         # slice index is "" means padding with zeros
@@ -424,14 +438,20 @@ def gen_train_batch(data_list,
                 right_half_channel = config.im_channel - 1 - left_half_channel
                 for k in range(1, right_half_channel + 1):
                     following_slice = selected_slice + k
-                    if following_slice < size[0]:
+                    if 0 <= following_slice < size[0]:
                         selected_slices.append(pattern.format(pid, following_slice))
                     else:
                         selected_slices.append("")
 
+            # Random clip image value
+            if random_window_level:
+                img_clip = (random.randint(10, 50) * IM_SCALE * 1., random.randint(500, 540) * IM_SCALE * 1.)
+            else:
+                img_clip = (50 * IM_SCALE * 1., 500 * IM_SCALE * 1.)
+
             # Last element store context guide and spatial guide information
             yield_list = (selected_slices, lb_pattern.format(pid, selected_slice),
-                          [off_y, off_x] + crop_size, pid, {})
+                          [off_y, off_x] + crop_size, pid, img_clip, {})
 
             # context guide
             if context_guide:
@@ -483,8 +503,100 @@ def gen_train_batch(data_list,
                                                        config.center_random_ratio, new_c.shape) + new_c
                     rand_s = new_s * np.random.uniform(1. / (1 + config.stddev_random_ratio),
                                                        1. + config.stddev_random_ratio, new_s.shape)
+                    rand_s = np.maximum(rand_s, config.min_std)
                     yield_list[-1].update({"centers": rand_c,
                                            "stddevs": rand_s,
+                                           "crop_size": crop_size})
+                else:
+                    yield_list[-1].update({"centers": empty_mmts,
+                                           "stddevs": empty_mmts,
+                                           "crop_size": crop_size})
+            yield yield_list
+
+
+def gen_eval_3d_online_batch(data_list,
+                             batch_size,
+                             context_guide=False,
+                             context_list=(("hist", 200),),
+                             spatial_guide=False,
+                             config=None,
+                             **kwargs):
+    """ All coordinates are ij index
+    """
+    # Load context guide if needed
+    context = {case["PID"]: None for case in data_list} if context_guide else None
+    empty_mmts = np.zeros((0, 2), dtype=np.float32)
+
+    for case in data_list:
+        z1, y1, x1, z2, y2, x2 = case["bbox"]
+        crop_size = [y2 - y1, x2 - x1]
+        size = case["size"]
+        pid = case["PID"]
+
+        pads = (batch_size - ((z2 - z1) % batch_size)) % batch_size
+        # Make sure right_half_channel < 100
+        for selected_slice in list(range(z1, z2)) + [-100] * pads:
+            # Get selected slice
+            if selected_slice in case["tumor_slices_index"]:
+                ind = case["tumor_slices_index"].index(selected_slice)
+            else:
+                ind = -1
+
+            # Get multi-channel input
+            selected_slices = [pattern.format(pid, selected_slice) if selected_slice >= 0 else ""]
+            if config.im_channel > 1:
+                left_half_channel = (config.im_channel - 1) // 2
+                for k in range(1, left_half_channel + 1):
+                    previous_slice = selected_slice - k
+                    if 0 <= previous_slice < size[0]:
+                        selected_slices.insert(0, pattern.format(pid, previous_slice))
+                    else:
+                        # slice index is "" means padding with zeros
+                        selected_slices.insert(0, "")
+                right_half_channel = config.im_channel - 1 - left_half_channel
+                for k in range(1, right_half_channel + 1):
+                    following_slice = selected_slice + k
+                    if 0 <= following_slice < size[0]:
+                        selected_slices.append(pattern.format(pid, following_slice))
+                    else:
+                        selected_slices.append("")
+
+            img_clip = (50 * IM_SCALE * 1., 500 * IM_SCALE * 1.)
+
+            # Last element store context guide and spatial guide information
+            yield_list = (selected_slices,
+                          lb_pattern.format(pid, selected_slice) if selected_slice >= 0 else "",
+                          [y1, x1] + crop_size, pid, img_clip, {})
+
+            # context guide
+            if context_guide:
+                # Load texture features when needed
+                if context[pid] is None:
+                    context[pid] = {}
+                    gd_pattern = PROJ_ROOT / "data/LiTS/feat"
+                    # We want context_mode choose from [train, eval], and else raise error
+                    gd_pattern = str(gd_pattern / "%s" / kwargs.get("context_mode", None) / "%03d.npy")
+                    for cls, f_len in context_list:
+                        feat = np.load(gd_pattern % (cls, pid), allow_pickle=True)
+                        assert isinstance(feat, np.ndarray), "`feat` must be a numpy.ndarray"
+                        assert feat.shape[1] == f_len, "feature length mismatch %d vs %d" \
+                                                       % (feat.shape[1], f_len)
+                        context[pid][cls] = eval("feature_ops.%s_preprocess" % cls)(feat, **kwargs)
+
+                features = []   # Collect features of selected slice
+                for cls, _ in context_list:
+                    features.append(context[pid][cls][selected_slice])
+                yield_list[-1]["context"] = np.concatenate(features, axis=0)
+
+            # spatial guide
+            if spatial_guide:
+                if ind >= 0:
+                    centers = np.asarray(case["centers"][ind], dtype=np.float32)
+                    stddevs = np.asarray(case["stddevs"][ind], dtype=np.float32)
+                    centers -= np.array([y1, x1])
+                    stddevs = np.maximum(stddevs, config.min_std)
+                    yield_list[-1].update({"centers": centers,
+                                           "stddevs": stddevs,
                                            "crop_size": crop_size})
                 else:
                     yield_list[-1].update({"centers": empty_mmts,
@@ -507,6 +619,7 @@ def get_dataset_for_train(data_list,
     batch_size = distribution_utils.per_device_batch_size(config.batch_size, config.num_gpus)
     if random_scale[1] > random_scale[0]:
         logging.info("Train: Add random zoom, scale = ({}, {})".format(*random_scale))
+    logging.info("Train: Add random window level, scale = 50")
 
     def train_gen():
         return gen_train_batch(data_list, batch_size, liver_percent, tumor_percent,
@@ -516,6 +629,7 @@ def get_dataset_for_train(data_list,
                                spatial_guide=spatial_guide,
                                spatial_random=spatial_random,
                                spatial_inner_random=spatial_inner_random,
+                               random_window_level=True,
                                config=config,
                                **kwargs)
 
@@ -543,17 +657,18 @@ def get_dataset_for_train(data_list,
         if spatial_inner_random:
             logging.info("Train: Add spatial guide random in each slice")
 
-    output_types = (tf.string, tf.string, tf.int32, tf.int32, guide_types_dict)
+    output_types = (tf.string, tf.string, tf.int32, tf.int32, tf.float32, guide_types_dict)
     output_shapes = (tf.TensorShape([config.im_channel]),
                      tf.TensorShape([]),
                      tf.TensorShape([4]),
                      tf.TensorShape([]),
+                     tf.TensorShape([2]),
                      guide_shapes_dict)
 
     dataset = (tf.data.Dataset.from_generator(train_gen, output_types, output_shapes)
                .apply(tf.data.experimental.map_and_batch(
                         lambda *args_: data_processing_train(*args_,
-                                                             img_scale=IM_SCALE,
+                                                             img_scale=IM_SCALE * (GRAY_MAX - GRAY_MIN),
                                                              lab_scale=LB_SCALE,
                                                              config=config,
                                                              random_noise=True,
@@ -576,7 +691,7 @@ def get_dataset_for_eval_online(data_list,
                                 **kwargs):
     batch_size = distribution_utils.per_device_batch_size(config.batch_size, config.num_gpus)
 
-    def train_gen():
+    def eval_2d_gen():
         infinity_generator = gen_train_batch(data_list, batch_size, liver_percent, tumor_percent,
                                              random_scale=(1., 1.),
                                              context_guide=context_guide,
@@ -584,10 +699,23 @@ def get_dataset_for_eval_online(data_list,
                                              spatial_guide=spatial_guide,
                                              spatial_random=1.,
                                              spatial_inner_random=False,
+                                             random_window_level=False,
                                              config=config,
                                              **kwargs)
         for _ in tqdm.tqdm(range(config.eval_num_batches_per_epoch * config.batch_size)):
             yield next(infinity_generator)
+
+    def eval_3d_gen():
+        val_generator = gen_eval_3d_online_batch(data_list, batch_size,
+                                                 context_guide=context_guide,
+                                                 context_list=context_list,
+                                                 spatial_guide=spatial_guide,
+                                                 config=config,
+                                                 **kwargs)
+        val_length = sum([(x["bbox"][3] - x["bbox"][0] + config.batch_size - 1) // config.batch_size
+                          for x in data_list]) * config.batch_size
+        for next_batch in tqdm.tqdm(val_generator, total=val_length):
+            yield next_batch
 
     guide_types_dict = {}
     guide_shapes_dict = {}
@@ -595,6 +723,7 @@ def get_dataset_for_eval_online(data_list,
         guide_types_dict["context"] = tf.float32
         feature_length = sum([x for _, x in context_list])
         guide_shapes_dict["context"] = tf.TensorShape([feature_length])
+        logging.info("Train: Use context guide")
         kwargs["context_mode"] = "eval"
     if spatial_guide:
         guide_types_dict.update({"centers": tf.float32,
@@ -603,18 +732,21 @@ def get_dataset_for_eval_online(data_list,
         guide_shapes_dict.update({"centers": tf.TensorShape([None, 2]),
                                   "stddevs": tf.TensorShape([None, 2]),
                                   "crop_size": tf.TensorShape([2])})
+        logging.info("Train: Use spatial guide")
 
-    output_types = (tf.string, tf.string, tf.int32, tf.int32, guide_types_dict)
+    output_types = (tf.string, tf.string, tf.int32, tf.int32, tf.float32, guide_types_dict)
     output_shapes = (tf.TensorShape([config.im_channel]),
                      tf.TensorShape([]),
                      tf.TensorShape([4]),
                      tf.TensorShape([]),
+                     tf.TensorShape([2]),
                      guide_shapes_dict)
 
-    dataset = (tf.data.Dataset.from_generator(train_gen, output_types, output_shapes)
+    dataset = (tf.data.Dataset.from_generator(eval_3d_gen if config.eval_3d else eval_2d_gen,
+                                              output_types, output_shapes)
                .apply(tf.data.experimental.map_and_batch(
                         lambda *args_: data_processing_train(*args_,
-                                                             img_scale=IM_SCALE,
+                                                             img_scale=IM_SCALE * (GRAY_MAX - GRAY_MIN),
                                                              lab_scale=LB_SCALE,
                                                              config=config,
                                                              random_noise=False,
@@ -681,7 +813,9 @@ def parse_case_eval(case, align, padding, padding_z, im_channel):
 
 
 def get_dataset_for_eval_image(data_list, context_list, config=None, **kwargs):
-    """ For context guide without spatial guide in evaluation """
+    """ For context guide without spatial guide in evaluation
+        or use spatial guide in training mode
+    """
     align = 16
     padding = 25
     padding_z = 0
@@ -692,7 +826,7 @@ def get_dataset_for_eval_image(data_list, context_list, config=None, **kwargs):
     gd_pattern = str(PROJ_ROOT / "data/LiTS/feat/%s/eval/%03d.npy")
 
     for ci, case in enumerate(data_list[config.eval_skip_num:]):
-        pid, _, _, bbox, oshape, cshape, lhc, rhc, volume, segmentation = \
+        pid, _, seg_path, bbox, oshape, cshape, lhc, rhc, volume, segmentation = \
             parse_case_eval(case, align, padding, padding_z, c)
 
         # Load evaluation context
@@ -715,6 +849,7 @@ def get_dataset_for_eval_image(data_list, context_list, config=None, **kwargs):
         pads = (batch_size - ((bbox[5] - bbox[2] + 1) % batch_size)) % batch_size
         if pads > 0:
             volume = np.concatenate((volume, np.zeros((*cshape[1:], pads), volume.dtype)), axis=-1)
+            # Avoid index exceed array range
             context_val = np.concatenate((context_val, np.zeros((pads, feat_length), context_val.dtype)), axis=0)
         volume = cv2.resize(volume, pshape, interpolation=cv2.INTER_LINEAR)
 
@@ -746,7 +881,7 @@ def get_dataset_for_eval_image(data_list, context_list, config=None, **kwargs):
                     tmp["images"] = np.flip(np.flip(tmp["images"], axis=2), axis=1)
                     tmp["mirror"] = 3
                     yield tmp, None
-        yield None, (segmentation, pads, bbox)
+        yield None, (segmentation, seg_path, pads, bbox)
 
 
 class EvalImage3DLoader(object):
@@ -766,21 +901,23 @@ class EvalImage3DLoader(object):
         self.context_list = context_list
         self.use_spatial = spatial_guide
         self.kwargs = kwargs
-        self._last_guide = None
-        self._last_pred = None
-        self.min_std = 1.
-        self.filter_thresh = 0.15
+        self._last_guide = None     # [ph, pw]
+        self._last_pred = None      # [ph, pw]
+        self.min_std = self.cfg.min_std
         self.mirror_counter = 0
         self.sid = None
-        self.iter = None
+        self.case_iter = None
         self.direction = "Forward"
         self.oshape = None      # origin shape
         self.cshape = None      # cropped shape
-        self.pshape = [self.cfg.im_height, self.cfg.im_width, self.cfg.im_channel]
+        self.pshape = (self.cfg.im_height, self.cfg.im_width, self.cfg.im_channel)
         self.context_val = None
+        self.labels = None
         self.last_info = []     # tracking tumors(come from last slice)
         self.curr_info = []     # current tumors
         self.sp_guides = []
+        self.sp_guide_bg = 0.5
+        self.filter_thresh = 0.15 + self.sp_guide_bg
         self.disc = ndi.generate_binary_structure(2, connectivity=1)
         self.gd_pattern = str(PROJ_ROOT / "data/LiTS/feat/%s/eval/%03d.npy")
         prior_file = Path(__file__).parent / "prepare" / "prior.json"
@@ -820,15 +957,14 @@ class EvalImage3DLoader(object):
         self.pred which is created in this function will be used for generating next guide.
         So don't use `self.pred` as real prediction, because we will also remove those ended
         in current slice from self.pred.
-
-        TODO(ZJW): maybe adjust filter_thresh 0.35 ?
         """
         if new_pred is None:
             return
         if self._last_guide is None:
             raise ValueError("previous_guide is None")
+        new_pred = np.squeeze(new_pred, axis=(0, -1))
         if np.max(new_pred) == 0:
-            self._last_pred = new_pred
+            self._last_pred = None
             return
         new_pred = new_pred.copy()
         self.last_info.clear()
@@ -842,11 +978,14 @@ class EvalImage3DLoader(object):
             # 1. Filter wrong tumors(no corresponding guide)
             mask_guide_by_res = res_obj_slicer * self._last_guide[slicer]
             if np.max(mask_guide_by_res) < self.filter_thresh:
-                self.print("Remove")
+                self.print(self.sid, "Remove",
+                           "Thresh:", self.filter_thresh,
+                           "Max:", np.max(mask_guide_by_res),
+                           "All last guide max:", np.max(self._last_guide))
                 new_pred[slicer] -= res_obj_slicer
                 continue
             # 2. Match res_obj to guide
-            res_peak_pos = np.unravel_index(mask_guide_by_res.argmax(), mask_guide_by_res.shape)
+            res_peak_pos = np.asarray(np.unravel_index(mask_guide_by_res.argmax(), mask_guide_by_res.shape))
             res_peak_pos[0] += slicer[0].start
             res_peak_pos[1] += slicer[1].start
             #   2.1. Check whether res_peak is just a guide center
@@ -860,16 +999,19 @@ class EvalImage3DLoader(object):
             #        guide center must be monotonously increasing.
             if found < 0:  # gradient ascent from res_peak to center
                 # compute distances between res_obj_peak and every guide center
-                distances = np.sum([(np.asarray(res_peak_pos) - obj["center"]) ** 2
-                                    for obj in self.curr_info], axis=1)
+                distances = np.sum([(res_peak_pos - obj["center"]) ** 2 for obj in self.curr_info], axis=1)
+                self.print(self.sid, "Distance:", distances)
                 order = np.argsort(distances)
                 for j in order:
                     ctr = self.curr_info[j]["center"]
+                    self.print(self.sid, res_peak_pos[1], res_peak_pos[0], ctr[1], ctr[0])
+                    self.print(self._last_guide[ctr[0]:ctr[0] + 3, ctr[1]:ctr[1] + 3])
                     if self.ascent_line(self._last_guide, res_peak_pos[1], res_peak_pos[0], ctr[1], ctr[0]):
                         # Found
                         found = j
                         break
             if found < 0:
+                self.print(self.sid, "Res peak:", res_peak_pos, "Slice info:", self.curr_info)
                 raise ValueError("Can not find corresponding guide!")
             # 3. Check z range and remove finished tumors(remove from next guide image)
             if (self.forward and self.sid >= self.curr_info[found]["z"][1]) or \
@@ -882,18 +1024,28 @@ class EvalImage3DLoader(object):
             ctr[0] += slicer[0].start
             ctr[1] += slicer[1].start
             self.last_info.append({"z": copy.copy(self.curr_info[found]["z"]),
-                                   "center": ctr,
-                                   "stddev": std})
+                                   "center": ctr.astype(np.int32).tolist(),
+                                   "stddev": std.tolist()})
+        self._last_pred = new_pred
 
     def prepare_next_case(self):
         self.cur_case_idx += 1
         if self.cur_case_idx >= self.num_cases:
             return False
 
+        # Shape
+        #   self.bbox: [x1, y1, z1, x2 - 1, y2 - 1, z2 - 1]
+        #   self.oshape: [d, h, w]
+        #   self.cshape: [cd, ch, cw] == self.volume.shape
+        #   self.lhc: int
+        #   self.rhc: int
+        #   self.volume: [ch, cw, cd]
+        #   self.segmentation: [cd, ch, cw]
         self.pid, _, self.seg_path, self.bbox, self.oshape, self.cshape, \
             self.lhc, self.rhc, self.volume, self.segmentation = \
             parse_case_eval(self.data_list[self.cur_case_idx],
                             align=16, padding=25, padding_z=0, im_channel=self.cfg.im_channel)
+        self.volume = cv2.resize(self.volume, self.pshape[:2], interpolation=cv2.INTER_LINEAR)[None]
         self.spid = str(self.pid)
         feat_length = 0
         if self.use_context:
@@ -906,13 +1058,16 @@ class EvalImage3DLoader(object):
                 features.append(eval("feature_ops.%s_preprocess" % cls)(feat, **self.kwargs))
                 feat_length += f_len
             self.context_val = np.concatenate(features, axis=1).astype(np.float32)
-        self.iter = self.gen_next_batch()
+        self.case_iter = self.gen_next_batch()
+        self.labels = (self.segmentation, self.seg_path, 0, self.bbox)
         return True
 
-    def __next__(self):
-        if self.iter is None:
-            raise ValueError("Please prepare next case first.")
-        return next(self.iter)
+    def slice_iter(self, eval_batch, idx):
+        # For bagging method on each slice
+        for features in self.process_slice(eval_batch, idx):
+            yield features
+            if self.cfg.save_sp_guide and features["mirror"] == 0:
+                self.sp_guides.append(eval_batch["sp_guide"])
 
     def gen_next_batch(self):
         self.direction = "Forward"
@@ -921,10 +1076,7 @@ class EvalImage3DLoader(object):
         for idx in range(self.lhc, self.cshape[0] - self.rhc):
             if idx == self.cshape[0] - self.rhc - 1:
                 eval_batch["bboxes"] = self.bbox
-            for features in self.process_slice(eval_batch, idx):
-                yield features
-                if self.cfg.save_sp_guide:
-                    self.sp_guides.append(eval_batch["sp_guide"])
+            yield self.slice_iter(eval_batch, idx)
         if self.cfg.save_sp_guide:
             self._save_guide()
             self.sp_guides.clear()
@@ -935,10 +1087,7 @@ class EvalImage3DLoader(object):
         for idx in range(self.cshape[0] - self.rhc - 1, self.lhc - 1, -1):
             if idx == self.lhc:
                 eval_batch["bboxes"] = self.bbox
-            for features in self.process_slice(eval_batch, idx):
-                yield features
-                if self.cfg.save_sp_guide:
-                    self.sp_guides.append(eval_batch["sp_guide"])
+            yield self.slice_iter(eval_batch, idx)
         if self.cfg.save_sp_guide:
             self._save_guide()
             self.sp_guides.clear()
@@ -947,36 +1096,57 @@ class EvalImage3DLoader(object):
         zz1 = idx - self.lhc
         self.sid = zz1 + self.bbox[2]
         self.ssid = str(self.sid)    # string slice id
-        eval_batch["images"] = cv2.resize(
-            self.volume[:, :, zz1:zz1 + self.pshape[-1]], self.pshape[:2],
-            interpolation=cv2.INTER_LINEAR)[None]
+        eval_batch["images"] = self.volume[..., zz1:zz1 + self.pshape[-1]]
         # Add context guide
         if self.use_context:
-            eval_batch["context"] = self.context_val[idx:idx + 1]
+            eval_batch["context"] = self.context_val[self.sid:self.sid + 1]
 
         # Add spatial guide
         if self.use_spatial:
+            self.curr_info.clear()
             if self.ssid in self.user_info[self.spid]:
-                self.curr_info = copy.deepcopy(self.user_info[self.spid][self.ssid])
-                # TODO(zjw): Maybe we should remove the same objects from centers_ys and centers_backup.
-                #            For example, two or more adjacent slices are provided guides.
-                self.curr_info.extend(self.last_info)
-                centers = [x["center"] for x in self.curr_info]
-                stddevs = [x["stddev"] for x in self.curr_info]
-                guide = array_kits.create_gaussian_distribution_v2(self.cshape[1:], centers, stddevs)
-                guide_resized = cv2.resize(
-                    guide, self.pshape[:2], interpolation=cv2.INTER_LINEAR)[None]
-                self._last_guide = guide_resized / 2 + 0.5
-            else:
-                self._last_guide = np.empty((1, *self.pshape[:2], 1), dtype=np.float32)
-                self._last_guide.fill(0.5)
-            eval_batch["sp_guide"] = self._last_guide
+                self.print(self.sid, "New user info")
+                this_info = copy.deepcopy(self.user_info[self.spid][self.ssid])
+                # Here we must transform user_info centers(whose original point locate at (0, 0) of image)
+                # to cropped image(whose original point locate at (bb[1], bb[0])). Then we zoom them to
+                # patch size
+                #
+                #     (0, 0)*-------------------+
+                #           | (bb[1], bb[0])    |
+                #           |   *------------   |
+                #           |   |           |   |
+                #           |   |   o       |   |
+                #           |   |           |   |
+                #           |   |           |   |
+                #           |   |           |   |
+                #           |   +-----------+   |
+                #           |                   |
+                #           +-------------------+
+                #
+                for x in this_info:
+                    # Filter stddev < min_std
+                    if np.min(x["stddev"]) > self.min_std:
+                        x["center"][0] = int((x["center"][0] - self.bbox[1]) / self.cshape[1] * self.pshape[0])
+                        x["center"][1] = int((x["center"][1] - self.bbox[0]) / self.cshape[2] * self.pshape[1])
+                        self.curr_info.append(x)
 
-            if self._last_pred is not None:
-                eval_batch["sp_guide"] = np.maximum(
-                    eval_batch["sp_guide"],
-                    array_kits.get_gd_image_multi_objs(self._last_pred, obj_value=1)
-                )
+            # TODO(zjw): Maybe we should remove the same objects from centers_ys and centers_backup.
+            #            For example, two or more adjacent slices are provided guides.
+            if len(self.last_info) > 0:
+                self.print(self.sid, "Last pred propagate:", self.last_info)
+            self.curr_info.extend(self.last_info)
+            centers = [x["center"] for x in self.curr_info]
+            stddevs = [x["stddev"] for x in self.curr_info]
+            if len(stddevs) > 0:
+                assert np.min(stddevs) >= self.min_std, stddevs
+                # guide has shape [ph, pw, 1]
+                guide = array_kits.create_gaussian_distribution_v2(self.pshape[:2], centers, stddevs) * 0.85
+                self._last_guide = guide / 2 + self.sp_guide_bg
+            else:
+                self._last_guide = np.empty(self.pshape[:2], dtype=np.float32)
+                self._last_guide.fill(self.sp_guide_bg)
+            self.print(self.sid, "Current guide max:", np.max(self._last_guide))
+            eval_batch["sp_guide"] = self._last_guide[None, :, :, None]
         yield copy.copy(eval_batch)
 
         if self.cfg.eval_mirror:
@@ -1019,7 +1189,7 @@ class EvalImage3DLoader(object):
 
         header = nii_kits.read_lits(self.pid, "lab", self.seg_path, only_header=True)
         pad_with = tuple(zip(self.bbox[2::-1], np.array(header.get_data_shape()[::-1]) - self.bbox[:2:-1] - 1))
-        img_array = np.pad(img_array, pad_with, mode="constant", constant_values=0)
+        img_array = np.pad(img_array, pad_with, mode="constant", constant_values=np.int16(self.sp_guide_bg * 255))
         nii_kits.write_nii(img_array, header, save_path,
                            special=True if 28 <= self.pid < 52 else False)
 
@@ -1043,10 +1213,10 @@ class EvalImage3DLoader(object):
 
 if __name__ == "__main__":
     # gen_dataset_jsons()
-    # pattern = str(PROJ_ROOT / "data/LiTS/png/volume-{:d}/{:03d}_im.png")
-    # lb_pattern = str(PROJ_ROOT / "data/LiTS/png/volume-{:d}/{:03d}_lb.png")
-    pattern = str(Path("D:/DataSet") / "LiTS/png/volume-{:d}/{:03d}_im.png")
-    lb_pattern = str(Path("D:/DataSet") / "LiTS/png/volume-{:d}/{:03d}_lb.png")
+    pattern = str(PROJ_ROOT / "data/LiTS/png/volume-{:d}/{:03d}_im.png")
+    lb_pattern = str(PROJ_ROOT / "data/LiTS/png/volume-{:d}/{:03d}_lb.png")
+    # pattern = str(Path("D:/DataSet") / "LiTS/png/volume-{:d}/{:03d}_im.png")
+    # lb_pattern = str(Path("D:/DataSet") / "LiTS/png/volume-{:d}/{:03d}_lb.png")
     import matplotlib
     matplotlib.use("Qt5Agg")
     import matplotlib.pyplot as plt
@@ -1061,6 +1231,7 @@ if __name__ == "__main__":
         random_flip = 3
         center_random_ratio = 0.2
         stddev_random_ratio = 0.4
+        eval_3d = True
 
     cnt = 0
 
@@ -1097,7 +1268,21 @@ if __name__ == "__main__":
             plt.imshow(l[idx, :, :], cmap="gray")
         plt.show()
 
-    data_list = _get_datasets(choices=[0, 31])["choices"]
+    data_list = _get_datasets(choices=[3, 6])["choices"]
+    d = get_dataset_for_eval_online(data_list, LIVER_PERCENT, TUMOR_PERCENT,
+                                    True, (("hist", 200), ), False, config=Foo())
+    # lst = None
+    # while True:
+    #     try:
+    #         f, l = next(gen)
+    #         cnt, lst = save(f, l, cnt, lst)
+    #     except StopIteration:
+    #         break
+    ff, ll = d.make_one_shot_iterator().get_next()
+    sess = tf.Session()
+    f, l = sess.run([ff, ll])
+    show(f, l, 0)
+
     # d = get_dataset_for_eval_online(data_list, LIVER_PERCENT, TUMOR_PERCENT,
     #                                 True, (("hist", 200), ), True, config=Foo())
     # # lst = None
@@ -1112,16 +1297,16 @@ if __name__ == "__main__":
     # f, l = sess.run([ff, ll])
     # show(f, l, 0)
 
-    random.seed(1234)
-    np.random.seed(1234)
-    tf.set_random_seed(1234)
-    d = get_dataset_for_train(data_list, 0.66, 0.4, (0.8, 1.4),
-                              False, (), True, 1., False, config=Foo())
-    ff, ll = d.make_one_shot_iterator().get_next()
-    sess = tf.Session()
-    cnt = 0
-    f, l = sess.run([ff, ll])
-    f, l = sess.run([ff, ll])
-    f, l = sess.run([ff, ll])
-    f, l = sess.run([ff, ll])
-    show(f, l, 3)
+    # random.seed(1234)
+    # np.random.seed(1234)
+    # tf.set_random_seed(1234)
+    # d = get_dataset_for_train(data_list, 0.66, 0.4, (0.8, 1.4),
+    #                           False, (), True, 1., False, config=Foo())
+    # ff, ll = d.make_one_shot_iterator().get_next()
+    # sess = tf.Session()
+    # cnt = 0
+    # f, l = sess.run([ff, ll])
+    # f, l = sess.run([ff, ll])
+    # f, l = sess.run([ff, ll])
+    # f, l = sess.run([ff, ll])
+    # show(f, l, 3)

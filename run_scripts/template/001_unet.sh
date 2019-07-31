@@ -15,7 +15,7 @@ if [[ "$TASK" == "train" ]]; then
         --classes Liver Tumor \
         --test_fold 2 \
         --im_height 256 --im_width 256 --im_channel 3 \
-        --noise_scale 0.05 \
+        --noise_scale 0.05 --random_flip 3 \
         --eval_num_batches_per_epoch 100 \
         --num_of_total_steps 600000 \
         --primary_metric "Tumor/Dice" \
@@ -32,6 +32,7 @@ if [[ "$TASK" == "train" ]]; then
         --eval_num_batches_per_epoch 200 \
         --eval_per_epoch \
         --evaluator Volume \
+        --save_best \
         $@
 elif [[ "$TASK" == "eval" ]]; then
     PYTHONPATH=${PROJECT_DIR} CUDA_VISIBLE_DEVICES=${GPU_ID} python ./entry/main.py liver \
@@ -41,9 +42,26 @@ elif [[ "$TASK" == "eval" ]]; then
         --classes Liver Tumor \
         --test_fold 2 \
         --im_height 256 --im_width 256 --im_channel 3 \
+        --random_flip 3 \
         --primary_metric "Tumor/Dice" \
         --secondary_metric "Liver/Dice" \
         --batch_size 8 \
         --evaluator Volume \
+        --load_status_file checkpoint_best \
+        $@
+elif [[ "$TASK" == "infer" ]]; then
+    PYTHONPATH=${PROJECT_DIR} CUDA_VISIBLE_DEVICES=${GPU_ID} python ./entry/main.py liver \
+        --mode eval \
+        --tag ${BASE_NAME%".sh"} \
+        --model UNet \
+        --classes Liver Tumor \
+        --test_fold 2 \
+        --im_height 256 --im_width 256 --im_channel 3 \
+        --random_flip 3 \
+        --primary_metric "Tumor/Dice" \
+        --secondary_metric "Liver/Dice" \
+        --batch_size 8 \
+        --evaluator Volume \
+        --load_status_file checkpoint_best \
         $@
 fi

@@ -14,7 +14,7 @@ IFS="," read -ra GPU_IDS <<< ${GPU_ID}
 PROJECT_DIR=$(dirname $(dirname $(realpath $0)))
 BASE_NAME=$(basename $0)
 
-if [[ "$TASK" == "train" || "$TASK" == "both" ]]; then
+if [[ "$TASK" == "train" ]]; then
     PYTHONPATH=${PROJECT_DIR} CUDA_VISIBLE_DEVICES=${GPU_ID} eval ${NICE} python ./entry/main_g.py liver \
         --mode train \
         --tag ${BASE_NAME%".sh"} \
@@ -39,13 +39,12 @@ if [[ "$TASK" == "train" || "$TASK" == "both" ]]; then
         --normalizer instance_norm \
         --use_context --context_list hist 200 \
         --hist_noise --hist_noise_scale 0.002 --hist_scale 20 \
-        --eval_num_batches_per_epoch 200 \
+        --eval_num_batches_per_epoch 300 \
         --eval_per_epoch \
         --evaluator Volume \
         --save_best \
         $@
-fi
-if [[ "$TASK" == "eval" || "$TASK" == "both" ]]; then
+elif [[ "$TASK" == "eval" ]]; then
     PYTHONPATH=${PROJECT_DIR} CUDA_VISIBLE_DEVICES=${GPU_ID} eval ${NICE} python ./entry/main_g.py liver \
         --mode eval \
         --tag ${BASE_NAME%".sh"} \
@@ -61,5 +60,24 @@ if [[ "$TASK" == "eval" || "$TASK" == "both" ]]; then
         --normalizer instance_norm \
         --use_context --context_list hist 200 \
         --hist_scale 20 \
+        --load_status_file checkpoint_best \
+        $@
+elif [[ "$TASK" == "infer" ]]; then
+    PYTHONPATH=${PROJECT_DIR} CUDA_VISIBLE_DEVICES=${GPU_ID} eval ${NICE} python ./entry/main_g.py liver \
+        --mode eval \
+        --tag ${BASE_NAME%".sh"} \
+        --model GUNet \
+        --classes Liver Tumor \
+        --test_fold 2 \
+        --im_height 256 --im_width 256 --im_channel 3 \
+        --random_flip 3 \
+        --primary_metric "Tumor/Dice" \
+        --secondary_metric "Liver/Dice" \
+        --batch_size 8 \
+        --evaluator Volume \
+        --normalizer instance_norm \
+        --use_context --context_list hist 200 \
+        --hist_scale 20 \
+        --load_status_file checkpoint_best \
         $@
 fi

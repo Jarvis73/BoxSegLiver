@@ -146,14 +146,10 @@ def sparse_softmax_cross_entropy(logits, labels):
 
 
 def weighted_sparse_softmax_cross_entropy(logits, labels, w_type, name=None, **kwargs):
-    with tf.name_scope("LabelProcess"):
+    with tf.name_scope(name, "WsceLoss"):   # weighted softmax cross entropy --> Wsce
         num_classes = logits.shape[-1]
         one_hot_labels = tf.one_hot(labels, num_classes)
-    with tf.name_scope(name, "WsceLoss"):   # weighted softmax cross entropy --> Wsce
         weights = _compute_weights(w_type, one_hot_labels, **kwargs)
-        # if "livers" in kwargs:
-        #     loss_mask = kwargs.pop("livers")
-        #     weights = tf.cast(loss_mask, tf.float32) * weights
         return tf.losses.sparse_softmax_cross_entropy(labels, logits, weights)
 
 
@@ -482,3 +478,79 @@ def tumor_detection_metrics(result, reference, iou_thresh=0.5, connectivity=1,
 
     return ret
 
+
+class ConfusionMatrix(object):
+    def __init__(self, test=None, reference=None):
+        self.tp = None
+        self.fp = None
+        self.tn = None
+        self.fn = None
+        self.size = None
+        self.reference_empty = None
+        self.reference_full = None
+        self.test_empty = None
+        self.test_full = None
+        self.set_reference(reference)
+        self.set_test(test)
+
+    def set_test(self, test):
+
+        self.test = test
+        self.reset()
+
+    def set_reference(self, reference):
+
+        self.reference = reference
+        self.reset()
+
+    def reset(self):
+
+        self.tp = None
+        self.fp = None
+        self.tn = None
+        self.fn = None
+        self.size = None
+        self.test_empty = None
+        self.test_full = None
+        self.reference_empty = None
+        self.reference_full = None
+
+    def compute(self):
+        if self.test is None or self.reference is None:
+            raise ValueError("'test' and 'reference' must both be set to compute confusion matrix.")
+        assert self.test.shape == self.reference.shape, "Shape mismatch: {} and {}".format(
+            self.test.shape, self.reference.shape)
+
+        self.tp = int(((self.test != 0) * (self.reference != 0)).sum())
+        self.fp = int(((self.test != 0) * (self.reference == 0)).sum())
+        self.tn = int(((self.test == 0) * (self.reference == 0)).sum())
+        self.fn = int(((self.test == 0) * (self.reference != 0)).sum())
+        self.size = self.reference.size
+        self.test_empty = not np.any(self.test)
+        self.test_full = np.all(self.test)
+        self.reference_empty = not np.any(self.reference)
+        self.reference_full = np.all(self.reference)
+
+    def get_matrix(self):
+
+        for entry in (self.tp, self.fp, self.tn, self.fn):
+            if entry is None:
+                self.compute()
+                break
+
+        return self.tp, self.fp, self.tn, self.fn
+
+    def get_size(self):
+
+        if self.size is None:
+            self.compute()
+        return self.size
+
+    def get_existence(self):
+
+        for case in (self.test_empty, self.test_full, self.reference_empty, self.reference_full):
+            if case is None:
+                self.compute()
+                break
+
+        return self.test_empty, self.test_full, self.reference_empty, self.reference_full

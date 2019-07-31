@@ -50,6 +50,8 @@ def add_arguments(parser):
                             "differentiating experiments with different prefix or merge several "
                             "experiments into a single label with the same prefix. Default is set"
                             "to experiment tag.")
+    group.add_argument("--save_best", action="store_true", help="Save best checkpoint")
+    group.add_argument("--save_interval", type=int, default=0, help="Save best checkpoint in each interval")
 
     group = parser.add_argument_group(title="Device Arguments")
     group.add_argument("--distribution_strategy",
