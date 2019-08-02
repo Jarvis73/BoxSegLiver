@@ -834,7 +834,7 @@ class EvaluateVolume(EvaluateBase):
                 sess.run(tf.global_variables_initializer())
                 saver.restore(sess, checkpoint_path)
 
-                predictions = {"Prob": model.probability, "TumorPred": model._layers["TumorPred"]}
+                predictions = {"Prob": model.probability, "TumorPred": model.predictions["TumorPred"]}
 
                 if self.config.use_spatial:
                     eil = input_fn(ModeKeys.EVAL, self.params)  # EvalImage3DLoader

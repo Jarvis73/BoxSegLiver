@@ -13,6 +13,7 @@
 # limitations under the License.
 #
 # =================================================================================
+
 import cv2
 import tqdm
 import math
@@ -24,8 +25,6 @@ import itertools
 import numpy as np
 import tensorflow as tf
 from pathlib import Path
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import tensorflow_estimator as tfes
 from tensorflow.python.platform import tf_logging as logging
@@ -41,15 +40,15 @@ deprecation._PRINT_DEPRECATION_WARNINGS = False
 ModeKeys = tfes.estimator.ModeKeys
 Dataset = tf.data.Dataset
 PROJ_ROOT = Path(__file__).parent.parent.parent
-pattern = str(Path(__file__).parent.parent.parent / "data/LiTS/png/volume-{:d}/{:03d}_im.png")
-lb_pattern = str(Path(__file__).parent.parent.parent / "data/LiTS/png/volume-{:d}/{:03d}_lb.png")
-IM_SCALE = 128 * 450
-LB_SCALE = 64
+pattern = str(PROJ_ROOT / "data/LiTS/png/volume-{:d}/{:03d}_im.png")
+lb_pattern = str(PROJ_ROOT / "data/LiTS/png/volume-{:d}/{:03d}_lb.png")
 GRAY_MIN = -200
 GRAY_MAX = 250
+IM_SCALE = 64
+LB_SCALE = 64
 LIVER_PERCENT = 0.66
 TUMOR_PERCENT = 0.5
-RND_SCALE = (0.8, 1.4)
+RND_SCALE = (1.0, 1.4)
 
 
 def add_arguments(parser):
@@ -58,7 +57,9 @@ def add_arguments(parser):
     group.add_argument("--im_height", type=int, default=256)
     group.add_argument("--im_width", type=int, default=256)
     group.add_argument("--im_channel", type=int, default=3)
+    group.add_argument("--filter_size", type=int, default=0, help="Filter tumors small than the given size")
     group.add_argument("--noise_scale", type=float, default=0.1)
+    group.add_argument("--zoom_scale", type=float, nargs=2, default=RND_SCALE)
     group.add_argument("--random_flip", type=int, default=1,
                        help="Random flip while training. 0 for no flip, 1 for flip only left/right, "
                             "2 for only up/down, 3 for left/right and up/down")
@@ -152,8 +153,8 @@ def _get_datasets(test_fold=-1, filter_size=10, choices=None, exclude=None):
     return dataset_dict
 
 
-def _collect_datasets(test_fold, mode, filter_only_liver_in_val=True):
-    dataset_dict = _get_datasets(test_fold, filter_size=0)
+def _collect_datasets(test_fold, mode, filter_tumor_size=0, filter_only_liver_in_val=True):
+    dataset_dict = _get_datasets(test_fold, filter_size=filter_tumor_size)
     if mode == "train":
         return dataset_dict["train"]
     else:
@@ -173,6 +174,7 @@ def input_fn(mode, params):
 
     args = params["args"]
     dataset = _collect_datasets(args.test_fold, mode,
+                                filter_tumor_size=args.filter_size,
                                 filter_only_liver_in_val=params.get("filter_only_liver_in_val", True))
     if len(dataset) == 0:
         raise ValueError("No valid dataset found!")
@@ -182,7 +184,7 @@ def input_fn(mode, params):
             return get_dataset_for_train(dataset,
                                          liver_percent=LIVER_PERCENT,
                                          tumor_percent=TUMOR_PERCENT,
-                                         random_scale=RND_SCALE, config=args)
+                                         random_scale=args.zoom_scale, config=args)
         elif mode == "eval_online":
             return get_dataset_for_eval_online(dataset,
                                                liver_percent=LIVER_PERCENT,
@@ -202,7 +204,7 @@ def input_fn(mode, params):
 #####################################
 
 
-def data_processing_train(im_files, seg_file, bbox, PID_ci, img_scale, lab_scale, config,
+def data_processing_train(im_files, seg_file, bbox, PID_ci,  img_clip, lab_scale, config,
                           random_noise, random_flip_left_right, random_flip_up_down):
     off_x, off_y, height, width = bbox[0], bbox[1], bbox[2], bbox[3]
 
@@ -215,9 +217,13 @@ def data_processing_train(im_files, seg_file, bbox, PID_ci, img_scale, lab_scale
     img = tf.image.crop_to_bounding_box(img, off_x, off_y, height, width)
     img = tf.image.resize_bilinear(img, (config.im_height, config.im_width), align_corners=True)
     img = tf.transpose(tf.squeeze(img, axis=-1), perm=(1, 2, 0))
-    img = tf.cast(img, tf.float32) / img_scale
+    img = tf.cast(img, tf.float32)
+    clip_min, clip_max = tf.split(img_clip, 2)
+    img = (tf.clip_by_value(img, clip_min, clip_max) - clip_min) / (clip_max - clip_min)
 
-    seg = tf.image.decode_png(tf.io.read_file(seg_file), dtype=tf.uint8)
+    seg = tf.cond(tf.greater(tf.strings.length(seg_file), 0),
+                  lambda: tf.image.decode_png(tf.io.read_file(seg_file), dtype=tf.uint8),
+                  lambda: tf.zeros((512, 512, 1), dtype=tf.uint8))
     seg = tf.image.crop_to_bounding_box(seg, off_x, off_y, height, width)
     seg = tf.expand_dims(seg, axis=0)
     seg = tf.image.resize_nearest_neighbor(seg, (config.im_height, config.im_width), align_corners=True)
@@ -247,6 +253,7 @@ def gen_train_batch(data_list,
                     liver_percent=0.,
                     tumor_percent=0.,
                     random_scale=(1., 1.),
+                    random_window_level=False,
                     config=None):
     d = data_list
     list_of_keys = np.arange(len(d))
@@ -325,8 +332,14 @@ def gen_train_batch(data_list,
                         # slice index is "" means padding with zeros
                         selected_slices.append("")
 
+            # Random clip image value
+            if random_window_level:
+                img_clip = (random.randint(10, 50) * IM_SCALE * 1., random.randint(500, 540) * IM_SCALE * 1.)
+            else:
+                img_clip = (50 * IM_SCALE * 1., 500 * IM_SCALE * 1.)
+
             yield selected_slices, lb_pattern.format(pid, selected_slice), \
-                [off_y, off_x] + crop_size, pid
+                [off_y, off_x] + crop_size, pid, img_clip
 
 
 def get_dataset_for_train(data_list, liver_percent=0., tumor_percent=0., random_scale=(1., 1.), config=None):
@@ -336,16 +349,16 @@ def get_dataset_for_train(data_list, liver_percent=0., tumor_percent=0., random_
 
     def train_gen():
         return gen_train_batch(data_list, batch_size, liver_percent, tumor_percent,
-                               random_scale, config)
+                               random_scale, random_window_level=True, config=config)
 
-    dataset = (tf.data.Dataset.from_generator(train_gen, (tf.string, tf.string, tf.int32, tf.int32),
+    dataset = (tf.data.Dataset.from_generator(train_gen, (tf.string, tf.string, tf.int32, tf.int32, tf.float32),
                                               output_shapes=(tf.TensorShape([config.im_channel]),
                                                              tf.TensorShape([]),
                                                              tf.TensorShape([4]),
-                                                             tf.TensorShape([])))
+                                                             tf.TensorShape([]),
+                                                             tf.TensorShape([2])))
                .apply(tf.data.experimental.map_and_batch(
                         lambda *args_: data_processing_train(*args_,
-                                                             img_scale=IM_SCALE,
                                                              lab_scale=LB_SCALE,
                                                              config=config,
                                                              random_noise=True,
@@ -366,14 +379,14 @@ def get_dataset_for_eval_online(data_list, liver_percent=0., tumor_percent=0., c
         for _ in tqdm.tqdm(range(config.eval_num_batches_per_epoch * config.batch_size)):
             yield next(infinity_generator)
 
-    dataset = (tf.data.Dataset.from_generator(val_gen, (tf.string, tf.string, tf.int32, tf.int32),
+    dataset = (tf.data.Dataset.from_generator(val_gen, (tf.string, tf.string, tf.int32, tf.int32, tf.float32),
                                               output_shapes=(tf.TensorShape([config.im_channel]),
                                                              tf.TensorShape([]),
                                                              tf.TensorShape([4]),
-                                                             tf.TensorShape([])))
+                                                             tf.TensorShape([]),
+                                                             tf.TensorShape([2])))
                .apply(tf.data.experimental.map_and_batch(
                         lambda *args_: data_processing_train(*args_,
-                                                             img_scale=IM_SCALE,
                                                              lab_scale=LB_SCALE,
                                                              config=config,
                                                              random_noise=False,
@@ -712,11 +725,11 @@ def get_dataset_for_eval_patches(data_list, step=2, config=None):
 def gen_dataset_jsons():
     # exclude = [32, 34, 38, 41, 47, 87, 89, 91, 105, 106, 114, 115, 119]
     exclude = []
-    _get_datasets(test_fold=0, filter_size=0, exclude=exclude)
-    _get_datasets(test_fold=1, filter_size=0, exclude=exclude)
-    _get_datasets(test_fold=2, filter_size=0, exclude=exclude)
-    _get_datasets(test_fold=3, filter_size=0, exclude=exclude)
-    _get_datasets(test_fold=4, filter_size=0, exclude=exclude)
+    _get_datasets(test_fold=0, filter_size=20, exclude=exclude)
+    _get_datasets(test_fold=1, filter_size=20, exclude=exclude)
+    _get_datasets(test_fold=2, filter_size=20, exclude=exclude)
+    _get_datasets(test_fold=3, filter_size=20, exclude=exclude)
+    _get_datasets(test_fold=4, filter_size=20, exclude=exclude)
 
 
 if __name__ == "__main__":

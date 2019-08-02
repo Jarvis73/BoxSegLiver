@@ -117,6 +117,7 @@ logs/
 *deprecated*
 model_dir/
 run_scripts/*.sh
+!run_scripts/eval_all_ckpt.sh
 images/
 notebooks/
 grabcut.py

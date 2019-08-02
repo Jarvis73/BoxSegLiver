@@ -34,8 +34,13 @@ from DataLoader.Liver import input_pipeline_g
 from evaluators import evaluator_liver
 
 ModeKeys = tfes.estimator.ModeKeys
-TF_RANDOM_SEED = None
 input_pipeline = input_pipeline_g
+
+# Some global hyper parameters that have no effect on training
+TF_RANDOM_SEED = None
+SAVE_SUMMARY_STEPS = 500
+LOG_STEP_COUNT_STEPS = 500
+KEEP_CHECKPOINT_MAX = 1
 
 
 def _get_arguments():
@@ -105,23 +110,21 @@ def main():
         all_reduce_alg=args.all_reduce_alg,
         session_config=session_config)
 
-    save_summary_steps = 500
     if args.mode == ModeKeys.TRAIN:
-        log_step_count_steps = save_summary_steps
         run_config = tfes.estimator.RunConfig(
             train_distribute=distribution_strategy,
             tf_random_seed=TF_RANDOM_SEED,
-            save_summary_steps=save_summary_steps,
+            save_summary_steps=SAVE_SUMMARY_STEPS,
             save_checkpoints_steps=5000,
             session_config=session_config,
-            keep_checkpoint_max=2,
-            log_step_count_steps=log_step_count_steps,
+            keep_checkpoint_max=KEEP_CHECKPOINT_MAX,
+            log_step_count_steps=LOG_STEP_COUNT_STEPS,
         )
 
         params = {"args": args, "save_best_ckpt": args.save_best}
         params.update(models.get_model_params(args,
                                               build_metrics=True,
-                                              build_summaries=bool(save_summary_steps)))
+                                              build_summaries=bool(SAVE_SUMMARY_STEPS)))
         params.update(solver.get_solver_params(args,
                                                warm_up=args.lr_warm_up,
                                                slow_start_step=args.slow_start_step,
@@ -133,7 +136,7 @@ def main():
         estimator = estimator_lib.CustomEstimator(models.model_fn, args.model_dir, run_config, params,
                                                   args.warm_start_from)
         train_hooks = [hooks.LogLearningRateHook(prefix=args.summary_prefix,
-                                                 every_n_steps=log_step_count_steps,
+                                                 every_n_steps=LOG_STEP_COUNT_STEPS,
                                                  output_dir=args.model_dir,
                                                  do_logging=False)]
         if args.learning_policy == "plateau":

@@ -191,6 +191,7 @@ def dump_hist_feature(in_path, out_path,
                       xrng=(GRAY_MIN, GRAY_MAX),
                       number=0):
     """
+    Compute histogram features for context guide
 
     Parameters
     ----------

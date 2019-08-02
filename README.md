@@ -123,21 +123,28 @@ Then add execution permission for your bash file & begin train/evaluate model th
 
 ## Need implemented
 
+### Base
+
 - [x] Data loader
 - [x] Training routine
 - [x] Summaries
 - [x] Metrics
 - [x] Loss functions
 - [x] Evaluate
-- [ ] Predict
+- [x] Predict
 - [x] Visualization
 - [x] Multi-GPU Training
 - [ ] Multi-GPU Evaluation/Prediction
+
+### Networks
 
 - [x] UNet
 - [ ] Attention UNet
 - [x] GUNet
 - [ ] G-AttentionUNet
+- [ ] DenseUNet
+- [ ] G-DenseUNet
+- [ ] Deep Supervised UNet
 
 - [ ] Pre-trained backbone
 - [x] Context guide

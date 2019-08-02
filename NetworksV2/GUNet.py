@@ -365,7 +365,6 @@ class GUNet(base.BaseNet):
             tf.summary.image("{}/{}".format(self.args.tag, labels.op.name), labels_uint8,
                              max_outputs=1, collections=[self.DEFAULT])
 
-            with tf.name_scope("SumPred"):
-                for key, value in self._image_summaries.items():
-                    tf.summary.image("{}/{}".format(self.args.tag, key), value * 255,
-                                     max_outputs=1, collections=[self.DEFAULT])
+            for key, value in self._image_summaries.items():
+                tf.summary.image("{}/{}".format(self.args.tag, key), value * 255,
+                                 max_outputs=1, collections=[self.DEFAULT])

@@ -733,7 +733,6 @@ class CustomEstimator(object):
             summary.scalar(self._params["args"].summary_prefix + '/Losses/total_loss', value)
             worker_hooks.append(hooks_lib.AverageTensorHook(update_op, local_init_ops,
                                                             every_n_steps=self._config.save_summary_steps))
-        worker_hooks.extend(hooks)
         worker_hooks.append(training.NanTensorHook(estimator_spec.loss))
         if self._config.log_step_count_steps is not None:
             tensors = {"loss": estimator_spec.loss,
@@ -749,6 +748,7 @@ class CustomEstimator(object):
                     formatter=lambda x: hooks_lib.LoggingTensorWithSpeedFormatterHook.custom_formatter(
                         x, round_digits=self.params.get("log_round_digits", 3))))
         worker_hooks.extend(estimator_spec.training_hooks)
+        worker_hooks.extend(hooks)
 
         # Create Saver object
         if not (estimator_spec.scaffold.saver or ops.get_collection(ops.GraphKeys.SAVERS)):

@@ -50,7 +50,6 @@ LB_SCALE = 64
 LIVER_PERCENT = 0.66
 TUMOR_PERCENT = 0.5
 RND_SCALE = (1.0, 1.4)
-RND_WINDOW_LEVEL = (50, 15)
 
 RND_SEED = None     # For debug
 # random.seed(1234)
@@ -65,7 +64,6 @@ def add_arguments(parser):
     group.add_argument("--im_channel", type=int, default=3)
     group.add_argument("--filter_size", type=int, default=0, help="Filter tumors small than the given size")
     group.add_argument("--noise_scale", type=float, default=0.1)
-    group.add_argument("--random_window_level", type=int, nargs=2, default=RND_WINDOW_LEVEL)
     group.add_argument("--zoom_scale", type=float, nargs=2, default=RND_SCALE)
     group.add_argument("--random_flip", type=int, default=1,
                        help="Random flip while training. 0 for no flip, 1 for flip only left/right, "
@@ -273,7 +271,7 @@ def input_fn(mode, params):
 #####################################
 
 
-def data_processing_train(im_files, seg_file, bbox, PID_ci, img_clip, guide, img_scale, lab_scale,
+def data_processing_train(im_files, seg_file, bbox, PID_ci, img_clip, guide, lab_scale,
                           config, random_noise, random_flip_left_right, random_flip_up_down,
                           mode="Train", **kwargs):
     off_x, off_y, height, width = bbox[0], bbox[1], bbox[2], bbox[3]
@@ -668,7 +666,6 @@ def get_dataset_for_train(data_list,
     dataset = (tf.data.Dataset.from_generator(train_gen, output_types, output_shapes)
                .apply(tf.data.experimental.map_and_batch(
                         lambda *args_: data_processing_train(*args_,
-                                                             img_scale=IM_SCALE * (GRAY_MAX - GRAY_MIN),
                                                              lab_scale=LB_SCALE,
                                                              config=config,
                                                              random_noise=True,
@@ -746,7 +743,6 @@ def get_dataset_for_eval_online(data_list,
                                               output_types, output_shapes)
                .apply(tf.data.experimental.map_and_batch(
                         lambda *args_: data_processing_train(*args_,
-                                                             img_scale=IM_SCALE * (GRAY_MAX - GRAY_MIN),
                                                              lab_scale=LB_SCALE,
                                                              config=config,
                                                              random_noise=False,
