@@ -19,8 +19,11 @@ import random
 import functools
 import numpy as np
 import scipy.ndimage as ndi
+from skimage import feature
+from skimage._shared import utils as skutils
 from medpy import metric as mtr     # pip install medpy
 from collections import defaultdict
+from collections import OrderedDict
 
 WARNING_ONCE = False
 
@@ -1070,3 +1073,81 @@ def xiaolinwu_line(x0, y0, x1, y1):
         ys.append(ypxl2)
 
     return xs, ys, forward
+
+
+def greycoprops(P, props=('contrast', )):
+    """ Extended version of skimage.feature.greycoprops() for supporting more features.
+    """
+    skutils.assert_nD(P, 4, 'P')
+
+    (num_level, num_level2, num_dist, num_angle) = P.shape
+    assert num_level == num_level2
+    assert num_dist > 0
+    assert num_angle > 0
+    results = OrderedDict()
+
+    # create weights for specified property
+    I, J = np.ogrid[0:num_level, 0:num_level]
+    if 'asm' in props or "energy" in props:
+        asm = np.sum(P ** 2, axis=(0, 1))
+        if "asm" in props:
+            results["asm"] = asm
+        if "energy" in props:
+            results["energy"] = np.sqrt(asm)
+    if 'contrast' in props:
+        weights = (I - J) ** 2
+        results["contrast"] = np.sum(P * weights, axis=(0, 1))
+    if 'dissimilarity' in props:
+        weights = np.abs(I - J)
+        results["dissimilarity"] = np.sum(P * weights, axis=(0, 1))
+    if "entropy" in props:
+        results["entropy"] = -np.apply_over_axes(np.sum, (P * np.log(P + 1e-16)), axes=(0, 1))[0, 0]
+    if 'homogeneity' in props:
+        weights = 1. / (1. + (I - J) ** 2)
+        results["homogeneity"] = np.sum(P * weights, axis=(0, 1))
+    if "correlation" in props or "cluster_shade" in props or "cluster_prominence" in props:
+        I = np.array(range(num_level)).reshape((num_level, 1, 1, 1))
+        J = np.array(range(num_level)).reshape((1, num_level, 1, 1))
+        mean_i = np.sum(I * P, axis=(0, 1))
+        mean_j = np.sum(J * P, axis=(0, 1))
+        diff_i = I - mean_i
+        diff_j = J - mean_j
+        if "correlation" in props:
+            std_i = np.sqrt(np.sum(P * (diff_i) ** 2, axis=(0, 1)))
+            std_j = np.sqrt(np.sum(P * (diff_j) ** 2, axis=(0, 1)))
+            cov = np.sum(P * (diff_i * diff_j), axis=(0, 1))
+            results["correlation"] = np.zeros((num_dist, num_angle), dtype=np.float64)
+            # handle the special case of standard deviations near zero
+            mask_0 = std_i < 1e-15
+            mask_0[std_j < 1e-15] = True
+            results["correlation"][mask_0] = 1
+            # handle the standard case
+            mask_1 = mask_0 == False
+            results["correlation"][mask_1] = cov[mask_1] / (std_i[mask_1] * std_j[mask_1])
+        if "cluster_shade" in props:
+            weights = (diff_i + diff_j) ** 3
+            results["cluster_shade"] = np.sum(P * weights, axis=(0, 1))
+        if "cluster_prominence" in props:
+            weights = (diff_i + diff_j) ** 4
+            results["cluster_prominence"] = np.sum(P * weights, axis=(0, 1))
+
+    return results
+
+
+def glcm_features(image, distances, angles, levels=256,
+                  symmetric=True, normed=True, features=None, flat=False):
+    glcm = feature.greycomatrix(
+        image, distances=distances, angles=angles, levels=levels, symmetric=symmetric, normed=normed)
+    if features is None:
+        return glcm
+
+    supported_features = ["contrast", "dissimilarity", "homogeneity", "asm", "energy", "correlation",
+                          "cluster_shade", "cluster_prominence"]
+    for feat in features:
+        if feat not in supported_features:
+            raise ValueError("%s is an invalid property" % feat)
+    results = greycoprops(glcm, props=features)
+    if flat:
+        results = {k: v.reshape(-1) for k, v in results.items()}
+
+    return glcm, results

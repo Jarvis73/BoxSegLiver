@@ -83,6 +83,15 @@ def add_arguments(parser):
                        help="Random noise scale for histogram (default: %(default)f)")
     group.add_argument("--hist_scale", type=float, default=20,
                        help="A coefficient multiplied to histogram values")
+    group.add_argument("--glcm", action="store_true",
+                       help="Use glcm texture features")
+    group.add_argument("--glcm_features", type=str, nargs="+",
+                       choices=["contrast", "dissimilarity", "homogeneity", "ASM", "energy", "correlation"],
+                       default=["contrast", "dissimilarity", "homogeneity", "energy", "correlation"],
+                       help="Supported GLCM texture features")
+    group.add_argument("--glcm_distance", type=int, nargs="+", default=[1, 2, 3])
+    group.add_argument("--glcm_angle", type=float, nargs="+", default=[0., np.pi * 0.25, np.pi * 0.5, np.pi * 0.75])
+
     group.add_argument("--use_spatial", action="store_true")
     group.add_argument("--spatial_random", type=float, default=1.,
                        help="Probability of adding spatial guide to current slice with tumors "

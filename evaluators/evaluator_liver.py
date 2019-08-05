@@ -114,7 +114,7 @@ class EvaluateVolume(EvaluateBase):
                 self.mirror_div = 4
             else:
                 self.mirror_div = 1
-            tf.logging.info("Enable --> average by mirror, divisor = {}".format(self.config.random_flip))
+            tf.logging.info("Enable --> average by mirror, divisor = {}".format(self.mirror_div))
         else:
             self.mirror_div = 1
 
@@ -843,7 +843,8 @@ class EvaluateVolume(EvaluateBase):
                     assert isinstance(eil, input_pipeline_g.EvalImage3DLoader)
                     while eil.prepare_next_case():
                         for slice_iter in eil.case_iter:
-                            slice_preds = []
+                            # slice_preds = []
+                            slice_probs = []
                             for features in slice_iter:
                                 feed_dict = {images: features.pop("images"), sp_guide: features.pop("sp_guide")}
                                 if self.config.use_context:
@@ -851,16 +852,22 @@ class EvaluateVolume(EvaluateBase):
                                 preds_eval = sess.run(predictions, feed_dict=feed_dict)
                                 preds_eval.update(features)
                                 if features["mirror"] == 0:
-                                    slice_preds.append(preds_eval.pop("TumorPred"))
+                                    # slice_preds.append(preds_eval.pop("TumorPred"))
+                                    slice_probs.append(preds_eval["Prob"])
                                 elif features["mirror"] == 1:
-                                    slice_preds.append(np.flip(preds_eval.pop("TumorPred"), axis=2))
+                                    # slice_preds.append(np.flip(preds_eval.pop("TumorPred"), axis=2))
+                                    slice_probs.append(np.flip(preds_eval["Prob"], axis=2))
                                 elif features["mirror"] == 2:
-                                    slice_preds.append(np.flip(preds_eval.pop("TumorPred"), axis=1))
+                                    # slice_preds.append(np.flip(preds_eval.pop("TumorPred"), axis=1))
+                                    slice_probs.append(np.flip(preds_eval["Prob"], axis=1))
                                 elif features["mirror"] == 3:
-                                    slice_preds.append(np.flip(np.flip(preds_eval.pop("TumorPred"), axis=2), axis=1))
+                                    # slice_preds.append(np.flip(np.flip(preds_eval.pop("TumorPred"), axis=2), axis=1))
+                                    slice_probs.append(np.flip(np.flip(preds_eval["Prob"], axis=2), axis=1))
                                 yield preds_eval, None
-                            ori_dtype = slice_preds[0].dtype
-                            eil.last_pred = np.ceil(np.mean(slice_preds, axis=0)).astype(ori_dtype)
+                            # ori_dtype = slice_preds[0].dtype
+                            # eil.last_pred = np.ceil(np.mean(slice_preds, axis=0)).astype(ori_dtype)
+                            eil.last_pred = (np.argmax(np.mean(slice_probs, axis=0), axis=-1) == 2)\
+                                .astype(np.uint8)[..., None]
                         yield None, eil.labels
                 else:
                     for features, labels in input_fn(ModeKeys.EVAL, self.params):

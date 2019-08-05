@@ -256,6 +256,125 @@ def run_dump_hist_feature(num=-1):
                       xrng=(GRAY_MIN, GRAY_MAX), number=num)
 
 
+def dump_glcm_feature_for_train(in_path, out_path,
+                                distances=(1, 2, 3),
+                                angles=(0, 1, 2, 3),
+                                level=256,
+                                symmetric=True,
+                                normed=True,
+                                features="all",
+                                filter_size=20,
+                                average_num=1,
+                                number=0):
+    """
+    Compute GLCM texture features for context guide
+
+    Parameters
+    ----------
+    in_path: str
+        data directory
+    out_path: str
+        npy/npz directory
+    distances: tuple
+    angles: tuple
+    level: int
+    symmetric: bool
+    normed: bool
+    features: str or list of str
+        all for all the features or GLCM feature names
+    filter_size: int
+    average_num: int
+        Collect at least 'average_num' feature vectors each for an image patch for
+        getting average results
+    number: int
+        for debug
+    """
+    src_path = Path(in_path)
+    dst_path = Path(out_path) / mode
+    dst_path.mkdir(parents=True, exist_ok=True)
+    dst_file = str(dst_path / "%03d")
+    with (Path(__file__).parent / "prepare/meta.json").open() as f:
+        meta = json.load(f)
+        meta = {case["PID"]: case for case in meta}
+    angle = np.pi / 4
+
+    mmax = {"contrast": -np.inf,
+            "dissimilarity": -np.inf,
+            "homogeneity": -np.inf,
+            "asm": -np.inf,
+            "correlation": -np.inf}
+    mmin = {"contrast": np.inf,
+            "dissimilarity": np.inf,
+            "homogeneity": np.inf,
+            "asm": np.inf,
+            "correlation": np.inf}
+    for i, vol_case in enumerate(sorted(src_path.glob("volume-*.nii"),
+                                        key=lambda x: int(str(x).split(".")[0].split("-")[-1]))):
+        if number >= 0 and number != i:
+            continue
+        PID = int(vol_case.stem.split("-")[-1])
+        print("{:03d} {:47s}".format(i, str(vol_case)))
+        case = meta[PID]
+
+        vh, volume = nii_kits.read_lits(vol_case.stem.split("-")[-1], "vol", vol_case)
+        lab_case = vol_case.parent / vol_case.name.replace("volume", "segmentation")
+        _, labels = nii_kits.read_lits(vol_case.stem.split("-")[-1], "lab", lab_case)
+        assert volume.shape == labels.shape, "Vol{} vs Lab{}".format(volume.shape, labels.shape)
+
+        if isinstance(features, str) and features != "all":
+            feat_list = [features]
+        elif isinstance(features, (list, tuple)):
+            feat_list = features
+        else:
+            feat_list = ["contrast", "dissimilarity", "homogeneity", "asm", "correlation"]
+        glcm_feature_length = len(distances) * len(angles) * len(feat_list)
+        slice_glcm_features = np.zeros((volume.shape[0], glcm_feature_length),
+                                       dtype=np.float32)
+        for k in range(volume.shape[0]):
+            # Choice a series of Liver / Tumor patches
+            if k in case["tumor_slices_index"]:
+                ind = case["tumor_slices_index"].index(k)
+                feat_vals = []
+                counter = 0
+                for j in range(case["tumor_slices_from_to"][ind], case["tumor_slices_from_to"][ind + 1]):
+                    if case["tumor_slices_areas"][j] < filter_size:
+                        continue
+                    y1, x1, y2, x2 = case["tumor_slices"][j]
+                    image_patch = volume[k, y1:y2, x1:x2]
+                    _, ff = array_kits.glcm_features(image_patch, distances, [angle * x for x in angles],
+                                                     level, symmetric, normed, feat_list, flat=True)
+                    feat_vals.append(np.array([ff[fe] for fe in feat_list]).reshape(-1))
+                    for fe in feat_list:
+                        mmax[fe] = max(mmax[fe], ff[fe].max())
+                        mmin[fe] = min(mmin[fe], ff[fe].min())
+                    counter += 1
+                if counter < average_num:
+                    # Try to compute more glcm features for average results(more stable).
+                    loop = 1
+                    while True:
+                        for j in range(case["tumor_slices_from_to"][ind], case["tumor_slices_from_to"][ind + 1]):
+                            if case["tumor_slices_areas"][j] < filter_size:
+                                continue
+                            y1, x1, y2, x2 = case["tumor_slices"][j]
+                            # Resize for new glcm features
+                            image_patch = ndi.zoom(volume[k, y1:y2, x1:x2], (1. + loop * .1, ) * 2, order=1)
+                            _, ff = array_kits.glcm_features(image_patch, distances, [angle * x for x in angles],
+                                                             level, symmetric, normed, feat_list, flat=True)
+                            feat_vals.append(np.array([ff[fe] for fe in feat_list]).reshape(-1))
+                            for fe in feat_list:
+                                mmax[fe] = max(mmax[fe], ff[fe].max())
+                                mmin[fe] = min(mmin[fe], ff[fe].min())
+                            counter += 1
+                        if counter >= average_num:
+                            break
+                        loop += 1
+                slice_glcm_features[k] = np.mean(feat_vals, axis=0)
+            # TODO(zjw): Liver glcm features, are we need?
+        np.save(dst_file % PID, slice_glcm_features)
+        print(mmax)
+        print(mmin)
+
+
 def simulate_user_prior(simul_name, in_path):
     """
     We assume user labels the middle slice of all the tumors by an ellipse, which can
