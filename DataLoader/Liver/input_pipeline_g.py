@@ -102,6 +102,7 @@ def add_arguments(parser):
                        help="Random perturbation scale of the spatial guide centers")
     group.add_argument("--stddev_random_ratio", type=float, default=0.4,
                        help="Random perturbation scale of the spatial guide stddevs")
+    group.add_argument("--eval_no_sp", action="store_true", help="No spatial guide in evaluation")
     group.add_argument("--min_std", type=float, default=2.,
                        help="Minimum stddev for spatial guide")
     group.add_argument("--save_sp_guide", action="store_true", help="Save spatial guide")
@@ -253,11 +254,15 @@ def input_fn(mode, params):
                                                context_guide=args.use_context,
                                                context_list=tuple(context_list),
                                                spatial_guide=args.use_spatial,
+                                               spatial_random=args.spatial_random,
                                                config=args,
                                                **kwargs)
         elif mode == ModeKeys.EVAL:
             if args.use_context and "hist" in features:
                 kwargs["hist_scale"] = args.hist_scale
+            if args.eval_no_sp:
+                return get_dataset_for_eval_image_sp(dataset,
+                                                     config=args)
             if args.use_spatial:
                 return EvalImage3DLoader(dataset,
                                          context_guide=args.use_context,
@@ -693,6 +698,7 @@ def get_dataset_for_eval_online(data_list,
                                 context_guide=False,
                                 context_list=(),
                                 spatial_guide=False,
+                                spatial_random=0.,
                                 config=None,
                                 **kwargs):
     batch_size = distribution_utils.per_device_batch_size(config.batch_size, config.num_gpus)
@@ -703,7 +709,7 @@ def get_dataset_for_eval_online(data_list,
                                              context_guide=context_guide,
                                              context_list=context_list,
                                              spatial_guide=spatial_guide,
-                                             spatial_random=1.,
+                                             spatial_random=spatial_random,
                                              spatial_inner_random=False,
                                              random_window_level=False,
                                              config=config,
@@ -887,6 +893,61 @@ def get_dataset_for_eval_image(data_list, context_list, config=None, **kwargs):
                     tmp["mirror"] = 3
                     yield tmp, None
         yield None, (segmentation, seg_path, pads, bbox)
+
+
+def get_dataset_for_eval_image_sp(data_list, config=None):
+    """ For spatial guide without spatial guide in evaluation
+    """
+    align = 16
+    padding = 25
+    padding_z = 0
+
+    batch_size = config.batch_size
+    c = config.im_channel
+    pshape = config.im_height, config.im_width
+
+    for ci, case in enumerate(data_list[config.eval_skip_num:]):
+        pid, _, seg_path, bbox, oshape, cshape, lhc, rhc, volume, segmentation = \
+            parse_case_eval(case, align, padding, padding_z, c)
+
+        eval_batch = {"images": np.empty((batch_size, *pshape, c), dtype=np.float32),
+                      "names": pid,
+                      "sp_guide": np.ones((batch_size, *pshape, 1), dtype=np.float32) * 0.5,
+                      "mirror": 0,
+                      "direction": "Forward"}
+
+        pads = (batch_size - ((bbox[5] - bbox[2] + 1) % batch_size)) % batch_size
+        if pads > 0:
+            volume = np.concatenate((volume, np.zeros((*cshape[1:], pads), volume.dtype)), axis=-1)
+            # Avoid index exceed array range
+        volume = cv2.resize(volume, pshape, interpolation=cv2.INTER_LINEAR)
+
+        num_of_batches = (volume.shape[-1] - lhc - rhc) // batch_size
+        assert volume.shape[-1] - lhc - rhc == batch_size * num_of_batches, \
+            "Wrong padding: volume length: {}, lhc: {}, rhc: {}, batch_size: {}, num_of_batches: {}".format(
+                volume.shape[-1], lhc, rhc, batch_size, num_of_batches)
+        for idx in range(lhc, volume.shape[-1] - rhc, batch_size):
+            for j in range(batch_size):
+                eval_batch["images"][j] = volume[:, :, idx + j - lhc:idx + j + rhc + 1]
+            yield copy.copy(eval_batch), None
+
+            if config.eval_mirror:
+                if config.random_flip & 1 > 0:
+                    tmp = copy.copy(eval_batch)
+                    tmp["images"] = np.flip(tmp["images"], axis=2)
+                    tmp["mirror"] = 1
+                    yield tmp, None
+                if config.random_flip & 2 > 0:
+                    tmp = copy.copy(eval_batch)
+                    tmp["images"] = np.flip(tmp["images"], axis=1)
+                    tmp["mirror"] = 2
+                    yield tmp, None
+                if config.random_flip & 3 > 0:
+                    tmp = copy.copy(eval_batch)
+                    tmp["images"] = np.flip(np.flip(tmp["images"], axis=2), axis=1)
+                    tmp["mirror"] = 3
+                    yield tmp, None
+        yield None, (segmentation, seg_path, pads, bbox, True)
 
 
 class EvalImage3DLoader(object):

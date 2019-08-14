@@ -1096,15 +1096,15 @@ def greycoprops(P, props=('contrast', )):
             results["energy"] = np.sqrt(asm)
     if 'contrast' in props:
         weights = (I - J) ** 2
-        results["contrast"] = np.sum(P * weights, axis=(0, 1))
+        results["contrast"] = np.sum(P * weights[:, :, None, None], axis=(0, 1))
     if 'dissimilarity' in props:
         weights = np.abs(I - J)
-        results["dissimilarity"] = np.sum(P * weights, axis=(0, 1))
+        results["dissimilarity"] = np.sum(P * weights[:, :, None, None], axis=(0, 1))
     if "entropy" in props:
         results["entropy"] = -np.apply_over_axes(np.sum, (P * np.log(P + 1e-16)), axes=(0, 1))[0, 0]
     if 'homogeneity' in props:
         weights = 1. / (1. + (I - J) ** 2)
-        results["homogeneity"] = np.sum(P * weights, axis=(0, 1))
+        results["homogeneity"] = np.sum(P * weights[:, :, None, None], axis=(0, 1))
     if "correlation" in props or "cluster_shade" in props or "cluster_prominence" in props:
         I = np.array(range(num_level)).reshape((num_level, 1, 1, 1))
         J = np.array(range(num_level)).reshape((1, num_level, 1, 1))
@@ -1135,19 +1135,36 @@ def greycoprops(P, props=('contrast', )):
 
 
 def glcm_features(image, distances, angles, levels=256,
-                  symmetric=True, normed=True, features=None, flat=False):
+                  symmetric=True, normed=True, features=None, flat=False, norm_levels=False):
     glcm = feature.greycomatrix(
         image, distances=distances, angles=angles, levels=levels, symmetric=symmetric, normed=normed)
     if features is None:
         return glcm
 
     supported_features = ["contrast", "dissimilarity", "homogeneity", "asm", "energy", "correlation",
-                          "cluster_shade", "cluster_prominence"]
+                          "entropy", "cluster_shade", "cluster_prominence"]
     for feat in features:
         if feat not in supported_features:
             raise ValueError("%s is an invalid property" % feat)
     results = greycoprops(glcm, props=features)
     if flat:
         results = {k: v.reshape(-1) for k, v in results.items()}
+    if norm_levels:
+        if "dissimilarity" in results:
+            results["dissimilarity"] /= levels / 2 / 2
+        if "contrast" in results:
+            results["contrast"] /= (levels / 4) ** 2
+        if "cluster_shade" in results:
+            results["cluster_shade"] /= (levels / 4) ** 3
+        if "cluster_prominence" in results:
+            results["cluster_prominence"] /= (levels / 4) ** 4
+        if "homogeneity" in results:
+            results["homogeneity"] *= 2
+        if "asm" in results:
+            results["asm"] *= 2
+        if "energy" in results:
+            results["energy"] *= 2
+        if "entropy" in results:
+            results["entropy"] /= 8
 
     return glcm, results

@@ -708,6 +708,14 @@ class EvaluateVolume(EvaluateBase):
         model_args = self.params.get("model_args", ())
         model_kwargs = self.params.get("model_kwargs", {})
 
+        # Parse context_list
+        feat_length = 0
+        if self.config.use_context and self.config.context_list is not None:
+            if len(self.config.context_list) % 2 != 0:
+                raise ValueError("context_list is not paired!")
+            for i in range(len(self.config.context_list) // 2):
+                feat_length += int(self.config.context_list[2 * i + 1])
+
         def run_pred():
             with tf.Graph().as_default():
                 bs, h, w, c = (self.config.batch_size,
@@ -715,7 +723,14 @@ class EvaluateVolume(EvaluateBase):
                                self.config.im_width if self.config.im_width > 0 else None,
                                self.config.im_channel)
                 images = tf.placeholder(tf.float32, shape=(bs, h, w, c))
-                model_inputs = {"images": images}
+
+                context, sp_guide = None, None
+                if self.config.use_context:
+                    context = tf.placeholder(tf.float32, shape=(bs, feat_length))
+                if self.config.use_spatial:
+                    sp_guide = tf.placeholder(tf.float32, shape=(bs, h, w, 1))
+
+                model_inputs = {"images": images, "context": context, "sp_guide": sp_guide}
                 model = self.params["model"](self.config)
                 self.params["model_instances"] = [model]
                 # build model
@@ -729,7 +744,12 @@ class EvaluateVolume(EvaluateBase):
                 predictions = {"Prob": model.probability}
                 for features, labels in input_fn(ModeKeys.EVAL, self.params):
                     if features:
-                        preds_eval = sess.run(predictions, {images: features.pop("images")})
+                        feed_dict = {images: features.pop("images")}
+                        if self.config.use_context and "context" in features:
+                            feed_dict[context] = features.pop("context")
+                        if self.config.use_spatial and "sp_guide" in features:
+                            feed_dict[sp_guide] = features.pop("sp_guide")
+                        preds_eval = sess.run(predictions, feed_dict)
                         preds_eval.update(features)
                         yield preds_eval, None
                     else:

@@ -21,3 +21,8 @@ def hist_preprocess(feat, **kwargs):
     if "hist_scale" in kwargs:
         feat *= kwargs["hist_scale"]
     return feat.astype(np.float32)
+
+
+def glcm_preprocess(feat, **kwargs):
+    _ = kwargs
+    return feat.astype(np.float32)

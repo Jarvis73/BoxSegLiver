@@ -177,10 +177,16 @@ def main():
                                                 model_dir=args.model_dir,
                                                 params=params,
                                                 use_sg_reduce_fp=True)
-        evaluator.run_g(input_pipeline.input_fn,
-                        checkpoint_path=args.ckpt_path,
-                        latest_filename=(args.load_status_file if not args.eval_final else None),
-                        save=args.save_predict)
+        if args.use_spatial and args.eval_no_sp:
+            evaluator.run(input_pipeline.input_fn,
+                          checkpoint_path=args.ckpt_path,
+                          latest_filename=(args.load_status_file if not args.eval_final else None),
+                          save=args.save_predict)
+        else:
+            evaluator.run_g(input_pipeline.input_fn,
+                            checkpoint_path=args.ckpt_path,
+                            latest_filename=(args.load_status_file if not args.eval_final else None),
+                            save=args.save_predict)
 
 
 if __name__ == "__main__":

@@ -49,11 +49,11 @@ def _context_subnets(context,
                                use_final_layer=True,
                                final_weight_initializer=tf.zeros_initializer(),
                                final_biases_initializer=tf.ones_initializer())
-        elif context_model in ["vgg16c", "vgg16d"]:
+        elif context_model in ["vgg16B", "vgg16C", "vgg16D"]:
             res = slim_nets.vgg(context_model,
                                 tf.expand_dims(context, axis=-1),
-                                context_conv_init_channels + [n_modulator_param],
-                                context_fc_channels,
+                                context_conv_init_channels,
+                                context_fc_channels + [n_modulator_param],
                                 slim.conv1d,
                                 tf.layers.max_pooling1d,
                                 use_dropout=True,

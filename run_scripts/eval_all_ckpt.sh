@@ -22,12 +22,13 @@ do
     echo ${status_file} >> "${MODEL_DIR}/logs/eval_all_results"
     ./run_scripts/${TAG}.sh eval ${GPU_ID} ${NICE} \
         --load_status_file ${status_file} \
-        --out_file eval_all_results
+        --out_file eval_all_results \
+        $@
 done
 
 cat "${MODEL_DIR}/logs/eval_all_results" | while read line
 do
-    if [[ ${line} =~ checkpoint_best_ && ${line} != *"Namespace"* || ${line} =~ Average:: ]]; then
+    if [[ ${line} =~ checkpoint_best_ && ${line} != *"Namespace"* || ${line} =~ ----Process ]]; then
         echo ${line} >> "${MODEL_DIR}/eval_trim_results"
     fi
 done

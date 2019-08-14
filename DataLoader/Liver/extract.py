@@ -57,11 +57,11 @@ def check_dataset(file_path):
 
 
 def process_case(args):
-    vol_case, i, dst_path = args
+    vol_case, i, dst_path, only_meta = args
     print("{:03d} {:47s}".format(i, str(vol_case)))
 
     disc3 = ndi.generate_binary_structure(3, connectivity=2)
-    disc2 = ndi.generate_binary_structure(2, connectivity=1)
+    # disc2 = ndi.generate_binary_structure(2, connectivity=1)
     dst_dir = dst_path / vol_case.stem
     pid = int(vol_case.stem.split("-")[-1])
 
@@ -83,6 +83,9 @@ def process_case(args):
     objects = [[z.start, y.start, x.start, z.stop, y.stop, x.stop] for z, y, x in slices]
     all_centers, all_stddevs = [], []
     tumor_areas = []
+    bbox_map_3dto2d = {i: {"centers": [], "stddevs": [], "areas": [], "slices": [], "z": []}
+                       for i in range(len(slices))}
+    z_rev_map = {i: {"tid": [], "rid": []} for i in range(volume.shape[0])}
     for j, sli in enumerate(slices):
         region = labels[sli] == 2
         center, stddev = array_kits.compute_robust_moments(region, indexing="ij", min_std=0.)
@@ -92,30 +95,65 @@ def process_case(args):
         all_centers.append(center.tolist())
         all_stddevs.append([round(x, 3) for x in stddev])
         tumor_areas.append(np.count_nonzero(region))
+        for k in range(region.shape[0]):
+            patch = region[k]
+            center_, stddev_ = array_kits.compute_robust_moments(patch, indexing="ij", min_std=0.)
+            center_[0] += objects[j][1]
+            center_[1] += objects[j][2]
+            bbox_map_3dto2d[j]["centers"].append(center_.tolist())
+            bbox_map_3dto2d[j]["stddevs"].append([round(x, 3) for x in stddev_])
+            bbox_map_3dto2d[j]["areas"].append(np.count_nonzero(patch))
+            x1, y1, x2, y2 = array_kits.bbox_from_mask(patch, mask_values=1).tolist()
+            bbox_map_3dto2d[j]["slices"].append([y1 + objects[j][1], x1 + objects[j][2],
+                                                 y2 + 1 + objects[j][1], x2 + 1 + objects[j][2]])
+            bbox_map_3dto2d[j]["z"].append(objects[j][0] + k)
+            z_rev_map[objects[j][0] + k]["tid"].append(j)
+            z_rev_map[objects[j][0] + k]["rid"].append(k)
 
-    # 2D Tumor Information
-    tumor_slices_indices = np.where(np.max(labels, axis=(1, 2)) == 2)[0].tolist()
-    tumor_slices = []
+    tumor_slices_indices = [j for j in z_rev_map if len(z_rev_map[j]["tid"]) > 0]
     tumor_slices_from_to = [0]
-    tumor_slices_centers, tumor_slices_stddevs = [], []
+    tumor_slices_centers = []
+    tumor_slices_stddevs = []
     tumor_slices_areas = []
+    tumor_slices = []
+    tumor_slices_tid = []
     start = 0
     for j in tumor_slices_indices:
-        slice_ = labels[j]
-        tumors_, n_obj_ = ndi.label(slice_ == 2, disc2)
-        slices_ = ndi.find_objects(tumors_)
-        objects_ = [[y.start, x.start, y.stop, x.stop] for y, x in slices_]
-        tumor_slices.extend(objects_)
-        tumor_slices_from_to.append(start + n_obj_)
-        start += n_obj_
-        for k, sli_ in enumerate(slices_):
-            region_ = slice_[sli_] == 2
-            center_, stddev_ = array_kits.compute_robust_moments(region_, indexing="ij", min_std=0.)
-            center_[0] += objects_[k][0]
-            center_[1] += objects_[k][1]
-            tumor_slices_centers.append(center_.tolist())
-            tumor_slices_stddevs.append([round(x, 3) for x in stddev_])
-            tumor_slices_areas.append(np.count_nonzero(region_))
+        length = len(z_rev_map[j]["tid"])
+        tumor_slices_from_to.append(length + start)
+        start += length
+        for k in range(len(z_rev_map[j]["tid"])):
+            tid = z_rev_map[j]["tid"][k]
+            rid = z_rev_map[j]["rid"][k]
+            tumor_slices_centers.append(bbox_map_3dto2d[tid]["centers"][rid])
+            tumor_slices_stddevs.append(bbox_map_3dto2d[tid]["stddevs"][rid])
+            tumor_slices_areas.append(bbox_map_3dto2d[tid]["areas"][rid])
+            tumor_slices.append(bbox_map_3dto2d[tid]["slices"][rid])
+            tumor_slices_tid.append(tid)
+
+    # 2D Tumor Information
+    # tumor_slices_indices = np.where(np.max(labels, axis=(1, 2)) == 2)[0].tolist()
+    # tumor_slices = []
+    # tumor_slices_from_to = [0]
+    # tumor_slices_centers, tumor_slices_stddevs = [], []
+    # tumor_slices_areas = []
+    # start = 0
+    # for j in tumor_slices_indices:
+    #     slice_ = labels[j]
+    #     tumors_, n_obj_ = ndi.label(slice_ == 2, disc2)
+    #     slices_ = ndi.find_objects(tumors_)
+    #     objects_ = [[y.start, x.start, y.stop, x.stop] for y, x in slices_]
+    #     tumor_slices.extend(objects_)
+    #     tumor_slices_from_to.append(start + n_obj_)
+    #     start += n_obj_
+    #     for k, sli_ in enumerate(slices_):
+    #         region_ = slice_[sli_] == 2
+    #         center_, stddev_ = array_kits.compute_robust_moments(region_, indexing="ij", min_std=0.)
+    #         center_[0] += objects_[k][0]
+    #         center_[1] += objects_[k][1]
+    #         tumor_slices_centers.append(center_.tolist())
+    #         tumor_slices_stddevs.append([round(x, 3) for x in stddev_])
+    #         tumor_slices_areas.append(np.count_nonzero(region_))
 
     meta_data = {"PID": pid,
                  "vol_case": str(vol_case),
@@ -132,22 +170,24 @@ def process_case(args):
                  "tumor_slices_index": tumor_slices_indices,
                  "tumor_slices_centers": tumor_slices_centers,
                  "tumor_slices_stddevs": tumor_slices_stddevs,
-                 "tumor_slices_areas": tumor_slices_areas}
+                 "tumor_slices_areas": tumor_slices_areas,
+                 "tumor_slices_tid": tumor_slices_tid}
 
-    dst_dir.mkdir(parents=True, exist_ok=True)
-    labels = labels * LB_SCALE
-    for j, (img, lab) in enumerate(zip(volume, labels)):
-        out_img_file = dst_dir / "{:03d}_im.png".format(j)
-        out_img = sitk.GetImageFromArray(img)
-        sitk.WriteImage(out_img, str(out_img_file))
-        out_lab_file = dst_dir / "{:03d}_lb.png".format(j)
-        out_lab = sitk.GetImageFromArray(lab)
-        sitk.WriteImage(out_lab, str(out_lab_file))
+    if not only_meta:
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        labels = labels * LB_SCALE
+        for j, (img, lab) in enumerate(zip(volume, labels)):
+            out_img_file = dst_dir / "{:03d}_im.png".format(j)
+            out_img = sitk.GetImageFromArray(img)
+            sitk.WriteImage(out_img, str(out_img_file))
+            out_lab_file = dst_dir / "{:03d}_lb.png".format(j)
+            out_lab = sitk.GetImageFromArray(lab)
+            sitk.WriteImage(out_lab, str(out_lab_file))
 
     return meta_data
 
 
-def nii_3d_to_png(in_path, out_path):
+def nii_3d_to_png(in_path, out_path, only_meta=False):
     """ Livers in volumes 28-47 are in anatomical Left(should be Right).
         Livers in labels  28-52 are in anatomical Left(should be Right).
 
@@ -161,7 +201,9 @@ def nii_3d_to_png(in_path, out_path):
 
     all_files = sorted(src_path.glob("volume-*.nii"), key=lambda x: int(str(x).split(".")[0].split("-")[-1]))
     p = multiprocessing.Pool(4)
-    all_meta_data = p.map(process_case, zip(all_files, range(len(all_files)), [dst_path] * len(all_files)))
+    all_meta_data = p.map(process_case,
+                          zip(all_files, range(len(all_files)), [dst_path] * len(all_files),
+                              [only_meta] * len(all_files)))
     all_meta_data = sorted(all_meta_data, key=lambda x: x["PID"])
 
     with json_file.open("w") as f:
@@ -176,9 +218,14 @@ def run_nii_3d_to_png():
         check_dataset(data_dir)
     go_on = input("Continue? [Y/n] ")
     if not go_on or go_on in ["Y", "y", "Yes", "yes"]:
+        only_meta = input("Only meta? [Y/n]")
+        if not only_meta or only_meta in ["Y", "y", "Yes", "yes"]:
+            only_meta = True
+        else:
+            only_meta = False
         # png_dir = "D:/Dataset/LiTS/png_lits"
         png_dir = Path(__file__).parent.parent.parent / "data/LiTS/png"
-        nii_3d_to_png(data_dir, png_dir)
+        nii_3d_to_png(data_dir, png_dir, only_meta=only_meta)
         # json_file = Path(png_dir) / "meta.json"
         # with json_file.open() as f:
         #     d = json.load(f)
@@ -247,7 +294,6 @@ def dump_hist_feature(in_path, out_path,
 
 
 def run_dump_hist_feature(num=-1):
-    # data_dir = "D:/Dataset/LiTS/Training_Batch"
     data_dir = Path(__file__).parent.parent.parent / "data/LiTS/Training_Batch"
     features_dir = Path(__file__).parent.parent.parent / "data/LiTS/feat/hist"
     dump_hist_feature(data_dir, features_dir, mode="train", bins=100,
@@ -265,7 +311,8 @@ def dump_glcm_feature_for_train(in_path, out_path,
                                 features="all",
                                 filter_size=20,
                                 average_num=1,
-                                number=0):
+                                norm_levels=True,
+                                number=-1):
     """
     Compute GLCM texture features for context guide
 
@@ -286,11 +333,15 @@ def dump_glcm_feature_for_train(in_path, out_path,
     average_num: int
         Collect at least 'average_num' feature vectors each for an image patch for
         getting average results
+    norm_levels: bool
+        Adjust GLCM feature scales to avoid extreme values
     number: int
         for debug
     """
+    import warnings
+
     src_path = Path(in_path)
-    dst_path = Path(out_path) / mode
+    dst_path = Path(out_path) / "train"
     dst_path.mkdir(parents=True, exist_ok=True)
     dst_file = str(dst_path / "%03d")
     with (Path(__file__).parent / "prepare/meta.json").open() as f:
@@ -301,13 +352,19 @@ def dump_glcm_feature_for_train(in_path, out_path,
     mmax = {"contrast": -np.inf,
             "dissimilarity": -np.inf,
             "homogeneity": -np.inf,
-            "asm": -np.inf,
-            "correlation": -np.inf}
+            "energy": -np.inf,
+            "entropy": -np.inf,
+            "correlation": -np.inf,
+            "cluster_shade": -np.inf,
+            "cluster_prominence": -np.inf}
     mmin = {"contrast": np.inf,
             "dissimilarity": np.inf,
             "homogeneity": np.inf,
-            "asm": np.inf,
-            "correlation": np.inf}
+            "energy": np.inf,
+            "entropy": np.inf,
+            "correlation": np.inf,
+            "cluster_shade": np.inf,
+            "cluster_prominence": np.inf}
     for i, vol_case in enumerate(sorted(src_path.glob("volume-*.nii"),
                                         key=lambda x: int(str(x).split(".")[0].split("-")[-1]))):
         if number >= 0 and number != i:
@@ -317,16 +374,19 @@ def dump_glcm_feature_for_train(in_path, out_path,
         case = meta[PID]
 
         vh, volume = nii_kits.read_lits(vol_case.stem.split("-")[-1], "vol", vol_case)
-        lab_case = vol_case.parent / vol_case.name.replace("volume", "segmentation")
-        _, labels = nii_kits.read_lits(vol_case.stem.split("-")[-1], "lab", lab_case)
-        assert volume.shape == labels.shape, "Vol{} vs Lab{}".format(volume.shape, labels.shape)
+        # lab_case = vol_case.parent / vol_case.name.replace("volume", "segmentation")
+        # _, labels = nii_kits.read_lits(vol_case.stem.split("-")[-1], "lab", lab_case)
+        # assert volume.shape == labels.shape, "Vol{} vs Lab{}".format(volume.shape, labels.shape)
+        volume = (np.clip(volume, GRAY_MIN, GRAY_MAX) - GRAY_MIN) * (255. / (GRAY_MAX - GRAY_MIN))
+        volume = volume.astype(np.uint8)
 
         if isinstance(features, str) and features != "all":
             feat_list = [features]
         elif isinstance(features, (list, tuple)):
             feat_list = features
         else:
-            feat_list = ["contrast", "dissimilarity", "homogeneity", "asm", "correlation"]
+            feat_list = ["contrast", "dissimilarity", "homogeneity", "energy", "entropy", "correlation",
+                         "cluster_shade", "cluster_prominence"]
         glcm_feature_length = len(distances) * len(angles) * len(feat_list)
         slice_glcm_features = np.zeros((volume.shape[0], glcm_feature_length),
                                        dtype=np.float32)
@@ -341,13 +401,18 @@ def dump_glcm_feature_for_train(in_path, out_path,
                         continue
                     y1, x1, y2, x2 = case["tumor_slices"][j]
                     image_patch = volume[k, y1:y2, x1:x2]
+                    image_patch = ndi.gaussian_filter(image_patch, 0.5)
                     _, ff = array_kits.glcm_features(image_patch, distances, [angle * x for x in angles],
-                                                     level, symmetric, normed, feat_list, flat=True)
+                                                     level, symmetric, normed, feat_list,
+                                                     flat=True, norm_levels=norm_levels)
                     feat_vals.append(np.array([ff[fe] for fe in feat_list]).reshape(-1))
                     for fe in feat_list:
                         mmax[fe] = max(mmax[fe], ff[fe].max())
                         mmin[fe] = min(mmin[fe], ff[fe].min())
                     counter += 1
+                if counter == 0:
+                    # All tumor areas in current slice are less than filter_size, so we omit this slice
+                    continue
                 if counter < average_num:
                     # Try to compute more glcm features for average results(more stable).
                     loop = 1
@@ -357,9 +422,13 @@ def dump_glcm_feature_for_train(in_path, out_path,
                                 continue
                             y1, x1, y2, x2 = case["tumor_slices"][j]
                             # Resize for new glcm features
-                            image_patch = ndi.zoom(volume[k, y1:y2, x1:x2], (1. + loop * .1, ) * 2, order=1)
+                            with warnings.catch_warnings():
+                                warnings.simplefilter("ignore")
+                                image_patch = ndi.zoom(volume[k, y1:y2, x1:x2], (1. + loop * .1, ) * 2, order=1)
+                            image_patch = ndi.gaussian_filter(image_patch, 0.5)
                             _, ff = array_kits.glcm_features(image_patch, distances, [angle * x for x in angles],
-                                                             level, symmetric, normed, feat_list, flat=True)
+                                                             level, symmetric, normed, feat_list,
+                                                             flat=True, norm_levels=norm_levels)
                             feat_vals.append(np.array([ff[fe] for fe in feat_list]).reshape(-1))
                             for fe in feat_list:
                                 mmax[fe] = max(mmax[fe], ff[fe].max())
@@ -371,17 +440,163 @@ def dump_glcm_feature_for_train(in_path, out_path,
                 slice_glcm_features[k] = np.mean(feat_vals, axis=0)
             # TODO(zjw): Liver glcm features, are we need?
         np.save(dst_file % PID, slice_glcm_features)
-        print(mmax)
-        print(mmin)
+    print(mmax)
+    print(mmin)
 
 
-def simulate_user_prior(simul_name, in_path):
+def dump_glcm_feature_for_eval(in_path, out_path,
+                               distances=(1, 2, 3),
+                               angles=(0, 1, 2, 3),
+                               level=256,
+                               symmetric=True,
+                               normed=True,
+                               features="all",
+                               filter_size=20,
+                               average_num=1,
+                               norm_levels=True,
+                               number=-1):
+    """
+    Compute GLCM texture features for context guide
+
+    Parameters
+    ----------
+    in_path: str
+        data directory
+    out_path: str
+        npy/npz directory
+    distances: tuple
+    angles: tuple
+    level: int
+    symmetric: bool
+    normed: bool
+    features: str or list of str
+        all for all the features or GLCM feature names
+    filter_size: int
+    average_num: int
+        Collect at least 'average_num' feature vectors each for an image patch for
+        getting average results
+    norm_levels: bool
+        Adjust GLCM feature scales to avoid extreme values
+    number: int
+        for debug
+    """
+    import warnings
+
+    src_path = Path(in_path)
+    dst_path = Path(out_path) / "eval"
+    dst_path.mkdir(parents=True, exist_ok=True)
+    dst_file = str(dst_path / "%03d")
+    with (Path(__file__).parent / "prepare/meta.json").open() as f:
+        meta = json.load(f)
+        meta = {case["PID"]: case for case in meta}
+    angle = np.pi / 4
+
+    mmax = {"contrast": -np.inf,
+            "dissimilarity": -np.inf,
+            "homogeneity": -np.inf,
+            "energy": -np.inf,
+            "entropy": -np.inf,
+            "correlation": -np.inf,
+            "cluster_shade": -np.inf,
+            "cluster_prominence": -np.inf}
+    mmin = {"contrast": np.inf,
+            "dissimilarity": np.inf,
+            "homogeneity": np.inf,
+            "energy": np.inf,
+            "entropy": np.inf,
+            "correlation": np.inf,
+            "cluster_shade": np.inf,
+            "cluster_prominence": np.inf}
+    for i, vol_case in enumerate(sorted(src_path.glob("volume-*.nii"),
+                                        key=lambda x: int(str(x).split(".")[0].split("-")[-1]))):
+        if number >= 0 and number != i:
+            continue
+        PID = int(vol_case.stem.split("-")[-1])
+        print("{:03d} {:47s}".format(i, str(vol_case)))
+        case = meta[PID]
+
+        vh, volume = nii_kits.read_lits(vol_case.stem.split("-")[-1], "vol", vol_case)
+        # lab_case = vol_case.parent / vol_case.name.replace("volume", "segmentation")
+        # _, labels = nii_kits.read_lits(vol_case.stem.split("-")[-1], "lab", lab_case)
+        # assert volume.shape == labels.shape, "Vol{} vs Lab{}".format(volume.shape, labels.shape)
+        volume = (np.clip(volume, GRAY_MIN, GRAY_MAX) - GRAY_MIN) * (255. / (GRAY_MAX - GRAY_MIN))
+        volume = volume.astype(np.uint8)
+
+        if isinstance(features, str) and features != "all":
+            feat_list = [features]
+        elif isinstance(features, (list, tuple)):
+            feat_list = features
+        else:
+            feat_list = ["contrast", "dissimilarity", "homogeneity", "energy", "entropy", "correlation",
+                         "cluster_shade", "cluster_prominence"]
+        glcm_feature_length = len(distances) * len(angles) * len(feat_list)
+        slice_glcm_features = np.zeros((volume.shape[0], glcm_feature_length), dtype=np.float32)
+        glcm_slice_counter = np.zeros((volume.shape[0],), dtype=np.int32)
+        for tid in range(len(case["tumors"])):
+            z1, y1, x1, z2, y2, x2 = case["tumors"][tid]
+            middle_sid = (z2 - z1 - 1) // 2 + z1
+            assert middle_sid in case["tumor_slices_index"]
+            ind = case["tumor_slices_index"].index(middle_sid)
+            feat_vals = []
+            for j in range(case["tumor_slices_from_to"][ind], case["tumor_slices_from_to"][ind + 1]):
+                if case["tumor_slices_tid"][j] == tid:
+                    if case["tumor_slices_areas"][j] < filter_size:
+                        break
+                    y1, x1, y2, x2 = case["tumor_slices"][j]
+                    image_patch = volume[middle_sid, y1:y2, x1:x2]
+                    image_patch = ndi.gaussian_filter(image_patch, 0.5)
+                    _, ff = array_kits.glcm_features(image_patch, distances, [angle * x for x in angles],
+                                                     level, symmetric, normed, feat_list,
+                                                     flat=True, norm_levels=norm_levels)
+                    feat_vals.append(np.array([ff[fe] for fe in feat_list]).reshape(-1))
+                    for fe in feat_list:
+                        mmax[fe] = max(mmax[fe], ff[fe].max())
+                        mmin[fe] = min(mmin[fe], ff[fe].min())
+                    # Try to compute more glcm features for average results(more stable).
+                    for loop in range(1, average_num):
+                        # Resize for new glcm features
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("ignore")
+                            image_patch = ndi.zoom(volume[middle_sid, y1:y2, x1:x2], (1. + loop * .1, ) * 2, order=1)
+                        image_patch = ndi.gaussian_filter(image_patch, 0.5)
+                        _, ff = array_kits.glcm_features(image_patch, distances, [angle * x for x in angles],
+                                                         level, symmetric, normed, feat_list,
+                                                         flat=True, norm_levels=norm_levels)
+                        feat_vals.append(np.array([ff[fe] for fe in feat_list]).reshape(-1))
+                        for fe in feat_list:
+                            mmax[fe] = max(mmax[fe], ff[fe].max())
+                            mmin[fe] = min(mmin[fe], ff[fe].min())
+                    slice_glcm_features[z1:z2] += np.tile(np.mean(feat_vals, axis=0, keepdims=True), (z2 - z1, 1))
+                    glcm_slice_counter[z1:z2] += 1
+                    break   # only use one slice per tumor
+                    # TODO(zjw): Liver glcm features, are we need?
+        glcm_slice_counter = np.clip(glcm_slice_counter, 1, np.inf)
+        slice_glcm_features /= glcm_slice_counter[:, None]
+        np.save(dst_file % PID, slice_glcm_features)
+    print(mmax)
+    print(mmin)
+
+
+def run_dump_glcm_feature_for_train(norm_levels=True):
+    data_dir = Path(__file__).parent.parent.parent / "data/LiTS/Training_Batch"
+    features_dir = Path(__file__).parent.parent.parent / "data/LiTS/feat/glcm"
+    dump_glcm_feature_for_train(data_dir, features_dir, average_num=3, norm_levels=norm_levels)
+
+
+def run_dump_glcm_feature_for_eval(norm_levels=True):
+    data_dir = Path(__file__).parent.parent.parent / "data/LiTS/Training_Batch"
+    features_dir = Path(__file__).parent.parent.parent / "data/LiTS/feat/glcm"
+    dump_glcm_feature_for_eval(data_dir, features_dir, average_num=3, norm_levels=norm_levels)
+
+
+def simulate_user_prior(simul_name):
     """
     We assume user labels the middle slice of all the tumors by an ellipse, which can
     be represented by a center and a stddev. Meanwhile tumor position in z direction
     is also provided for better performance.
     """
     prepare_dir = Path(__file__).parent / "prepare"
+    all_prior_dict = {}
 
     # Check existence
     obj_file = prepare_dir / simul_name
@@ -390,29 +605,44 @@ def simulate_user_prior(simul_name, in_path):
             dataset_dict = json.load(f)
         return dataset_dict
 
-    src_path = Path(in_path)
+    with (Path(__file__).parent / "prepare/meta.json").open() as f:
+        meta = json.load(f)
+    for case in meta:
+        case_dict = {}
+        for tid in range(len(case["tumors"])):
+            z1, y1, x1, z2, y2, x2 = case["tumors"][tid]
+            middle_sid = (z2 - z1 - 1) // 2 + z1
+            ind = case["tumor_slices_index"].index(middle_sid)
+            for j in range(case["tumor_slices_from_to"][ind], case["tumor_slices_from_to"][ind + 1]):
+                if case["tumor_slices_tid"][j] == tid:
+                    obj_dict = {"z": [z1, z2],
+                                "centers": case["tumor_slices_centers"][j],
+                                "stddevs": case["tumor_slices_stddevs"][j]}
+                    if middle_sid in case_dict:
+                        case_dict[middle_sid].append(obj_dict)
+                    else:
+                        case_dict[middle_sid] = [obj_dict]
+        all_prior_dict[case["PID"]] = case_dict
 
-    all_prior_dict = {}
-    for i, lab_case in enumerate(sorted(src_path.glob("segmentation-*.nii"),
-                                        key=lambda x: int(str(x).split(".")[0].split("-")[-1]))):
-        print("{:03d} {:47s}".format(i, str(lab_case)))
-        pid = int(lab_case.stem.split("-")[-1])
-
-        _, labels = nii_kits.read_lits(pid, "vol", lab_case)
-        all_prior_dict[str(pid)] = array_kits.get_moments_multi_objs(
-                labels, obj_value=2, partial=True, partial_slice="middle")
-        for k, v_list in all_prior_dict[str(pid)].items():
-            for j, v in enumerate(v_list):
-                all_prior_dict[str(pid)][k][j]["stddev"] = [round(x, 3) for x in v["stddev"]]
+    # src_path = Path(in_path)
+    # for i, lab_case in enumerate(sorted(src_path.glob("segmentation-*.nii"),
+    #                                     key=lambda x: int(str(x).split(".")[0].split("-")[-1]))):
+    #     print("{:03d} {:47s}".format(i, str(lab_case)))
+    #     pid = int(lab_case.stem.split("-")[-1])
+    #
+    #     _, labels = nii_kits.read_lits(pid, "vol", lab_case)
+    #     all_prior_dict[str(pid)] = array_kits.get_moments_multi_objs(
+    #             labels, obj_value=2, partial=True, partial_slice="middle")
+    #     for k, v_list in all_prior_dict[str(pid)].items():
+    #         for j, v in enumerate(v_list):
+    #             all_prior_dict[str(pid)][k][j]["stddev"] = [round(x, 3) for x in v["stddev"]]
 
     with obj_file.open("w") as f:
         json.dump(all_prior_dict, f)
 
 
 def run_simulate_user_prior():
-    # data_dir = "D:/Dataset/LiTS/Training_Batch"
-    data_dir = Path(__file__).parent.parent.parent / "data/LiTS/Training_Batch"
-    simulate_user_prior("prior.json", data_dir)
+    simulate_user_prior("prior2.json")
 
 
 if __name__ == "__main__":
@@ -420,7 +650,9 @@ if __name__ == "__main__":
                 "a: exit()\n\t"
                 "b: run_nii_3d_to_png()\n\t"
                 "c: run_dump_hist_feature()\n\t"
-                "d: run_simulate_user_prior [A/b/c/d]")
+                "d: run_simulate_user_prior()\n\t"
+                "e: run_dump_glcm_feature_for_train()\n\t"
+                "f: run_dump_glcm_feature_for_eval() [A/b/c/d/e/f]")
     cmd = cmd.lower()
 
     if cmd == "b":
@@ -429,5 +661,19 @@ if __name__ == "__main__":
         run_dump_hist_feature()
     elif cmd == "d":
         run_simulate_user_prior()
+    elif cmd == "e":
+        norm_levels = input("Do you want to scale GLCM features according to levels? [Y/n]")
+        if norm_levels in ["", "y", "Y"]:
+            print("Enable feature scale.")
+            run_dump_glcm_feature_for_train(True)
+        else:
+            run_dump_glcm_feature_for_train(False)
+    elif cmd == "f":
+        norm_levels = input("Do you want to scale GLCM features according to levels? [Y/n]")
+        if norm_levels in ["", "y", "Y"]:
+            print("Enable feature scale.")
+            run_dump_glcm_feature_for_eval(True)
+        else:
+            run_dump_glcm_feature_for_eval(False)
 
     print("Exit")
