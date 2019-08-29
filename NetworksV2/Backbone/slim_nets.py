@@ -23,6 +23,12 @@ Please control nonlinear and normalizer with slim.arg_scope outside
 
 import tensorflow as tf
 import tensorflow.contrib.slim as slim
+from tensorflow.contrib.framework.python.ops import variables
+from tensorflow.contrib.layers.python.layers import utils
+from tensorflow.contrib.layers.python.layers import layers
+from tensorflow.python.framework import ops
+from tensorflow.python.ops import init_ops
+from tensorflow.python.ops import variable_scope
 
 
 def mlp(inputs, out_channels,
@@ -138,10 +144,108 @@ def vgg16D(inputs, first_layer_channel, out_channels, conv_op, pool_op,
     return net
 
 
+def resnet(inputs, first_layer_channel, out_channels, conv_op, pool_op,
+           use_dropout=True,
+           keep_prob=0.5,
+           is_training=True,
+           use_fc=True,
+           use_final_layer=True,
+           final_weight_initializer=slim.xavier_initializer(),
+           final_biases_initializer=tf.zeros_initializer()):
+    """ Preact-resnet-18 implementation """
+    def unit(inp, kernel_size):
+        out = inp
+        out = slim.instance_norm
+
+    net = inputs
+    with tf.variable_scope("PreModule"):
+        net = conv_op(net, first_layer_channel * 1, 7, 2, scope="conv1")
+        net = pool_op(net, 3, 2, padding="same")
+    with tf.variable_scope("Module1"):
+        resi = net
+        net = slim.repeat(net, 2, conv_op, first_layer_channel * 1, 3, scope="block1")
+        net = net + resi
+        resi = net
+        net = slim.repeat(net, 2, conv_op, first_layer_channel * 1, 3, scope="block2")
+        net = net + resi
+    with tf.variable_scope("Module2"):
+        resi = net
+        net = slim.repeat(net, 2, conv_op, first_layer_channel * 2, 3, scope="block1")
+        net = net + resi
+        resi = net
+        net = slim.repeat(net, 2, conv_op, first_layer_channel * 2, 3, scope="block2")
+        net = net + resi
+
+
+
 def vgg(net_name, *args, **kwargs):
     model = eval(net_name)
     return model(*args, **kwargs)
 
 
+def channel_wise_affine(inputs,
+                        beta_initializer=init_ops.zeros_initializer(),
+                        gamma_initializer=init_ops.ones_initializer(),
+                        reuse=None,
+                        variables_collections=None,
+                        outputs_collections=None,
+                        trainable=True,
+                        scope=None):
+    """
+    Channel-wise affine transformation
+
+    Parameters
+    ----------
+    inputs
+    beta_initializer
+    gamma_initializer
+    reuse
+    variables_collections
+    outputs_collections
+    trainable
+    scope
+
+    Returns
+    -------
+
+    """
+    layer_variable_getter = layers._build_variable_getter()
+    with variable_scope.variable_scope(
+            scope,
+            'ChannelWiseAffine', [inputs],
+            reuse=reuse,
+            custom_getter=layer_variable_getter) as sc:
+        inputs = ops.convert_to_tensor(inputs)
+
+        dtype = inputs.dtype.base_dtype
+        inputs_shape = inputs.get_shape()
+        params_shape = inputs_shape[-1:]
+        if not params_shape.is_fully_defined():
+            raise ValueError("Inputs %s has undefined channels dimension %s." %
+                             (inputs.name, params_shape))
+        beta_collections = utils.get_variable_collections(variables_collections, "beta")
+        beta = variables.model_variable(
+            "beta",
+            shape=params_shape,
+            dtype=dtype,
+            initializer=beta_initializer,
+            collections=beta_collections,
+            trainable=trainable)
+        gamma_collections = utils.get_variable_collections(variables_collections, "gamma")
+        gamma = variables.model_variable(
+            "gamma",
+            shape=params_shape,
+            dtype=dtype,
+            initializer=gamma_initializer,
+            collections=gamma_collections,
+            trainable=trainable)
+
+        # Compute channel-wise affine
+        outputs = inputs * gamma + beta
+        outputs.set_shape(inputs_shape)
+        return utils.collect_named_outputs(outputs_collections, sc.name, outputs)
+
+
 # Set alias
 fc = mlp
+affine = channel_wise_affine

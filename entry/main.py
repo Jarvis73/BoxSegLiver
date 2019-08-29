@@ -30,11 +30,16 @@ from core import solver
 from core import models
 from core import estimator as estimator_lib
 from core import hooks
-from DataLoader.Liver import input_pipeline
-from evaluators import evaluator_liver
 
 ModeKeys = tfes.estimator.ModeKeys
+input_pipeline = None
+evaluator_lib = None
+
+# Some global hyper parameters that have no effect on training
 TF_RANDOM_SEED = None
+SAVE_SUMMARY_STEPS = 500
+LOG_STEP_COUNT_STEPS = 500
+KEEP_CHECKPOINT_MAX = 1
 
 
 def _get_arguments():
@@ -46,12 +51,21 @@ def _get_arguments():
     loss_metrics.add_arguments(parser)
 
     argv = sys.argv
-    if argv[1] == "liver" or argv[1] in ["-h", "--help"]:
-        input_pipeline.add_arguments(parser)
-        evaluator_liver.add_arguments(parser)
-    else:
-        raise ValueError("First argument must be choose from [liver], got {}".format(argv[1]))
+    if len(argv) == 1:
+        raise ValueError("Please choice first argument from [only_liver, liver]")
+    if argv[1] == "only_liver":
+        global evaluator_lib, input_pipeline
+        from DataLoader.Liver import input_pipeline_li as input_pipeline
+        from evaluators import evaluator_liver as evaluator_lib
+    elif argv[1] == "liver":
+        global evaluator_lib, input_pipeline
+        from DataLoader.Liver import input_pipeline
+        from evaluators import evaluator_liver as evaluator_lib
+    elif argv[1] not in ["-h", "--help"]:
+        raise ValueError("First argument must be choose from [only_liver, liver], got {}".format(argv[1]))
 
+    input_pipeline.add_arguments(parser)
+    evaluator_lib.add_arguments(parser)
     args = parser.parse_args(argv[2:])
     config.check_args(args, parser)
     config.fill_default_args(args)
@@ -102,23 +116,21 @@ def main():
         all_reduce_alg=args.all_reduce_alg,
         session_config=session_config)
 
-    save_summary_steps = 500
     if args.mode == ModeKeys.TRAIN:
-        log_step_count_steps = save_summary_steps
         run_config = tfes.estimator.RunConfig(
             train_distribute=distribution_strategy,
             tf_random_seed=TF_RANDOM_SEED,
-            save_summary_steps=save_summary_steps,
+            save_summary_steps=SAVE_SUMMARY_STEPS,
             save_checkpoints_steps=5000,
             session_config=session_config,
-            keep_checkpoint_max=2,
-            log_step_count_steps=log_step_count_steps,
+            keep_checkpoint_max=KEEP_CHECKPOINT_MAX,
+            log_step_count_steps=LOG_STEP_COUNT_STEPS,
         )
 
         params = {"args": args}
         params.update(models.get_model_params(args,
                                               build_metrics=True,
-                                              build_summaries=bool(save_summary_steps)))
+                                              build_summaries=bool(SAVE_SUMMARY_STEPS)))
         params.update(solver.get_solver_params(args,
                                                warm_up=args.lr_warm_up,
                                                slow_start_step=args.slow_start_step,
@@ -130,7 +142,7 @@ def main():
         estimator = estimator_lib.CustomEstimator(models.model_fn, args.model_dir, run_config, params,
                                                   args.warm_start_from)
         train_hooks = [hooks.LogLearningRateHook(prefix=args.summary_prefix,
-                                                 every_n_steps=log_step_count_steps,
+                                                 every_n_steps=LOG_STEP_COUNT_STEPS,
                                                  output_dir=args.model_dir,
                                                  do_logging=False)]
         if args.learning_policy == "plateau":
@@ -141,7 +153,6 @@ def main():
             train_hooks.append(lr_hook)
 
         if args.eval_per_epoch:
-            evaluator_lib = eval("evaluator_{}".format(subcommand))
             evaluator = evaluator_lib.get_evaluator(args.evaluator, estimator=estimator)
             eval_hook = hooks.EvaluatorHook(evaluator,
                                             checkpoint_dir=estimator.model_dir,
@@ -164,7 +175,6 @@ def main():
     elif args.mode in [ModeKeys.EVAL, ModeKeys.PREDICT]:
         params = {"args": args}
         params.update(models.get_model_params(args))
-        evaluator_lib = eval("evaluator_{}".format(subcommand))
         evaluator = evaluator_lib.get_evaluator(args.evaluator, model_dir=args.model_dir, params=params)
         evaluator.run(input_pipeline.input_fn,
                       checkpoint_path=args.ckpt_path,

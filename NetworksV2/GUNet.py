@@ -32,6 +32,7 @@ def _context_subnets(context,
                      context_fc_channels,
                      init_channels,
                      num_down_samples,
+                     dropout=None,
                      scope=None,
                      is_training=False,
                      context_model="fc",
@@ -43,8 +44,8 @@ def _context_subnets(context,
         if context_model == "fc":
             res = slim_nets.fc(context,
                                context_fc_channels + [n_modulator_param],
-                               use_dropout=True,
-                               keep_prob=0.5,
+                               use_dropout=True if dropout else False,
+                               keep_prob=1 - dropout,
                                is_training=is_training,
                                use_final_layer=True,
                                final_weight_initializer=tf.zeros_initializer(),
@@ -56,8 +57,8 @@ def _context_subnets(context,
                                 context_fc_channels + [n_modulator_param],
                                 slim.conv1d,
                                 tf.layers.max_pooling1d,
-                                use_dropout=True,
-                                keep_prob=0.5,
+                                use_dropout=True if dropout else False,
+                                keep_prob=1 - dropout,
                                 is_training=is_training,
                                 use_fc=True,
                                 use_final_layer=True,
@@ -116,7 +117,10 @@ def modulated_conv_block(self, net, repeat, channels, dilation=1, scope_id=0, de
                          density_modulation_params=None,
                          spatial_modulation_params=None,
                          density_modulation=False,
-                         spatial_modulation=False):
+                         spatial_modulation=False,
+                         after_affine=False,
+                         dropout=None,
+                         is_training=True):
     spatial_mod_id = 0
 
     with tf.variable_scope("down_conv{}".format(scope_id)):
@@ -131,6 +135,8 @@ def modulated_conv_block(self, net, repeat, channels, dilation=1, scope_id=0, de
                     net = slim.conv2d(net, channels, 3, rate=dilation, activation_fn=None,
                                       normalizer_fn=self._get_normalization()[0],
                                       normalizer_params=norm_params)
+                if i != repeat - 1 and dropout:
+                    net = slim.dropout(net, keep_prob=1 - dropout, is_training=is_training)
                 if density_modulation:
                     den_params = tf.slice(density_modulation_params, [0, density_mod_id], [-1, channels],
                                           name="de_params")
@@ -143,6 +149,8 @@ def modulated_conv_block(self, net, repeat, channels, dilation=1, scope_id=0, de
                                          name="sp_params")
                     net = tf.add(net, sp_params, name="guide")
                     spatial_mod_id += channels
+                if after_affine:
+                    net = slim_nets.affine(net)
                 net = tf.nn.relu(net)
         return net, density_mod_id
 
@@ -160,6 +168,8 @@ class GUNet(base.BaseNet):
         self.channel = args.im_channel
         self.use_context_guide = args.use_context
         self.use_spatial_guide = args.use_spatial
+        self.side_dropout = args.side_dropout
+        self.dropout = args.dropout
 
     def _net_arg_scope(self, *args, **kwargs):
         default_w_regu, default_b_regu = self._get_regularizer()
@@ -193,6 +203,7 @@ class GUNet(base.BaseNet):
         context_conv_init_channels = kwargs.get("context_conv_init_channels", 16)
         norm_with_center = kwargs.get("norm_with_center", False)
         norm_with_scale = kwargs.get("norm_with_scale", False)
+        after_affine = kwargs.get("after_affine", False)
         tf.logging.info("Model config: {}".format(kwargs))
 
         with tf.variable_scope(self.name):
@@ -203,6 +214,7 @@ class GUNet(base.BaseNet):
                                                   context_fc_channels,
                                                   base_channels,
                                                   num_down_samples,
+                                                  dropout=self.side_dropout,
                                                   is_training=self.is_training,
                                                   context_model=context_model,
                                                   context_conv_init_channels=context_conv_init_channels)
@@ -229,8 +241,8 @@ class GUNet(base.BaseNet):
                     return slim.current_arg_scope()
                 else:
                     encoder_norm_params = {
-                        'center': True if norm_with_center else False,
-                        'scale': True if norm_with_scale else False,
+                        'center': True if norm_with_center and not after_affine else False,
+                        'scale': True if norm_with_scale and not after_affine else False,
                     }
                     if self.args.normalizer == "batch_norm":
                         encoder_norm_params.update({
@@ -253,7 +265,10 @@ class GUNet(base.BaseNet):
                         density_modulation_params=context_params,
                         spatial_modulation_params=spatial_params[i],
                         density_modulation=self.use_context_guide and i in mod_layers,
-                        spatial_modulation=self.use_spatial_guide and i in mod_layers)
+                        spatial_modulation=self.use_spatial_guide and i in mod_layers,
+                        after_affine=after_affine,
+                        dropout=self.dropout,
+                        is_training=self.is_training)
                     nets[-1] = net
                     if i < num_down_samples:
                         net = slim.max_pool2d(nets[-1], 2, scope="pool%d" % (i + 1))
@@ -327,7 +342,7 @@ class GUNet(base.BaseNet):
                 labels = split_labels[i]
                 for met in self.args.metrics_train:
                     metric_func = eval("metrics.metric_" + met.lower())
-                    res = metric_func(logits, labels, name=obj + met, reduce=self.is_training)
+                    res = metric_func(logits, labels, name=obj + met, reduce=True)
                     # "{}/{}" format will be recognized by estimator and printed at each display step
                     self.metrics_dict["{}/{}".format(obj, met)] = res
 

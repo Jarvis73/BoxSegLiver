@@ -40,15 +40,12 @@ deprecation._PRINT_DEPRECATION_WARNINGS = False
 ModeKeys = tfes.estimator.ModeKeys
 Dataset = tf.data.Dataset
 PROJ_ROOT = Path(__file__).parent.parent.parent
-pattern = str(PROJ_ROOT / "data/LiTS/png/volume-{:d}/{:03d}_im.png")
-lb_pattern = str(PROJ_ROOT / "data/LiTS/png/volume-{:d}/{:03d}_lb.png")
-GRAY_MIN = -200
-GRAY_MAX = 250
-IM_SCALE = 64
-LB_SCALE = 64
-LIVER_PERCENT = 0.66
+pattern = str(PROJ_ROOT / "data/NF/png/volume-{:d}/{:03d}_im.png")
+lb_pattern = str(PROJ_ROOT / "data/NF/png/volume-{:d}/{:03d}_lb.png")
+GRAY_MIN = 0
+GRAY_MAX = 1000
 TUMOR_PERCENT = 0.5
-RND_SCALE = (1.0, 1.4)
+RND_SCALE = (1.0, 1.25)
 
 
 def add_arguments(parser):
@@ -81,7 +78,7 @@ def _get_datasets(test_fold=-1, filter_size=10, choices=None, exclude=None):
     # Load meta.json
     meta_file = prepare_dir / "meta.json"
     if not meta_file.exists():
-        src_meta = Path(__file__).parent.parent.parent / "data/LiTS/png/meta.json"
+        src_meta = Path(__file__).parent.parent.parent / "data/NF/png/meta.json"
         if not src_meta.exists():
             raise FileNotFoundError(str(src_meta))
         shutil.copyfile(str(src_meta), str(meta_file))
@@ -199,19 +196,17 @@ def input_fn(mode, params):
     with tf.variable_scope("InputPipeline"):
         if mode == ModeKeys.TRAIN:
             return get_dataset_for_train(dataset,
-                                         liver_percent=LIVER_PERCENT,
                                          tumor_percent=TUMOR_PERCENT,
                                          random_scale=args.zoom_scale, config=args)
         elif mode == "eval_online":
             return get_dataset_for_eval_online(dataset,
-                                               liver_percent=LIVER_PERCENT,
                                                tumor_percent=TUMOR_PERCENT,
                                                config=args)
         elif mode == ModeKeys.EVAL:
             if args.eval_in_patches:
                 return get_dataset_for_eval_patches(dataset, config=args)
             else:
-                return get_dataset_for_eval_image_v2(dataset, config=args)
+                return get_dataset_for_eval_image(dataset, config=args)
         elif mode == ModeKeys.PREDICT:
             return
 
@@ -223,14 +218,14 @@ def input_fn(mode, params):
 #####################################
 
 
-def data_processing_train(im_files, seg_file, bbox, PID_ci,  img_clip, lab_scale, config,
+def data_processing_train(im_files, seg_file, read_size, bbox, PID_ci,  img_clip, config,
                           random_noise, random_flip_left_right, random_flip_up_down):
     off_x, off_y, height, width = bbox[0], bbox[1], bbox[2], bbox[3]
 
     def parse_im(name):
         return tf.cond(tf.greater(tf.strings.length(name), 0),
                        lambda: tf.image.decode_png(tf.io.read_file(name), channels=1, dtype=tf.uint16),
-                       lambda: tf.zeros((512, 512, 1), dtype=tf.uint16))
+                       lambda: tf.zeros(read_size, dtype=tf.uint16))
 
     img = tf.map_fn(parse_im, im_files, dtype=tf.uint16)
     img = tf.image.crop_to_bounding_box(img, off_x, off_y, height, width)
@@ -242,11 +237,11 @@ def data_processing_train(im_files, seg_file, bbox, PID_ci,  img_clip, lab_scale
 
     seg = tf.cond(tf.greater(tf.strings.length(seg_file), 0),
                   lambda: tf.image.decode_png(tf.io.read_file(seg_file), dtype=tf.uint8),
-                  lambda: tf.zeros((512, 512, 1), dtype=tf.uint8))
+                  lambda: tf.zeros(read_size, dtype=tf.uint8))
     seg = tf.image.crop_to_bounding_box(seg, off_x, off_y, height, width)
     seg = tf.expand_dims(seg, axis=0)
     seg = tf.image.resize_nearest_neighbor(seg, (config.im_height, config.im_width), align_corners=True)
-    seg = tf.cast(seg / lab_scale, tf.int32)
+    seg = tf.cast(seg, tf.int32)
     seg = tf.squeeze(tf.squeeze(seg, axis=-1), axis=0)
 
     features = {"images": img, "names": PID_ci}
@@ -269,7 +264,6 @@ def data_processing_train(im_files, seg_file, bbox, PID_ci,  img_clip, lab_scale
 
 def gen_train_batch(data_list,
                     batch_size,
-                    liver_percent=0.,
                     tumor_percent=0.,
                     random_scale=(1., 1.),
                     random_window_level=False,
@@ -281,7 +275,6 @@ def gen_train_batch(data_list,
         if len(d[i]["slices"]) > 0:
             tumor_list_of_keys.append(i)
     target_size = np.asarray((config.im_height, config.im_width), dtype=np.float32)
-    force_liver = math.ceil(batch_size * liver_percent)
     force_tumor = math.ceil(batch_size * tumor_percent)
 
     while True:
@@ -289,13 +282,13 @@ def gen_train_batch(data_list,
         ci2 = np.random.choice(list_of_keys, batch_size - force_tumor, True)   # case indices
         ci = np.concatenate((ci1, ci2), axis=0)
 
-        liver_counter = 0
         tumor_counter = 0
         for j, i in enumerate(ci):
             case = d[i]
-            crop_size = (target_size * np.random.uniform(*random_scale, size=2)).astype(np.int32).tolist()
+            crop_size = list((target_size * np.random.uniform(*random_scale, size=2)).astype(np.int32))
             size = case["size"]
             pid = case["PID"]
+            patch_size = [size[1], size[2], 1]
 
             # Get selected slice
             if tumor_counter < force_tumor:
@@ -303,12 +296,7 @@ def gen_train_batch(data_list,
                 ind = np.random.choice(np.arange(len(tumor_slices)))
                 selected_slice = case["tumor_slices_index"][ind]
                 tumor_counter += 1
-                liver_counter += 1
                 obj_bb = tumor_slices[ind][random.randint(0, len(tumor_slices[ind]) - 1)]
-            elif liver_counter < force_liver:
-                selected_slice = random.randint(case["bbox"][0], case["bbox"][3] - 1)
-                liver_counter += 1
-                obj_bb = case["bbox"][1:3] + case["bbox"][4:6]
             else:
                 selected_slice = random.randint(0, size[0] - 1)
                 obj_bb = [size[1], size[2], 0, 0]   # Obj not exist
@@ -316,20 +304,10 @@ def gen_train_batch(data_list,
             # Compute crop region
             rng_yl = max(obj_bb[2] + 5 - crop_size[0], 0)
             rng_yr = min(obj_bb[0] - 5, size[1] - crop_size[0])
-            if rng_yl + 20 < rng_yr:
-                off_y = random.randint(rng_yl, rng_yr)
-            else:
-                # obj_bbox size exceeds crop_size or less than 20 pixels for random choices,
-                # we will crop part of object
-                off_y = random.randint(max(obj_bb[0] - 20, 0),
-                                       min(int(obj_bb[0] * .75 + obj_bb[2] * .25), size[1] - crop_size[0]))
             rng_xl = max(obj_bb[3] + 5 - crop_size[1], 0)
             rng_xr = min(obj_bb[1] - 5, size[2] - crop_size[1])
-            if rng_xl + 20 < rng_xr:
-                off_x = random.randint(rng_xl, rng_xr)
-            else:
-                off_x = random.randint(max(obj_bb[1] - 20, 0),
-                                       min((obj_bb[1] + obj_bb[3]) // 2, size[2] - crop_size[1]))
+            off_y = random.randint(rng_yl, rng_yr)
+            off_x = random.randint(rng_xl, rng_xr)
 
             # Get multi-channel input
             selected_slices = [pattern.format(pid, selected_slice)]
@@ -353,32 +331,33 @@ def gen_train_batch(data_list,
 
             # Random clip image value
             if random_window_level:
-                img_clip = (random.randint(10, 50) * IM_SCALE * 1., random.randint(500, 540) * IM_SCALE * 1.)
+                img_clip = (0, random.randint(800, 1000))
             else:
-                img_clip = (50 * IM_SCALE * 1., 500 * IM_SCALE * 1.)
+                img_clip = (0, 900)
 
-            yield selected_slices, lb_pattern.format(pid, selected_slice), \
+            yield selected_slices, lb_pattern.format(pid, selected_slice), patch_size, \
                 [off_y, off_x] + crop_size, pid, img_clip
 
 
-def get_dataset_for_train(data_list, liver_percent=0., tumor_percent=0., random_scale=(1., 1.), config=None):
+def get_dataset_for_train(data_list, tumor_percent=0., random_scale=(1., 1.), config=None):
     batch_size = distribution_utils.per_device_batch_size(config.batch_size, config.num_gpus)
     if random_scale[1] > random_scale[0]:
         logging.info("Train: Add random zoom, scale = ({}, {})".format(*random_scale))
 
     def train_gen():
-        return gen_train_batch(data_list, batch_size, liver_percent, tumor_percent,
+        return gen_train_batch(data_list, batch_size, tumor_percent,
                                random_scale, random_window_level=True, config=config)
 
-    dataset = (tf.data.Dataset.from_generator(train_gen, (tf.string, tf.string, tf.int32, tf.int32, tf.float32),
+    dataset = (tf.data.Dataset.from_generator(train_gen,
+                                              (tf.string, tf.string, tf.int32, tf.int32, tf.int32, tf.float32),
                                               output_shapes=(tf.TensorShape([config.im_channel]),
                                                              tf.TensorShape([]),
+                                                             tf.TensorShape([4]),
                                                              tf.TensorShape([4]),
                                                              tf.TensorShape([]),
                                                              tf.TensorShape([2])))
                .apply(tf.data.experimental.map_and_batch(
                         lambda *args_: data_processing_train(*args_,
-                                                             lab_scale=LB_SCALE,
                                                              config=config,
                                                              random_noise=True,
                                                              random_flip_left_right=config.random_flip & 1 > 0,
@@ -389,24 +368,24 @@ def get_dataset_for_train(data_list, liver_percent=0., tumor_percent=0., random_
     return dataset
 
 
-def get_dataset_for_eval_online(data_list, liver_percent=0., tumor_percent=0., config=None):
+def get_dataset_for_eval_online(data_list, tumor_percent=0., config=None):
     batch_size = distribution_utils.per_device_batch_size(config.batch_size, config.num_gpus)
 
     def val_gen():
-        infinity_generator = gen_train_batch(data_list, batch_size, liver_percent, tumor_percent,
+        infinity_generator = gen_train_batch(data_list, batch_size, tumor_percent,
                                              random_scale=(1., 1.), config=config)
         for _ in tqdm.tqdm(range(config.eval_num_batches_per_epoch * config.batch_size)):
             yield next(infinity_generator)
 
-    dataset = (tf.data.Dataset.from_generator(val_gen, (tf.string, tf.string, tf.int32, tf.int32, tf.float32),
+    dataset = (tf.data.Dataset.from_generator(val_gen, (tf.string, tf.string, tf.int32, tf.int32, tf.int32, tf.float32),
                                               output_shapes=(tf.TensorShape([config.im_channel]),
                                                              tf.TensorShape([]),
+                                                             tf.TensorShape([4]),
                                                              tf.TensorShape([4]),
                                                              tf.TensorShape([]),
                                                              tf.TensorShape([2])))
                .apply(tf.data.experimental.map_and_batch(
                         lambda *args_: data_processing_train(*args_,
-                                                             lab_scale=LB_SCALE,
                                                              config=config,
                                                              random_noise=False,
                                                              random_flip_left_right=False,
@@ -424,158 +403,26 @@ def data_processing_eval(img, x1, y1, x2, y2, dsize, im_scale):
     return img / im_scale
 
 
-def parse_case(case, align, padding, padding_z, min_shape=None):
+def parse_case(case):
     pid = case["PID"]
     d, h, w = case["size"]
-    z1 = max(case["bbox"][0] - padding_z, 0)
-    z2 = min(case["bbox"][3] + padding_z, d)
-    y1 = max(case["bbox"][1] - padding, 0)
-    x1 = max(case["bbox"][2] - padding, 0)
-    y2 = min(case["bbox"][4] + padding, h)
-    x2 = min(case["bbox"][5] + padding, w)
-    if min_shape:
-        if min_shape[0] > h or min_shape[1] > w:
-            raise ValueError("Cannot satisfied conditions!")
-        if y2 - y1 < min_shape[0]:
-            extra_pad_left = (min_shape[0] - (y2 - y1)) // 2
-            y1 = min(max(y1 - extra_pad_left, 0), h - min_shape[0])
-            y2 = y1 + min_shape[0]
-        if x2 - x1 < min_shape[1]:
-            extra_pad_left = (min_shape[1] - (x2 - x1)) // 2
-            x1 = min(max(x1 - extra_pad_left, 0), w - min_shape[1])
-            x2 = x1 + min_shape[1]
-    cy = (y1 + y2 - 1) / 2
-    cx = (x1 + x2 - 1) / 2
-    sz_y = int(math.ceil((y2 - y1) / align)) * align
-    sz_x = int(math.ceil((x2 - x1) / align)) * align
-    y1 = max(int(cy - (sz_y - 1) / 2), 0)
-    x1 = max(int(cx - (sz_x - 1) / 2), 0)
-    y2 = min(y1 + sz_y, h)
-    x2 = min(x1 + sz_x, w)
-    if (y2 - y1) % align != 0 or (x2 - x1) % align != 0:
-        y1 = y2 - sz_y
-        x1 = x2 - sz_x
-        if y1 < 0 or x1 < 0:
-            print("\nWarning: bbox aligns with {} failed! point1 ({}, {}) point2 ({}, {})\n"
-                  .format(align, x1, y1, x2, y2))
 
-    return pid, d, h, w, z1, y1, x1, z2, y2, x2
+    return pid, d, h, w
 
 
-def get_dataset_for_eval_image(data_list, config=None):
-    # TODO(zjw): should load data from nii volumes
-    align = 16      # Necessary if not resize for batching
-    padding = 25
-    padding_z = 0
-
-    batch_size = config.batch_size
-    c = config.im_channel
-    psize = config.im_height, config.im_width
-    no_resize = False
-    if config.im_height <= 0 or config.im_width <= 0:
-        logging.info("Disable image resize for evaluating")
-        no_resize = True
-
-    for ci, case in enumerate(data_list[config.eval_skip_num:]):
-        pid, d, h, w, z1, y1, x1, z2, y2, x2 = parse_case(case, align, padding, padding_z)
-        if no_resize:
-            psize = (y2 - y1, x2 - x1)
-
-        eval_batch = {"images": np.empty((batch_size, *psize, c), dtype=np.float32),
-                      "names": pid,
-                      "pads": (batch_size - ((z2 - z1) % batch_size)) % batch_size,
-                      "bboxes": [x1, y1, z1, x2 - 1, y2 - 1, z2 - 1],
-                      "mirror": 0,
-                      "reshape_ori": not no_resize}
-
-        num_of_batches = (z2 - z1 + eval_batch["pads"]) // batch_size
-        for batch in range(num_of_batches):
-            lab_batch = np.empty((batch_size, h, w), dtype=np.uint8)
-            start_id = z1 + batch * batch_size
-            buffer = []
-
-            left_half_channel = (c - 1) // 2
-            for j in range(1, left_half_channel + 1):
-                if 0 <= start_id - j < d:
-                    buffer.append(cv2.imread(pattern.format(pid, start_id - j), cv2.IMREAD_UNCHANGED))
-                else:
-                    buffer.append(np.zeros((512, 512), dtype=np.uint16))
-            for j in range(batch_size):
-                cur_id = min(j + start_id, d - 1)
-                buffer.append(cv2.imread(pattern.format(pid, cur_id), cv2.IMREAD_UNCHANGED))
-                lab_batch[j] = cv2.imread(lb_pattern.format(pid, cur_id), cv2.IMREAD_UNCHANGED)
-            right_half_channel = c - 1 - left_half_channel
-            for j in range(right_half_channel):
-                if 0 <= start_id + batch_size + j < d:
-                    buffer.append(cv2.imread(pattern.format(pid, start_id + batch_size + j), cv2.IMREAD_UNCHANGED))
-                else:
-                    buffer.append(np.zeros((512, 512), dtype=np.uint16))
-
-            buffer = list(map(lambda x: data_processing_eval(x, x1, y1, x2, y2, psize, IM_SCALE), buffer))
-            lab_batch = lab_batch[:, y1:y2, x1:x2] // LB_SCALE
-            for j in range(batch_size):
-                for k in range(c):
-                    eval_batch["images"][j, :, :, k] = buffer[j + k]
-
-            yield copy.copy(eval_batch), lab_batch
-            if config.eval_mirror:
-                if config.random_flip & 1 > 0:
-                    tmp = copy.copy(eval_batch)
-                    tmp["images"] = np.flip(tmp["images"], axis=2)
-                    tmp["mirror"] = 1
-                    yield tmp, None
-                if config.random_flip & 2 > 0:
-                    tmp = copy.copy(eval_batch)
-                    tmp["images"] = np.flip(tmp["images"], axis=1)
-                    tmp["mirror"] = 2
-                    yield tmp, None
-                if config.random_flip & 3 > 0:
-                    tmp = copy.copy(eval_batch)
-                    tmp["images"] = np.flip(np.flip(tmp["images"], axis=2), axis=1)
-                    tmp["mirror"] = 3
-                    yield tmp, None
-
-
-def parse_case_eval(case, align, padding, padding_z, im_channel, parse_label=True):
+def parse_case_eval(case, im_channel, parse_label=True):
     """ Return cropped normalized volume (y, x, z) with type float32 and
                cropped segmentation (z, y, x) with type uint8 """
     d, h, w = case["size"]
-    z1 = max(case["bbox"][0] - padding_z, 0)
-    z2 = min(case["bbox"][3] + padding_z, d)
-    y1 = max(case["bbox"][1] - padding, 0)
-    x1 = max(case["bbox"][2] - padding, 0)
-    y2 = min(case["bbox"][4] + padding, h)
-    x2 = min(case["bbox"][5] + padding, w)
-    cy = (y1 + y2 - 1) / 2
-    cx = (x1 + x2 - 1) / 2
-    sz_y = int(math.ceil((y2 - y1) / align)) * align
-    sz_x = int(math.ceil((x2 - x1) / align)) * align
-    y1 = max(int(cy - (sz_y - 1) / 2), 0)
-    x1 = max(int(cx - (sz_x - 1) / 2), 0)
-    y2 = min(y1 + sz_y, h)
-    x2 = min(x1 + sz_x, w)
-    if (y2 - y1) % align != 0 or (x2 - x1) % align != 0:
-        y1 = y2 - sz_y
-        x1 = x2 - sz_x
-        if y1 < 0 or x1 < 0:
-            print("\nWarning: bbox aligns with {} failed! point1 ({}, {}) point2 ({}, {})\n"
-                  .format(align, x1, y1, x2, y2))
 
     obj_num = int(case["vol_case"][:-4].split("-")[-1])
     _, volume = nii_kits.read_lits(obj_num, "vol", PROJ_ROOT / case["vol_case"])
     left_half_channel = (im_channel - 1) // 2
     right_half_channel = im_channel - 1 - left_half_channel
-    left_pad = left_half_channel - z1 if z1 < left_half_channel else 0
-    right_pad = z2 + right_half_channel - d if z2 + right_half_channel > d else 0
-    crop_z1 = max(0, z1 - left_half_channel)
-    crop_z2 = min(d, z2 + right_half_channel)
-    volume = volume[crop_z1:crop_z2, y1:y2, x1:x2]
-    cd, ch, cw = volume.shape  # cd: cropped depth
-    if left_pad > 0 or right_pad > 0:
-        volume = np.concatenate((np.zeros((left_pad, ch, cw), dtype=volume.dtype),
-                                 volume,
-                                 np.zeros((right_pad, ch, cw), dtype=volume.dtype)), axis=0)
-        cd, ch, cw = volume.shape
+    volume = np.concatenate((np.zeros((left_half_channel, h, w), dtype=volume.dtype),
+                             volume,
+                             np.zeros((right_half_channel, h, w), dtype=volume.dtype)), axis=0)
+    cd, ch, cw = volume.shape
     volume = (np.clip(volume, GRAY_MIN, GRAY_MAX) - GRAY_MIN) / (GRAY_MAX - GRAY_MIN)
     volume = volume.transpose((1, 2, 0)).astype(np.float32)  # (y, x, z) for convenient
 
@@ -583,21 +430,16 @@ def parse_case_eval(case, align, padding, padding_z, im_channel, parse_label=Tru
     lab_case = None
     if parse_label:
         _, segmentation = nii_kits.read_lits(obj_num, "lab", PROJ_ROOT / case["lab_case"])
-        segmentation = segmentation.astype(np.uint8)[z1:z2, y1:y2, x1:x2]
+        segmentation = segmentation.astype(np.uint8)
         lab_case = case["lab_case"]
 
-    bbox = [x1, y1, z1, x2 - 1, y2 - 1, z2 - 1]
     oshape = [d, h, w]
     cshape = [cd, ch, cw]
-    return case["PID"], case["vol_case"], lab_case, bbox, oshape, cshape, \
+    return case["PID"], case["vol_case"], lab_case, oshape, cshape, \
         left_half_channel, right_half_channel, volume, segmentation
 
 
-def get_dataset_for_eval_image_v2(data_list, config=None):
-    align = 16      # Necessary if not resize for batching
-    padding = 25
-    padding_z = 0
-
+def get_dataset_for_eval_image(data_list, config=None):
     batch_size = config.batch_size
     c = config.im_channel
     pshape = config.im_height, config.im_width
@@ -607,8 +449,8 @@ def get_dataset_for_eval_image_v2(data_list, config=None):
         resize = False
 
     for ci, case in enumerate(data_list[config.eval_skip_num:]):
-        pid, vol_path, _, bbox, oshape, cshape, lhc, rhc, volume, segmentation = \
-            parse_case_eval(case, align, padding, padding_z, c, parse_label=config.mode != ModeKeys.PREDICT)
+        pid, vol_path, _, oshape, cshape, lhc, rhc, volume, segmentation = \
+            parse_case_eval(case, c, parse_label=config.mode != ModeKeys.PREDICT)
         if not resize:
             pshape = cshape[1:]
 
@@ -616,7 +458,7 @@ def get_dataset_for_eval_image_v2(data_list, config=None):
                       "names": pid,
                       "mirror": 0}
 
-        pads = (batch_size - ((bbox[5] - bbox[2] + 1) % batch_size)) % batch_size
+        pads = (batch_size - (cshape[0] % batch_size)) % batch_size
         if pads > 0:
             volume = np.concatenate((volume, np.zeros((*cshape[1:], pads), volume.dtype)), axis=-1)
         if resize:
@@ -647,7 +489,7 @@ def get_dataset_for_eval_image_v2(data_list, config=None):
                     tmp["images"] = np.flip(np.flip(tmp["images"], axis=2), axis=1)
                     tmp["mirror"] = 3
                     yield tmp, None
-        yield None, (segmentation, vol_path, pads, bbox, resize)
+        yield None, (segmentation, vol_path, pads, resize)
 
 
 def get_dataset_for_eval_patches(data_list, step=2, config=None):
@@ -659,53 +501,29 @@ def get_dataset_for_eval_patches(data_list, step=2, config=None):
         how large is the step size for sliding window? 2 := patch_size // 2 for each axis
     config
     """
-    align = 16
-    padding = 25
-    padding_z = 0
-
     batch_size = config.batch_size
     c = config.im_channel
     psize = config.im_height, config.im_width
 
     for ci, case in enumerate(data_list[config.eval_skip_num:]):
-        pid, d, h, w, z1, y1, x1, z2, y2, x2 = parse_case(case, align, padding, padding_z,
-                                                          min_shape=psize)
+        pid, vol_path, _, oshape, cshape, lhc, rhc, volume, segmentation = \
+            parse_case_eval(case, c, parse_label=config.mode != ModeKeys.PREDICT)
 
         eval_batch = {"images": np.empty((batch_size, *psize, c),
                                          dtype=np.float32),
                       "name": pid,
                       "pad": 0,
-                      "bbox": [x1, y1, z1, x2 - 1, y2 - 1, z2 - 1],
                       "position": [None for _ in range(batch_size)]}
 
-        _, volume = nii_kits.read_nii(
-            Path(__file__).parent.parent.parent / case["vol_case"],
-            special=True if 28 <= int(case["vol_case"][:-4].split("-")[-1]) < 48 else False)
-        left_half_channel = (c - 1) // 2
-        right_half_channel = c - 1 - left_half_channel
-        left_pad = left_half_channel - z1 if z1 < left_half_channel else 0
-        right_pad = z2 + right_half_channel - d if z2 + right_half_channel > d else 0
-        crop_z1 = max(0, z1 - left_half_channel)
-        crop_z2 = min(d, z2 + right_half_channel)
-        volume = volume[crop_z1:crop_z2, y1:y2, x1:x2]
-        cd, ch, cw = volume.shape   # cd: cropped depth
-        if left_pad > 0 or right_pad > 0:
-            volume = np.concatenate((np.zeros((left_pad, ch, cw), dtype=volume.dtype),
-                                     volume,
-                                     np.zeros((right_pad, ch, cw), dtype=volume.dtype)), axis=0)
-            cd, ch, cw = volume.shape
-        volume = (np.clip(volume, GRAY_MIN, GRAY_MAX) - GRAY_MIN) / (GRAY_MAX - GRAY_MIN)
-        volume = volume.transpose((1, 2, 0)).astype(np.float32)     # (y, x, z)
-
         center_start = np.array([psize[0] // 2, psize[1] // 2]).astype(np.int32)
-        center_end = np.array([ch - psize[0] // 2, cw - psize[1] // 2]).astype(np.int32)
+        center_end = np.array([cshape[1] - psize[0] // 2, cshape[2] - psize[1] // 2]).astype(np.int32)
         num_steps = np.ceil([(center_end[i] - center_start[i]) / (psize[i] / step) for i in range(2)])
         step_size = np.array([(center_end[i] - center_start[i]) / (num_steps[i] + 1e-8) for i in range(2)])
         step_size[step_size == 0] = 9999999
         ysteps = np.round(np.arange(center_start[0], center_end[0] + 1e-8, step_size[0])).astype(np.int32)
         xsteps = np.round(np.arange(center_start[1], center_end[1] + 1e-8, step_size[1])).astype(np.int32)
 
-        all_patches = list(itertools.product(xsteps, ysteps, range(left_half_channel, cd - right_half_channel)))
+        all_patches = list(itertools.product(xsteps, ysteps, range(lhc, cshape[0] - rhc)))
         num_of_batches = (len(all_patches) + (batch_size - 1)) // batch_size
 
         for batch in range(num_of_batches - 1):
@@ -715,10 +533,10 @@ def get_dataset_for_eval_patches(data_list, step=2, config=None):
                 ub_x = x + psize[0] // 2
                 lb_y = y - psize[1] // 2
                 ub_y = y + psize[1] // 2
-                lb_c = z - left_half_channel
-                ub_c = z + right_half_channel + 1
+                lb_c = z - lhc
+                ub_c = z + rhc + 1
                 eval_batch["images"][i] = volume[lb_y:ub_y, lb_x:ub_x, lb_c:ub_c]
-                eval_batch["position"][i] = (z - left_half_channel, lb_y, ub_y, lb_x, ub_x)
+                eval_batch["position"][i] = (z - lhc, lb_y, ub_y, lb_x, ub_x)
             yield copy.copy(eval_batch), None
 
         # Final batch
@@ -728,29 +546,16 @@ def get_dataset_for_eval_patches(data_list, step=2, config=None):
             ub_x = x + psize[0] // 2
             lb_y = y - psize[1] // 2
             ub_y = y + psize[1] // 2
-            lb_c = z - left_half_channel
-            ub_c = z + right_half_channel + 1
+            lb_c = z - lhc
+            ub_c = z + rhc + 1
             eval_batch["images"][i] = volume[lb_y:ub_y, lb_x:ub_x, lb_c:ub_c]
-            eval_batch["position"][i] = (z - left_half_channel, lb_y, ub_y, lb_x, ub_x)
+            eval_batch["position"][i] = (z - lhc, lb_y, ub_y, lb_x, ub_x)
         rem = len(all_patches) % batch_size
         if rem > 0:
             eval_batch["images"][rem:] = 0
         eval_batch["pad"] = (batch_size - rem) % batch_size
 
-        _, labels = nii_kits.read_nii(
-            Path(__file__).parent.parent.parent / case["lab_case"],
-            special=True if 28 <= int(case["lab_case"][:-4].split("-")[-1]) < 52 else False)
-        yield copy.copy(eval_batch), labels
-
-
-def gen_dataset_jsons():
-    # exclude = [32, 34, 38, 41, 47, 87, 89, 91, 105, 106, 114, 115, 119]
-    exclude = []
-    _get_datasets(test_fold=0, filter_size=20, exclude=exclude)
-    _get_datasets(test_fold=1, filter_size=20, exclude=exclude)
-    _get_datasets(test_fold=2, filter_size=20, exclude=exclude)
-    _get_datasets(test_fold=3, filter_size=20, exclude=exclude)
-    _get_datasets(test_fold=4, filter_size=20, exclude=exclude)
+        yield copy.copy(eval_batch), segmentation
 
 
 if __name__ == "__main__":

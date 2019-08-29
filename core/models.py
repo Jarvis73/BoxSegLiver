@@ -75,6 +75,7 @@ def add_arguments(parser):
                        required=False, help="Conv without batch normalization")
     group.add_argument("--batches_per_epoch", type=int, default=2000, help="Number of batches per epoch")
     group.add_argument("--eval_per_epoch", action="store_true")
+    group.add_argument("--dropout", type=float, help="Dropout for backbone networks")
 
 
 def get_model_params(args, build_metrics=False, build_summaries=False):

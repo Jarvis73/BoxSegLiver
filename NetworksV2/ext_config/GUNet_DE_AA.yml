@@ -1,0 +1,9 @@
+init_channels: 64
+num_down_samples: 4
+mod_layers: [1, 2, 3, 4]
+context_fc_channels: [200, 200]
+context_model: "fc"
+context_conv_init_channels: 2
+ret_prob: false
+ret_pred: true
+after_affine: true

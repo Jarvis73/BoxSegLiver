@@ -72,7 +72,10 @@ class BaseNet(object):
     def mode(self, new_mode):
         if new_mode in [ModeKeys.TRAIN, ModeKeys.EVAL, ModeKeys.PREDICT]:
             self._mode = new_mode
-            self._is_training = self.mode == ModeKeys.TRAIN
+            # self._is_training = self.mode == ModeKeys.TRAIN
+
+            self._is_training = tf.placeholder_with_default(False, shape=(), name="is_training")
+            self._feed_dict[self._is_training] = self.mode == ModeKeys.TRAIN
             tf.logging.info("Create graph in {} mode".format(new_mode))
 
     @property

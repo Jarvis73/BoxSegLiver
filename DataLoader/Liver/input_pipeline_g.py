@@ -55,6 +55,18 @@ RND_SEED = None     # For debug
 # random.seed(1234)
 # np.random.seed(1234)
 
+# Pre-computed glcm noise scale
+glcm_noise_scale = np.array([0.0004, 0.0008, 0.0005, 0.0008, 0.001 , 0.0008, 0.0012, 0.0008, 0.0013, 0.0014,
+                             0.0015, 0.0014, 0.0013, 0.0016, 0.0013, 0.0017, 0.0019, 0.0016, 0.0021, 0.0017,
+                             0.0021, 0.0021, 0.0023, 0.0022, 0.0045, 0.0034, 0.0041, 0.0034, 0.003 , 0.0034,
+                             0.0028, 0.0034, 0.0025, 0.0025, 0.0025, 0.0025, 0.0019, 0.002 , 0.0019, 0.0021,
+                             0.0021, 0.002 , 0.0021, 0.0021, 0.0023, 0.0025, 0.0023, 0.0025, 0.0043, 0.0046,
+                             0.0043, 0.0046, 0.0048, 0.0046, 0.0048, 0.0046, 0.0051, 0.0053, 0.0051, 0.0052,
+                             0.0038, 0.0067, 0.0045, 0.0069, 0.0087, 0.0067, 0.0093, 0.0069, 0.01  , 0.0108,
+                             0.0106, 0.011 , 0.0262, 0.0248, 0.0262, 0.025 , 0.024 , 0.0248, 0.0243, 0.025,
+                             0.0217, 0.0207, 0.022 , 0.022 , 0.1137, 0.1054, 0.1165, 0.1095, 0.1004, 0.1054,
+                             0.1026, 0.1095, 0.094 , 0.0908, 0.0934, 0.0929], np.float32)
+
 
 def add_arguments(parser):
     group = parser.add_argument_group(title="Input Pipeline Arguments")
@@ -73,6 +85,7 @@ def add_arguments(parser):
     group.add_argument("--eval_mirror", action="store_true")
 
     group = parser.add_argument_group(title="G-Net Arguments")
+    group.add_argument("--side_dropout", type=float, default=0.5, help="Dropout used in G-Net sub-networks")
     group.add_argument("--use_context", action="store_true")
     group.add_argument("--context_list", type=str, nargs="+",
                        help="Paired context information: (feature name, feature length). "
@@ -85,12 +98,13 @@ def add_arguments(parser):
                        help="A coefficient multiplied to histogram values")
     group.add_argument("--glcm", action="store_true",
                        help="Use glcm texture features")
-    group.add_argument("--glcm_features", type=str, nargs="+",
-                       choices=["contrast", "dissimilarity", "homogeneity", "ASM", "energy", "correlation"],
-                       default=["contrast", "dissimilarity", "homogeneity", "energy", "correlation"],
-                       help="Supported GLCM texture features")
-    group.add_argument("--glcm_distance", type=int, nargs="+", default=[1, 2, 3])
-    group.add_argument("--glcm_angle", type=float, nargs="+", default=[0., np.pi * 0.25, np.pi * 0.5, np.pi * 0.75])
+    # group.add_argument("--glcm_features", type=str, nargs="+",
+    #                    choices=["contrast", "dissimilarity", "homogeneity", "ASM", "energy", "correlation"],
+    #                    default=["contrast", "dissimilarity", "homogeneity", "energy", "correlation"],
+    #                    help="Supported GLCM texture features")
+    # group.add_argument("--glcm_distance", type=int, nargs="+", default=[1, 2, 3])
+    # group.add_argument("--glcm_angle", type=float, nargs="+", default=[0., np.pi * 0.25, np.pi * 0.5, np.pi * 0.75])
+    group.add_argument("--glcm_noise", action="store_true")
 
     group.add_argument("--use_spatial", action="store_true")
     group.add_argument("--spatial_random", type=float, default=1.,
@@ -488,6 +502,14 @@ def gen_train_batch(data_list,
                             feat += np.random.normal(
                                 loc=0., scale=1., size=feat.shape) * kwargs.get("hist_noise_scale", 0.005)
                         features.append(feat)
+                    elif cls == "glcm":
+                        feat = context[pid]["glcm"][selected_slice]
+                        if "glcm_noise" in kwargs:
+                            # We use 1% value scale(between 2.5% percentile and 97.5% percentile)
+                            # of each feature as random scale
+                            feat += np.random.normal(
+                                loc=0., scale=1., size=feat.shape) * glcm_noise_scale
+                        features.append(feat)
                     else:
                         features.append(context[pid][cls][selected_slice])
                 yield_list[-1]["context"] = np.concatenate(features, axis=0)
@@ -597,7 +619,10 @@ def gen_eval_3d_online_batch(data_list,
 
                 features = []   # Collect features of selected slice
                 for cls, _ in context_list:
-                    features.append(context[pid][cls][selected_slice])
+                    if 0 <= selected_slice < size[0]:
+                        features.append(context[pid][cls][selected_slice])
+                    else:
+                        features.append(np.zeros_like(context[pid][cls][0], dtype=context[pid][cls].dtype))
                 yield_list[-1]["context"] = np.concatenate(features, axis=0)
 
             # spatial guide

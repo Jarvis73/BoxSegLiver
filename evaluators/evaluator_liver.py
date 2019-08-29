@@ -105,7 +105,10 @@ class EvaluateVolume(EvaluateBase):
         with meta_file.open() as f:
             meta = json.load(f)
         self.meta = {x["PID"]: x for x in meta}
-        self.eval_in_patches = self.config.eval_in_patches
+        if hasattr(self.config, "eval_in_patches"):
+            self.eval_in_patches = self.config.eval_in_patches
+        else:
+            self.eval_in_patches = False
         self.do_mirror = self.config.eval_mirror
         if self.do_mirror:
             if self.config.random_flip in [1, 2]:
@@ -256,13 +259,12 @@ class EvaluateVolume(EvaluateBase):
                     # labels = self._postprocess(volume_collection["labels"], is_label=True,
                     #                            ori_shape=[y2 - y1, x2 - x1])
                     for i, cls in enumerate(self.classes):
-                        conf = metric_ops.ConfusionMatrix(np.squeeze(volume[cls + "Pred"], axis=-1).astype(int),
-                                                          (labels == i + 1).astype(int))
+                        conf = metric_ops.ConfusionMatrix(volume[cls].astype(int), (labels == i + 1).astype(int))
                         conf.compute()
                         accumulator[cls + "_fn"] += conf.fn
                         accumulator[cls + "_fp"] += conf.fp
                         accumulator[cls + "_tp"] += conf.tp
-                    volume_collection.clear()
+                    volume_collection = defaultdict(list)
                     for cls in self.classes:
                         volume_collection[cls].append(np.squeeze(x[cls + "Pred"], axis=-1))
                     volume_collection["labels"].append(x["labels"])
@@ -654,7 +656,7 @@ class EvaluateVolume(EvaluateBase):
                     logits3d[-1] += np.flip(np.flip(predict["Prob"], axis=2), axis=1) / self.mirror_div
             else:
                 assert isinstance(labels, tuple), type(labels)
-                segmentation, seg_path, pads, bbox, reshape_ori = labels
+                segmentation, vol_path, pads, bbox, reshape_ori = labels
                 volume = np.concatenate(logits3d)   # [d, h, w, c]
                 if pads > 0:
                     volume = volume[:-pads]
@@ -663,12 +665,12 @@ class EvaluateVolume(EvaluateBase):
                 if resize and reshape_ori:
                     ori_shape = (volume.shape[0],) + arr_ops.bbox_to_shape(bbox)[1:]
                     if volume.ndim == 4:
-                        ori_shape += (volume.shape[-1],)
+                        ori_shape = ori_shape + (volume.shape[-1],)
                     scales = np.array(ori_shape) / np.array(volume.shape)
                     if np.any(scales != 1):
                         volume = ndi.zoom(volume, scales, order=0 if dtype == "pred" else 1)
                 yield (cur_case, segmentation) + self.maybe_save_case(
-                    cur_case, seg_path, volume, bbox, dtype, save_path)
+                    cur_case, vol_path, volume, bbox, dtype, save_path)
 
                 logits3d.clear()
                 cur_case = None
@@ -708,9 +710,11 @@ class EvaluateVolume(EvaluateBase):
         model_args = self.params.get("model_args", ())
         model_kwargs = self.params.get("model_kwargs", {})
 
+        use_context = hasattr(self.config, "use_context") and self.config.use_context
+        use_spatial = hasattr(self.config, "use_spatial") and self.config.use_spatial
         # Parse context_list
         feat_length = 0
-        if self.config.use_context and self.config.context_list is not None:
+        if use_context and self.config.context_list is not None:
             if len(self.config.context_list) % 2 != 0:
                 raise ValueError("context_list is not paired!")
             for i in range(len(self.config.context_list) // 2):
@@ -725,16 +729,16 @@ class EvaluateVolume(EvaluateBase):
                 images = tf.placeholder(tf.float32, shape=(bs, h, w, c))
 
                 context, sp_guide = None, None
-                if self.config.use_context:
+                if use_context:
                     context = tf.placeholder(tf.float32, shape=(bs, feat_length))
-                if self.config.use_spatial:
+                if use_spatial:
                     sp_guide = tf.placeholder(tf.float32, shape=(bs, h, w, 1))
 
                 model_inputs = {"images": images, "context": context, "sp_guide": sp_guide}
                 model = self.params["model"](self.config)
                 self.params["model_instances"] = [model]
                 # build model
-                model(model_inputs, ModeKeys.EVAL, *model_args, **model_kwargs)
+                model(model_inputs, self.config.mode, *model_args, **model_kwargs)
                 saver = tf.train.Saver()
                 sess = tf.Session()
                 # load weights
@@ -742,12 +746,12 @@ class EvaluateVolume(EvaluateBase):
                 saver.restore(sess, checkpoint_path)
 
                 predictions = {"Prob": model.probability}
-                for features, labels in input_fn(ModeKeys.EVAL, self.params):
+                for features, labels in input_fn(self.config.mode, self.params):
                     if features:
                         feed_dict = {images: features.pop("images")}
-                        if self.config.use_context and "context" in features:
+                        if use_context and "context" in features:
                             feed_dict[context] = features.pop("context")
-                        if self.config.use_spatial and "sp_guide" in features:
+                        if use_spatial and "sp_guide" in features:
                             feed_dict[sp_guide] = features.pop("sp_guide")
                         preds_eval = sess.run(predictions, feed_dict)
                         preds_eval.update(features)
@@ -916,45 +920,85 @@ class EvaluateVolume(EvaluateBase):
         else:
             save_path = None
 
-        self.clear_metrics()
         self._timer.reset()
-        self._timer.tic()
-        for cur_case, labels, volume, post_processed in predict_fn(run_fn(),
-                                                                   cases=self.config.eval_num,
-                                                                   dtype=self.config.pred_type,
-                                                                   save_path=save_path,
-                                                                   **run_kwargs):
-            self._timer.toc()
-            results = {}
-            if do_eval:
+        accumulator = defaultdict(int)
+        if not self.config.use_global_dice:
+            self.clear_metrics()
+            self._timer.tic()
+            for cur_case, labels, volume, post_processed in predict_fn(run_fn(),
+                                                                       cases=self.config.eval_num,
+                                                                       dtype=self.config.pred_type,
+                                                                       save_path=save_path,
+                                                                       **run_kwargs):
+                self._timer.toc()
+                results = {}
+                if do_eval:
+                    if not post_processed:
+                        volume = self._postprocess(volume)
+                    labels = self._postprocess(labels, is_label=True)
+                    # For global dice
+                    for i, cls in enumerate(self.classes):
+                        conf = metric_ops.ConfusionMatrix(volume[cls].astype(int), labels[cls].astype(int))
+                        conf.compute()
+                        accumulator[cls + "_fn"] += conf.fn
+                        accumulator[cls + "_fp"] += conf.fp
+                        accumulator[cls + "_tp"] += conf.tp
+                    # Calculate 3D metrics
+                    for c, cls in enumerate(self.classes):
+                        pairs = metric_ops.metric_3d(volume[cls], labels[cls], required=self.metrics_str)
+                        for met, value in pairs.items():
+                            results["{}/{}".format(cls, met)] = value
+                    self.append_metrics(results)
+                log_str = ("Evaluate-{} {}".format(self._timer.calls, cur_case)
+                           if results else "Predict-{} {}".format(self._timer.calls, cur_case))
+                for key, value in results.items():
+                    log_str += " {}: {:.3f}".format(key, value)
+                else:
+                    tf.logging.info(log_str + " ({:.3f} s)".format(self._timer.diff))
+                self._timer.tic()
+            results = {key: np.mean(values) for key, values in self._metric_values.items()}
+            if accumulator:
+                results.update({"G" + cls + "Dice": 2 * accumulator[cls + "_tp"] / (
+                        2 * accumulator[cls + "_tp"] + accumulator[cls + "_fn"] + accumulator[cls + "_fp"])
+                                for cls in self.classes})
+        else:
+            accumulator = defaultdict(int)
+            self._timer.tic()
+            for cur_case, labels, volume, post_processed in predict_fn(run_fn(),
+                                                                       cases=self.config.eval_num,
+                                                                       dtype=self.config.pred_type,
+                                                                       save_path=save_path,
+                                                                       **run_kwargs):
+                self._timer.toc()
+                results = {}
                 if not post_processed:
                     volume = self._postprocess(volume)
                 labels = self._postprocess(labels, is_label=True)
-                # Calculate 3D metrics
-                for c, cls in enumerate(self.classes):
-                    pairs = metric_ops.metric_3d(volume[cls], labels[cls], required=self.metrics_str)
-                    for met, value in pairs.items():
-                        results["{}/{}".format(cls, met)] = value
-                self.append_metrics(results)
 
-            log_str = ("Evaluate-{} {}".format(self._timer.calls, cur_case)
-                       if results else "Predict-{} {}".format(self._timer.calls, cur_case))
-            for key, value in results.items():
-                log_str += " {}: {:.3f}".format(key, value)
-            else:
+                for i, cls in enumerate(self.classes):
+                    conf = metric_ops.ConfusionMatrix(volume[cls].astype(int), labels[cls].astype(int))
+                    conf.compute()
+                    accumulator[cls + "_fn"] += conf.fn
+                    accumulator[cls + "_fp"] += conf.fp
+                    accumulator[cls + "_tp"] += conf.tp
+
+                log_str = ("Evaluate-{} {}".format(self._timer.calls, cur_case)
+                           if results else "Predict-{} {}".format(self._timer.calls, cur_case))
                 tf.logging.info(log_str + " ({:.3f} s)".format(self._timer.diff))
-            self._timer.tic()
+                self._timer.tic()
+            results = {cls + "Dice": 2 * accumulator[cls + "_tp"] / (
+                    2 * accumulator[cls + "_tp"] + accumulator[cls + "_fn"] + accumulator[cls + "_fp"])
+                       for cls in self.classes}
 
         # Compute average metrics
         display_str = "----Process {} cases ".format(self._timer.calls)
-        results = {key: np.mean(values) for key, values in self._metric_values.items()}
         for key, value in results.items():
             display_str += "- {}: {:.3f} ".format(key, value)
         tf.logging.info(display_str + "({:.3f} secs/case)".format(self._timer.average_time))
 
-    def maybe_save_case(self, cur_case, seg_path, volume, bbox, dtype, save_path):
+    def maybe_save_case(self, cur_case, vol_path, volume, bbox, dtype, save_path):
         if save_path:
-            case_header = nib.load(str(seg_path)).header
+            case_header = nib.load(str(vol_path)).header
             pad_with = tuple(zip(bbox[2::-1],
                                  np.array(case_header.get_data_shape()[::-1]) - bbox[:2:-1] - 1))
             if dtype == "pred":
@@ -969,9 +1013,9 @@ class EvaluateVolume(EvaluateBase):
                     raise ValueError("Not supported save object!")
                 img_array = np.pad(img_array, pad_with, mode="constant", constant_values=0)
                 save_file = save_path / "predict-{}.nii.gz".format(cur_case)
-                nii_kits.write_nii(img_array, case_header, save_file,
-                                   special=True if 28 <= int(cur_case) < 52 else False)
+                nii_kits.write_nii(img_array, case_header, save_file)
             else:
+                # Save 4D Tensor to npz
                 pad_with = pad_with + ((0, 0),)
                 img_array = np.pad(volume, pad_with, mode="constant", constant_values=0)
                 save_file = save_path / (cur_case + ".npz")

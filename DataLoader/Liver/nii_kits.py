@@ -35,30 +35,39 @@ def read_nii(file_name, out_dtype=np.int16, special=False, only_header=False):
     if only_header:
         return vh
     affine = vh.get_best_affine()
-    data = nib_vol.get_fdata().astype(out_dtype).transpose(2, 1, 0)
+    # assert len(np.where(affine[:3, :3].reshape(-1) != 0)[0]) == 3, affine
+    trans = np.argmax(np.abs(affine[:3, :3]), axis=1)
+    data = nib_vol.get_fdata().astype(out_dtype).transpose(*trans[::-1])
     if special:
         data = np.flip(data, axis=2)
-    if affine[0, 0] > 0:                # Increase x from Right to Left
+    if affine[0, trans[0]] > 0:                # Increase x from Right to Left
         data = np.flip(data, axis=2)
-    if affine[1, 1] > 0:                # Increase y from Anterior to Posterior
+    if affine[1, trans[1]] > 0:                # Increase y from Anterior to Posterior
         data = np.flip(data, axis=1)
-    if affine[2, 2] < 0:                # Increase z from Interior to Superior
+    if affine[2, trans[2]] < 0:                # Increase z from Interior to Superior
         data = np.flip(data, axis=0)
     return vh, data
 
 
-def write_nii(data, header, out_path, out_dtype=np.int16, special=False):
-    affine = header.get_best_affine()
+def write_nii(data, header, out_path, out_dtype=np.int16, special=False, affine=None):
+    if header is not None:
+        affine = header.get_best_affine()
+    assert len(np.where(affine[:3, :3].reshape(-1) != 0)[0]) == 3, affine
+    trans = np.argmax(np.abs(affine[:3, :3]), axis=1)[::-1]
+    trans_bk = [np.argwhere(np.array(trans) == i)[0][0] for i in range(3)]
 
     if special:
         data = np.flip(data, axis=2)
-    if affine[0, 0] > 0:                # Increase x from Right to Left
+    if affine[0, trans[0]] > 0:  # Increase x from Right to Left
         data = np.flip(data, axis=2)
-    if affine[1, 1] > 0:                # Increase y from Anterior to Posterior
+    if affine[1, trans[1]] > 0:  # Increase y from Anterior to Posterior
         data = np.flip(data, axis=1)
-    if affine[2, 2] < 0:                # Increase z from Interior to Superior
+    if affine[2, trans[2]] < 0:  # Increase z from Interior to Superior
         data = np.flip(data, axis=0)
 
-    out_image = np.transpose(data, (2, 1, 0)).astype(out_dtype)
-    out = nib.Nifti1Image(out_image, affine=None, header=header)
+    out_image = np.transpose(data, trans_bk).astype(out_dtype)
+    if header is None and affine is not None:
+        out = nib.Nifti1Image(out_image, affine=affine)
+    else:
+        out = nib.Nifti1Image(out_image, affine=None, header=header)
     nib.save(out, str(out_path))

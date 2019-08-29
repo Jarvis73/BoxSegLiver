@@ -145,7 +145,7 @@ class UNet(base.BaseNet):
                 labels = split_labels[i]
                 for met in self.args.metrics_train:
                     metric_func = eval("metrics.metric_" + met.lower())
-                    res = metric_func(logits, labels, name=obj + met, reduce=self.is_training)
+                    res = metric_func(logits, labels, name=obj + met, reduce=True)
                     # "{}/{}" format will be recognized by estimator and printed at each display step
                     self.metrics_dict["{}/{}".format(obj, met)] = res
 
