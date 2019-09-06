@@ -36,10 +36,15 @@ def _context_subnets(context,
                      scope=None,
                      is_training=False,
                      context_model="fc",
-                     context_conv_init_channels=16):
+                     context_conv_init_channels=16,
+                     use_se=False):
     with tf.variable_scope(scope, "context", [context]):
-        n_modulator_param = init_channels * sum(
-            [2 ** i for i in range(num_down_samples + 1) if i in mod_layers]) * 2
+        if use_se:
+            n_modulator_param = context_fc_channels[-1] * sum(
+                [1 for i in range(num_down_samples + 1) if i in mod_layers]) * 2
+        else:
+            n_modulator_param = init_channels * sum(
+                [2 ** i for i in range(num_down_samples + 1) if i in mod_layers]) * 2
 
         if context_model == "fc":
             res = slim_nets.fc(context,
@@ -120,8 +125,12 @@ def modulated_conv_block(self, net, repeat, channels, dilation=1, scope_id=0, de
                          spatial_modulation=False,
                          after_affine=False,
                          dropout=None,
-                         is_training=True):
+                         is_training=True,
+                         use_se=False,
+                         context_feature_length=None):
     spatial_mod_id = 0
+    if use_se and context_feature_length is None:
+        raise ValueError("`context_feature_length` must be specified when `use_se` is True")
 
     with tf.variable_scope("down_conv{}".format(scope_id)):
         for i in range(repeat):
@@ -138,11 +147,21 @@ def modulated_conv_block(self, net, repeat, channels, dilation=1, scope_id=0, de
                 if i != repeat - 1 and dropout:
                     net = slim.dropout(net, keep_prob=1 - dropout, is_training=is_training)
                 if density_modulation:
-                    den_params = tf.slice(density_modulation_params, [0, density_mod_id], [-1, channels],
-                                          name="de_params")
-                    net = conditional_normalization(net, den_params,
-                                                    scope="density")
-                    density_mod_id += channels
+                    if use_se:
+                        context_feature = tf.slice(density_modulation_params, [0, density_mod_id],
+                                                   [-1, context_feature_length], name="de_params")
+                        # Combine context guide with attention
+                        out = tf.reduce_mean(net, axis=(1, 2), name="global_avg_pool")
+                        out = tf.concat((out, context_feature), axis=-1)
+                        out = slim.fully_connected(out, (channels + context_feature_length) // 4)
+                        den_params = slim.fully_connected(out, channels, activation_fn=tf.nn.sigmoid)
+                        net = conditional_normalization(net, den_params, scope="density")
+                        density_mod_id += context_feature_length
+                    else:
+                        den_params = tf.slice(density_modulation_params, [0, density_mod_id], [-1, channels],
+                                              name="de_params")
+                        net = conditional_normalization(net, den_params, scope="density")
+                        density_mod_id += channels
                 if spatial_modulation:
                     sp_params = tf.slice(spatial_modulation_params,
                                          [0, 0, 0, spatial_mod_id], [-1, -1, -1, channels],
@@ -170,6 +189,7 @@ class GUNet(base.BaseNet):
         self.use_spatial_guide = args.use_spatial
         self.side_dropout = args.side_dropout
         self.dropout = args.dropout
+        self.use_se = args.use_se
 
     def _net_arg_scope(self, *args, **kwargs):
         default_w_regu, default_b_regu = self._get_regularizer()
@@ -217,7 +237,8 @@ class GUNet(base.BaseNet):
                                                   dropout=self.side_dropout,
                                                   is_training=self.is_training,
                                                   context_model=context_model,
-                                                  context_conv_init_channels=context_conv_init_channels)
+                                                  context_conv_init_channels=context_conv_init_channels,
+                                                  use_se=self.use_se)
             else:
                 context_params = None
 
@@ -268,7 +289,9 @@ class GUNet(base.BaseNet):
                         spatial_modulation=self.use_spatial_guide and i in mod_layers,
                         after_affine=after_affine,
                         dropout=self.dropout,
-                        is_training=self.is_training)
+                        is_training=self.is_training,
+                        use_se=self.use_se,
+                        context_feature_length=context_fc_channels[-1])
                     nets[-1] = net
                     if i < num_down_samples:
                         net = slim.max_pool2d(nets[-1], 2, scope="pool%d" % (i + 1))

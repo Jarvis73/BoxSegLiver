@@ -23,11 +23,12 @@ from tensorflow.python import pywrap_tensorflow as pt
 
 from NetworksV2.UNet import UNet
 from NetworksV2.GUNet import GUNet
+from NetworksV2.DenseUNet import DenseUNet
 
 ModeKeys = tfes.estimator.ModeKeys
 # Available models
 MODEL_ZOO = [
-    UNet, GUNet
+    UNet, GUNet, DenseUNet
 ]
 
 
@@ -90,11 +91,15 @@ def get_model_params(args, build_metrics=False, build_summaries=False):
     if not model_config_path.exists():
         model_config_path = model_config_path.parent / "ext_config" / args.model_config
         if not model_config_path.exists():
-            raise ValueError("Cannot find model config file %s" % args.model_config)
+            tf.logging.info("Cannot find model config file %s" % args.model_config)
+            model_config_path = None
 
-    with model_config_path.open() as f:
-        params["model_kwargs"] = yaml.load(f, Loader=yaml.Loader)
-        tf.logging.info("Load model configuration from %s" % str(model_config_path))
+    if model_config_path:
+        with model_config_path.open() as f:
+            params["model_kwargs"] = yaml.load(f, Loader=yaml.Loader)
+            tf.logging.info("Load model configuration from %s" % str(model_config_path))
+    else:
+        params["model_kwargs"] = {}
 
     params["model_kwargs"]["build_metrics"] = build_metrics
     params["model_kwargs"]["build_summaries"] = build_summaries
@@ -136,6 +141,42 @@ def init_partial_model(model, args):
         _ = scaffold
         saver.restore(session, ckpt_filename)
 
+    return init_fn
+
+
+def init_dense_model():
+    import h5py
+    f = h5py.File(str(Path(__file__).parent.parent / "densenet161_weights_tf.h5"), "r")
+    weight_keys = list(f.keys())
+    all_assign = []
+    variables = tf.trainable_variables("DenseUNet")
+    for variable in variables:
+        names = variable.op.name.split("/")
+        layer = names[1]
+        if layer in weight_keys:
+            var = names[2]
+            if var == "weights":
+                value = f[layer][layer + "_W"].value
+            elif var == "moving_mean":
+                value = f[layer][layer + "_running_mean"].value
+            elif var == "moving_variance":
+                value = f[layer][layer + "_running_std"].value
+            elif var == "beta":
+                layer = layer[:-3] + "_scale"
+                value = f[layer][layer + "_beta"].value
+            elif var == "gamma":
+                layer = layer[:-3] + "_scale"
+                value = f[layer][layer + "_gamma"].value
+            else:
+                raise ValueError(variable, "missing data in weights file.")
+            all_assign.append(tf.assign(variable, value))
+            print("Restore", variable.op.name)
+    with tf.control_dependencies(all_assign):
+        no_op = tf.no_op()
+
+    def init_fn(scaffold, session):
+        _ = scaffold
+        session.run(no_op)
     return init_fn
 
 
@@ -188,6 +229,8 @@ def model_fn(features, labels, mode, params, config):
     #############################################################################
     # Initialize partial graph variables by init_fn
     # init_fn = init_partial_model(model, args)
-    # kwargs["scaffold"] = tf.train.Scaffold(init_fn=init_fn)
+    if args.model == "DenseUNet":
+        init_fn = init_dense_model()
+        kwargs["scaffold"] = tf.train.Scaffold(init_fn=init_fn)
 
     return tfes.estimator.EstimatorSpec(mode=mode, **kwargs)

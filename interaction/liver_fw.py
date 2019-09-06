@@ -14,6 +14,7 @@
 #
 # =================================================================================
 
+import collections
 import matplotlib
 from traitsui.basic_editor_factory import BasicEditorFactory
 from traits.etsconfig.api import ETSConfig
@@ -21,7 +22,7 @@ ETSConfig.toolkit = "qt4"
 from matplotlib.figure import Figure
 from traits.api import (
     HasTraits, Instance, Button, Directory, Str, List, Int, Bool, Float,
-    Color, File, Any
+    Color, File, Any, Enum
 )
 from traitsui.api import (
     View, Item, VSplit, HSplit, VGroup, HGroup, TableEditor,
@@ -40,6 +41,8 @@ if ETSConfig.toolkit == "qt4":
 from pathlib import Path
 from PyQt5.QtCore import Qt
 from collections import Iterable
+from matplotlib.widgets import EllipseSelector
+from matplotlib.patches import Ellipse
 
 
 class MyList(list):
@@ -130,8 +133,6 @@ class MPLFigureEditor(BasicEditorFactory):
 class MedicalItem(HasTraits):
     name = Str
     slices = Str
-    liver_score = Float
-    tumor_score = Float
 
 
 class ViewHandler(Handler):
@@ -144,22 +145,24 @@ class ViewHandler(Handler):
             info.ui.title = "Image Viewer - {}".format(info.object.cur_case.name)
 
 
+def key_press_event_wrapper(cls):
+    def key_press_event_inner(event):
+        cls.key_press_event(event)
+    return key_press_event_inner
+
+
 class Framework(HasTraits):
     root_path = Directory(entries=10)
-    score_path = File(entries=10)
-    pred_list = List(MedicalItem)
+    data_list = List(MedicalItem)
     cur_case = Any
     splitter = Str
     space = Str(" " * 20)
-    contour = Bool(True)
-    mask = Bool(False)
-    liver = Bool(False)
+    contour = Bool(False)
+    label = Enum(0, 1, 2)
     alpha = Float(0.3)
-    title1 = Str("Phase2")
-    title2 = Str("Prediction")
+    title1 = Str("Image")
+    title2 = Str("Spatial Guide")
     color1 = Color("red")
-    color2 = Color("yellow")
-    label_num = Int(2)
 
     cur_ind = Int
     total_ind = Int
@@ -169,19 +172,17 @@ class Framework(HasTraits):
     showButton = Button("Show")
     lastButton = Button("Last")
     nextButton = Button("Next")
+    saveButton = Button("SaveInteraction")
     view = View(
         HGroup(
             VGroup(
                 VGroup(
                     Item("root_path", width=250),
-                    Item("score_path"),
                 ),
-                Item("pred_list",
+                Item("data_list",
                      editor=TableEditor(
-                         columns=[ObjectColumn(name="name", width=0.3),
-                                  ObjectColumn(name="slices", width=0.2),
-                                  ObjectColumn(name="liver_score", width=0.1),
-                                  ObjectColumn(name="tumor_score", width=0.1), ],
+                         columns=[ObjectColumn(name="name", width=0.7),
+                                  ObjectColumn(name="slices", width=0.3), ],
                          auto_size=True,
                          orientation="vertical",
                          row_factory=MedicalItem,
@@ -200,13 +201,12 @@ class Framework(HasTraits):
                             Item("space", show_label=False, style="readonly"),
                             Item("color1", label="Color")
                         ),
-                        Item("figure1", editor=MPLFigureEditor(toolbar=True), show_label=False, height=542)
+                        Item("figure1", editor=MPLFigureEditor(toolbar=True), show_label=False, height=768)
                     ),
                     VGroup(
                         HGroup(
                             Item("title2", show_label=False, style="readonly"),
                             Item("space", show_label=False, style="readonly"),
-                            Item("color2", label="Color")
                         ),
                         Item("figure2", editor=MPLFigureEditor(toolbar=True), show_label=False)
                     )
@@ -214,29 +214,28 @@ class Framework(HasTraits):
                 HGroup(
                     Item("space", show_label=False, style="readonly"),
                     Item("showButton", show_label=False),
-                    Item("liver"),
+                    Item("label", style="custom"),
                     Item("contour"),
-                    Item("mask"),
                     Item("alpha"),
-                    Item("label_num", label="Label"),
                     Item("cur_ind", label="Index"),
                     Item("splitter", label="/", style="readonly"),
                     Item("total_ind", show_label=False, style="readonly"),
                     Item("lastButton", show_label=False),
                     Item("nextButton", show_label=False),
+                    Item("saveButton", show_label=False),
                     Item("space", show_label=False, style="readonly"),
                 )
             ),
         ),
-        width=1324,
-        height=580,
+        width=1636,
+        height=868,
         title="Image Viewer",
         resizable=True,
         handler=ViewHandler()
     )
 
     def __init__(self, adapter, **kw):
-        super(ComparePrediction, self).__init__(**kw)
+        super(Framework, self).__init__(**kw)
 
         self.adap = adapter
 
@@ -245,19 +244,32 @@ class Framework(HasTraits):
         self.accelerate = 1
         self.cur_show = ""
         self.gesture = Gesture.Axial
+        self.patches = collections.defaultdict(list)
+        self.connected = False
 
     def connect(self):
+        self.wrapper = key_press_event_wrapper(self)
+        self.wrapper.ES = EllipseSelector(self.figure1.axes[0], self.on_select, drawtype='box', interactive=True)
         # Figure events
         self.figure1.canvas.mpl_connect("button_press_event", self.button_press_event)
         self.figure1.canvas.mpl_connect("button_release_event", self.button_release_event)
         self.figure1.canvas.mpl_connect("scroll_event", self.scroll_event)
-        self.figure1.canvas.mpl_connect("key_press_event", self.key_press_event)
+        self.figure1.canvas.mpl_connect("key_press_event", self.wrapper)
         self.figure1.canvas.mpl_connect("key_release_event", self.key_release_event)
-        self.figure2.canvas.mpl_connect("button_press_event", self.button_press_event)
-        self.figure2.canvas.mpl_connect("button_release_event", self.button_release_event)
+        self.figure1.canvas.setFocusPolicy(Qt.ClickFocus)
         self.figure2.canvas.mpl_connect("scroll_event", self.scroll_event)
 
-        self.figure1.canvas.setFocusPolicy(Qt.ClickFocus)
+    def on_select(self, eclick, erelease):
+        x1, y1 = eclick.xdata, eclick.ydata
+        x2, y2 = erelease.xdata, erelease.ydata
+        center = (x1 + x2) / 2, (y1 + y2) / 2
+        axes_length = np.abs(x1 - x2), np.abs(y1 - y2)
+        elli = Ellipse(center, *axes_length, alpha=0.5)
+        self.patches[self.cur_ind].append(elli)
+        print(x1, y1, x2, y2)
+        self.adap.update_interaction(self.cur_ind, center, axes_length)
+        # self.patch_show()
+        self.refresh(ignore_fig1=True)
 
     def scroll_event(self, event):
         if event.button == "down":
@@ -278,17 +290,19 @@ class Framework(HasTraits):
 
     def key_press_event(self, event):
         if event.key == "control":
-            self.contour = False
+            self.contour = not self.contour
             self._contour_changed()
+        elif event.key in ['E', 'e']:
+            if self.wrapper.ES.active:
+                print('EllipseSelector deactivated.')
+                self.wrapper.ES.set_active(False)
+            else:
+                print('EllipseSelector activated.')
+                self.wrapper.ES.set_active(True)
+            self.refresh()
 
     def key_release_event(self, event):
-        if event.key == "control":
-            self.contour = True
-            self._contour_changed()
-        elif event.key == "shift":
-            self.liver = not self.liver
-            self._liver_changed()
-        elif event.key == "down":
+        if event.key == "down":
             self._nextButton_fired()
         elif event.key == "up":
             self._lastButton_fired()
@@ -311,27 +325,34 @@ class Framework(HasTraits):
                 self.gesture = Gesture.Sagittal
                 self.reset_index()
                 self.refresh()
+        elif event.key == "u":
+            if len(self.patches[self.cur_ind]) > 0:
+                self.patches[self.cur_ind].pop()
+                self.adap.pop_interaction(self.cur_ind)
+                self.refresh(ignore_fig1=True)
 
     def reset_index(self):
         self.cur_ind = self.adap.get_min_idx(self.gesture)
         self.total_ind = self.adap.get_num_slices(self.gesture) - 1
 
-    def image_show(self, ind):
-        self.axesImage1.set_data(
-            self.adap.get_slice1(ind, self.color1.getRgb()[:-1],
-                                 alpha=self.alpha,
-                                 contour=self.contour,
-                                 mask_lab=self.mask,
-                                 ges=self.gesture))
-        self.axesImage2.set_data(
-            self.adap.get_slice2(ind, self.color2.getRgb()[:-1],
-                                 alpha=self.alpha,
-                                 contour=self.contour,
-                                 mask_lab=self.mask,
-                                 ges=self.gesture))
-        self.connect()
+    def patch_show(self):
+        for p in self.figure1.axes[0].patches:
+            p.remove()
+        for p in self.patches[self.cur_ind]:
+            self.figure1.axes[0].add_patch(p)
+
+    def image_show(self, ind, ignore_fig1=False):
+        if not ignore_fig1:
+            self.axesImage1.set_data(
+                self.adap.get_slice1(ind, self.color1.getRgb()[:-1],
+                                     alpha=self.alpha,
+                                     contour=self.contour,
+                                     ges=self.gesture))
+        self.axesImage2.set_data(self.adap.get_slice2(ind, ges=self.gesture))
+        if not self.connected:
+            self.connect()
+            self.connected = True
         self.cur_ind = self.adap.real_ind(ind)
-        self.update_figure()
 
     def update_figure(self):
         if self.figure1.canvas is not None:
@@ -339,16 +360,16 @@ class Framework(HasTraits):
         if self.figure2.canvas is not None:
             self.figure2.canvas.draw_idle()
 
-    def refresh(self):
-        self.image_show(self.cur_ind)
+    def refresh(self, ind=None, ignore_fig1=False):
+        ind = ind if ind is not None else self.cur_ind
+        self.image_show(ind, ignore_fig1)
+        self.patch_show()
+        self.update_figure()
 
     def _root_path_default(self):
         return self.adap.get_root_path()
 
-    def _score_path_default(self):
-        return ""
-
-    def _pred_list_default(self):
+    def _data_list_default(self):
         if Path(self.root_path).exists():
             return [MedicalItem(name=x, slices=y) for x, y in self.adap.get_file_list()]
         else:
@@ -359,13 +380,6 @@ class Framework(HasTraits):
             self.adap.update_root_path(self.root_path)
             self.pred_list = [MedicalItem(name=x, slices=y)
                               for x, y in self.adap.get_file_list()]
-
-    def _score_path_changed(self):
-        if Path(self.score_path).exists():
-            self.pred_list = [MedicalItem(name=x, slices=y, liver_score=z1, tumor_score=z2)
-                              for x, y, z1, z2 in self.adap.get_pair_list(self.score_path)]
-        else:
-            print("Warning: {} not exists".format(self.score_path))
 
     def _cur_ind_changed(self):
         if 0 <= self.cur_ind <= self.total_ind and self.total_ind > 0:
@@ -379,54 +393,45 @@ class Framework(HasTraits):
         if self.total_ind > 0:
             self.refresh()
 
-    def _color2_changed(self):
-        if self.total_ind > 0:
-            self.refresh()
-
     def _contour_changed(self):
         if self.total_ind > 0:
             self.refresh()
 
-    def _mask_changed(self):
+    def _label_changed(self):
         if self.total_ind > 0:
-            self.refresh()
-
-    def _liver_changed(self):
-        if self.total_ind > 0:
-            self.adap.update_choice(liver=self.liver)
-            self.refresh()
-
-    def _label_num_changed(self):
-        if self.total_ind > 0:
-            self.adap.update_choice(label=self.label_num)
+            self.adap.update_lab(label=self.label)
             self.refresh()
 
     def _figure1_default(self):
-        figure = Figure()
+        figure = Figure(figsize=(12, 12))
         figure.add_axes([0.0, 0.0, 1.0, 1.0])
         figure.axes[0].axis("off")
-        self.axesImage1 = figure.axes[0].imshow(np.ones((512, 512)), cmap="gray")
+        self.axesImage1 = figure.axes[0].imshow(np.zeros((512, 512)), cmap="gray")
         return figure
 
     def _figure2_default(self):
-        figure = Figure()
+        figure = Figure(figsize=(12, 12))
         figure.add_axes([0.0, 0.0, 1.0, 1.0])
         figure.axes[0].axis("off")
-        self.axesImage2 = figure.axes[0].imshow(np.ones((512, 512)), cmap="gray")
+        data = np.zeros((512, 512))
+        data[0, 0] = 1
+        self.axesImage2 = figure.axes[0].imshow(data, cmap="gray")
         return figure
 
     def _lastButton_fired(self):
         if self.total_ind > 0:
-            self.image_show(self.cur_ind - self.accelerate)
+            self.refresh(self.cur_ind - self.accelerate)
 
     def _nextButton_fired(self):
         if self.total_ind > 0:
-            self.image_show(self.cur_ind + self.accelerate)
+            self.refresh(self.cur_ind + self.accelerate)
 
     def _showButton_fired(self):
         if self.cur_case and self.cur_show != self.cur_case:
-            self.adap.update_case(self.cur_case.name, liver=self.liver,
-                                  label=self.label_num)
+            self.adap.update_case(self.cur_case.name)
             self.reset_index()
             self.refresh()
             self.cur_show = self.cur_case
+
+    def _saveButton_fired(self):
+        self.adap.save_interaction()

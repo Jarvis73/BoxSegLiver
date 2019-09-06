@@ -15,10 +15,13 @@
 # =================================================================================
 
 import json
+import shutil
+import multiprocessing
 import numpy as np
 from pathlib import Path
 from DataLoader.Liver import nii_kits
 from utils import array_kits
+from skimage.transform import resize
 
 ROOT_DIR = Path(__file__).parent.parent.parent
 
@@ -60,12 +63,69 @@ def merge_liver(tag_list, out_dir):
         nii_kits.write_nii(mean_liver, vh, save_file)
 
 
+def merge_volumes_wrap(tag_list, out_dir):
+    p = multiprocessing.Pool(4)
+    source = [ROOT_DIR / "model_dir" / tag / "prediction" for tag in tag_list]
+    out_dir = ROOT_DIR / "model_dir" / out_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+    p.map(merge_volumes, zip(range(70), [source] * 70, [out_dir] * 70))
+
+
+def merge_volumes(args_):
+    i, source, out_dir = args_
+    print("Process", i)
+    all_volume = []
+    for src in source:
+        case = src / "{}.npz".format(i)
+        all_volume.append(np.load(str(case))['arr_0'])
+    mean_volume = np.mean(all_volume, axis=0)
+    mean_volume = np.argmax(mean_volume, axis=-1)
+    liver = (mean_volume == 1).astype(np.uint8)
+    tumor = (mean_volume == 2).astype(np.uint8)
+
+    # Add tumor to liver volume
+    liver += tumor
+    # Find largest component --> for liver
+    liver = array_kits.get_largest_component(liver, rank=3)
+    # Remove false positives outside liver region
+    tumor *= liver
+    # Add to one volume: liver=1, tumor=2
+    final_volume = liver + tumor
+
+    volume_file = ROOT_DIR / "data/LiTS/Test_Batch/test-volume-{}.nii".format(i)
+    vh = nii_kits.read_nii(volume_file, only_header=True)
+    save_file = out_dir / "test-segmentation-{}.nii".format(i)
+    nii_kits.write_nii(final_volume, vh, save_file, out_dtype=np.uint8)
+
+
+def fix_test_59(out_dir):
+    out_dir = ROOT_DIR / "model_dir" / out_dir
+    bk_dir = out_dir / "backup"
+    bk_dir.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(out_dir / "test-segmentation-59.nii"), str(bk_dir))
+    vh, v = nii_kits.read_nii(bk_dir / "test-segmentation-59.nii", out_dtype=np.uint8)
+    vh["dim"][3] = 79
+    vh["pixdim"][3] = 3.
+    vh["srow_y"][2] = -3.
+    v2 = resize(v, (512, 79, 512), order=0, preserve_range=True)
+    nii_kits.write_nii(v2, vh, out_dir / "test-segmentation-59.nii", out_dtype=np.uint8)
+
+
 if __name__ == "__main__":
     # tag_list = ["002_unet_liver", "002_unet_liver_f0"]
     # out_dir = "merge_002_unet_liver"
     # merge_liver(tag_list, out_dir)
     # -----------------------------------------------------------------
-    json_file = "./DataLoader/Liver/prepare/test_meta.json"
-    liver_pattern = "./model_dir/merge_002_unet_liver/liver-*.nii.gz"
-    update_json_with_liver(json_file, liver_pattern)
-
+    # json_file = "./DataLoader/Liver/prepare/test_meta.json"
+    # liver_pattern = "./model_dir/merge_002_unet_liver/liver-*.nii.gz"
+    # update_json_with_liver(json_file, liver_pattern)
+    # -----------------------------------------------------------------
+    tag_list = ["001_unet_noise_0_05_f0",
+                "001_unet_noise_0_05_f1",
+                "001_unet_noise_0_05",
+                "001_unet_noise_0_05_f3",
+                "001_unet_noise_0_05_f4"]
+    out_dir = "merge_001_unet_noise_0_05"
+    merge_volumes_wrap(tag_list, out_dir)
+    # -----------------------------------------------------------------
+    fix_test_59(out_dir)

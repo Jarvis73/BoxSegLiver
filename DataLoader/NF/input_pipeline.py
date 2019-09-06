@@ -40,8 +40,8 @@ deprecation._PRINT_DEPRECATION_WARNINGS = False
 ModeKeys = tfes.estimator.ModeKeys
 Dataset = tf.data.Dataset
 PROJ_ROOT = Path(__file__).parent.parent.parent
-pattern = str(PROJ_ROOT / "data/NF/png/volume-{:d}/{:03d}_im.png")
-lb_pattern = str(PROJ_ROOT / "data/NF/png/volume-{:d}/{:03d}_lb.png")
+pattern = str(PROJ_ROOT / "data/NF/png/volume-{:03d}/{:03d}_im.png")
+lb_pattern = str(PROJ_ROOT / "data/NF/png/volume-{:03d}/{:03d}_lb.png")
 GRAY_MIN = 0
 GRAY_MAX = 1000
 TUMOR_PERCENT = 0.5
@@ -84,6 +84,7 @@ def _get_datasets(test_fold=-1, filter_size=10, choices=None, exclude=None):
         shutil.copyfile(str(src_meta), str(meta_file))
     with meta_file.open() as f:
         meta = json.load(f)
+    meta = {x["PID"]: x for x in meta}
 
     def parse(case):
         case.pop("tumors")
@@ -118,7 +119,7 @@ def _get_datasets(test_fold=-1, filter_size=10, choices=None, exclude=None):
     if not choices:
         # Load k_folds
         fold_path = prepare_dir / "k_folds.txt"
-        all_cases = list(range(131))
+        all_cases = list(meta)
         if exclude:
             for exc in exclude:
                 all_cases.remove(exc)
@@ -165,21 +166,14 @@ def _get_test_data():
     return dataset_dict
 
 
-def _collect_datasets(test_fold, mode, filter_tumor_size=0, filter_only_liver_in_val=True):
+def _collect_datasets(test_fold, mode, filter_tumor_size=0):
     dataset_dict = _get_datasets(test_fold, filter_size=filter_tumor_size) if mode != "infer" else _get_test_data()
     if mode == "train":
         return dataset_dict["train"]
     elif mode == "infer":
         return dataset_dict["infer"]
     else:
-        if not filter_only_liver_in_val:
-            return dataset_dict["val"]
-        else:
-            new_dict = []
-            for case in dataset_dict["val"]:
-                if len(case["slices"]) > 0:
-                    new_dict.append(case)
-            return new_dict
+        return dataset_dict["val"]
 
 
 def input_fn(mode, params):
@@ -188,8 +182,7 @@ def input_fn(mode, params):
 
     args = params["args"]
     dataset = _collect_datasets(args.test_fold, mode,
-                                filter_tumor_size=args.filter_size,
-                                filter_only_liver_in_val=params.get("filter_only_liver_in_val", True))
+                                filter_tumor_size=args.filter_size)
     if len(dataset) == 0:
         raise ValueError("No valid dataset found!")
 
@@ -203,10 +196,10 @@ def input_fn(mode, params):
                                                tumor_percent=TUMOR_PERCENT,
                                                config=args)
         elif mode == ModeKeys.EVAL:
-            if args.eval_in_patches:
-                return get_dataset_for_eval_patches(dataset, config=args)
-            else:
-                return get_dataset_for_eval_image(dataset, config=args)
+            # if args.eval_in_patches:
+            #     return get_dataset_for_eval_patches(dataset, config=args)
+            # else:
+            return get_dataset_for_eval_image(dataset, config=args)
         elif mode == ModeKeys.PREDICT:
             return
 
@@ -302,10 +295,18 @@ def gen_train_batch(data_list,
                 obj_bb = [size[1], size[2], 0, 0]   # Obj not exist
 
             # Compute crop region
-            rng_yl = max(obj_bb[2] + 5 - crop_size[0], 0)
-            rng_yr = min(obj_bb[0] - 5, size[1] - crop_size[0])
-            rng_xl = max(obj_bb[3] + 5 - crop_size[1], 0)
-            rng_xr = min(obj_bb[1] - 5, size[2] - crop_size[1])
+            if obj_bb[2] - obj_bb[0] <= crop_size[0]:
+                rng_yl = max(obj_bb[2] - crop_size[0], 0)
+                rng_yr = min(obj_bb[0], size[1] - crop_size[0])
+            else:
+                rng_yl = max(obj_bb[0] + 20 - crop_size[0], 0)
+                rng_yr = min(obj_bb[2] - 20, size[1] - crop_size[0])
+            if obj_bb[3] - obj_bb[1] <= crop_size[1]:
+                rng_xl = max(obj_bb[3] - crop_size[1], 0)
+                rng_xr = min(obj_bb[1], size[2] - crop_size[1])
+            else:
+                rng_xl = max(obj_bb[1] + 20 - crop_size[1], 0)
+                rng_xr = min(obj_bb[3] - 20, size[2] - crop_size[1])
             off_y = random.randint(rng_yl, rng_yr)
             off_x = random.randint(rng_xl, rng_xr)
 
@@ -352,7 +353,7 @@ def get_dataset_for_train(data_list, tumor_percent=0., random_scale=(1., 1.), co
                                               (tf.string, tf.string, tf.int32, tf.int32, tf.int32, tf.float32),
                                               output_shapes=(tf.TensorShape([config.im_channel]),
                                                              tf.TensorShape([]),
-                                                             tf.TensorShape([4]),
+                                                             tf.TensorShape([3]),
                                                              tf.TensorShape([4]),
                                                              tf.TensorShape([]),
                                                              tf.TensorShape([2])))
@@ -380,7 +381,7 @@ def get_dataset_for_eval_online(data_list, tumor_percent=0., config=None):
     dataset = (tf.data.Dataset.from_generator(val_gen, (tf.string, tf.string, tf.int32, tf.int32, tf.int32, tf.float32),
                                               output_shapes=(tf.TensorShape([config.im_channel]),
                                                              tf.TensorShape([]),
-                                                             tf.TensorShape([4]),
+                                                             tf.TensorShape([3]),
                                                              tf.TensorShape([4]),
                                                              tf.TensorShape([]),
                                                              tf.TensorShape([2])))
@@ -415,13 +416,9 @@ def parse_case_eval(case, im_channel, parse_label=True):
                cropped segmentation (z, y, x) with type uint8 """
     d, h, w = case["size"]
 
-    obj_num = int(case["vol_case"][:-4].split("-")[-1])
-    _, volume = nii_kits.read_lits(obj_num, "vol", PROJ_ROOT / case["vol_case"])
+    _, volume = nii_kits.read_nii(PROJ_ROOT / case["vol_case"])
     left_half_channel = (im_channel - 1) // 2
     right_half_channel = im_channel - 1 - left_half_channel
-    volume = np.concatenate((np.zeros((left_half_channel, h, w), dtype=volume.dtype),
-                             volume,
-                             np.zeros((right_half_channel, h, w), dtype=volume.dtype)), axis=0)
     cd, ch, cw = volume.shape
     volume = (np.clip(volume, GRAY_MIN, GRAY_MAX) - GRAY_MIN) / (GRAY_MAX - GRAY_MIN)
     volume = volume.transpose((1, 2, 0)).astype(np.float32)  # (y, x, z) for convenient
@@ -429,8 +426,8 @@ def parse_case_eval(case, im_channel, parse_label=True):
     segmentation = None
     lab_case = None
     if parse_label:
-        _, segmentation = nii_kits.read_lits(obj_num, "lab", PROJ_ROOT / case["lab_case"])
-        segmentation = segmentation.astype(np.uint8)
+        _, segmentation = nii_kits.read_nii(PROJ_ROOT / case["lab_case"])
+        segmentation = np.clip(segmentation.astype(np.uint8), 0, 1)
         lab_case = case["lab_case"]
 
     oshape = [d, h, w]
@@ -444,9 +441,7 @@ def get_dataset_for_eval_image(data_list, config=None):
     c = config.im_channel
     pshape = config.im_height, config.im_width
     resize = True
-    if config.im_height <= 0 or config.im_width <= 0:
-        logging.info("Disable image resize for evaluating")
-        resize = False
+    logging.info("Disable image resize for evaluating")
 
     for ci, case in enumerate(data_list[config.eval_skip_num:]):
         pid, vol_path, _, oshape, cshape, lhc, rhc, volume, segmentation = \
@@ -459,10 +454,11 @@ def get_dataset_for_eval_image(data_list, config=None):
                       "mirror": 0}
 
         pads = (batch_size - (cshape[0] % batch_size)) % batch_size
-        if pads > 0:
-            volume = np.concatenate((volume, np.zeros((*cshape[1:], pads), volume.dtype)), axis=-1)
+        volume = np.concatenate((np.zeros((*cshape[1:], lhc), volume.dtype),
+                                volume,
+                                np.zeros((*cshape[1:], pads + rhc), volume.dtype)), axis=-1)
         if resize:
-            volume = cv2.resize(volume, pshape, interpolation=cv2.INTER_LINEAR)
+            volume = cv2.resize(volume, pshape[::-1], interpolation=cv2.INTER_LINEAR)
 
         num_of_batches = (volume.shape[-1] - lhc - rhc) // batch_size
         assert volume.shape[-1] - lhc - rhc == batch_size * num_of_batches, \
@@ -489,7 +485,7 @@ def get_dataset_for_eval_image(data_list, config=None):
                     tmp["images"] = np.flip(np.flip(tmp["images"], axis=2), axis=1)
                     tmp["mirror"] = 3
                     yield tmp, None
-        yield None, (segmentation, vol_path, pads, resize)
+        yield None, (segmentation, vol_path, pads, oshape, resize)
 
 
 def get_dataset_for_eval_patches(data_list, step=2, config=None):

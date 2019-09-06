@@ -76,6 +76,8 @@ def add_arguments(parser):
     group.add_argument("--adam_beta1", type=float)
     group.add_argument("--adam_beta2", type=float)
     group.add_argument("--adam_eps", type=float)
+    group.add_argument("--mm_mm", type=float)
+    group.add_argument("--mm_nesterov", action="store_true")
     group.add_argument("--lr_patience", type=int, default=30,
                        help="Learning rate patience for decay (unit: epoch)")
 
@@ -88,6 +90,10 @@ def get_solver_params(args, warm_up=False, slow_start_step=None, slow_start_lear
         optimizer_params["beta2"] = args.adam_beta2
     if args.adam_eps:
         optimizer_params["epsilon"] = args.adam_eps
+    if args.mm_mm:
+        optimizer_params["momentum"] = args.mm_mm
+    if args.mm_nesterov:
+        optimizer_params["use_nesterov"] = True
     params = {"solver": Solver(args, optimizer_params=optimizer_params or None)}
 
     if warm_up:

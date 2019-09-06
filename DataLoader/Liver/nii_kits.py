@@ -53,8 +53,8 @@ def write_nii(data, header, out_path, out_dtype=np.int16, special=False, affine=
     if header is not None:
         affine = header.get_best_affine()
     assert len(np.where(affine[:3, :3].reshape(-1) != 0)[0]) == 3, affine
-    trans = np.argmax(np.abs(affine[:3, :3]), axis=1)[::-1]
-    trans_bk = [np.argwhere(np.array(trans) == i)[0][0] for i in range(3)]
+    trans = np.argmax(np.abs(affine[:3, :3]), axis=1)
+    trans_bk = [np.argwhere(np.array(trans[::-1]) == i)[0][0] for i in range(3)]
 
     if special:
         data = np.flip(data, axis=2)

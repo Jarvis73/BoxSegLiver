@@ -140,7 +140,8 @@ def main():
                                                  output_dir=args.model_dir,
                                                  do_logging=False)]
         if args.learning_policy == "plateau":
-            lr_hook = hooks.ReduceLROnPlateauHook(lr_patience=args.lr_patience,
+            lr_hook = hooks.ReduceLROnPlateauHook(args.model_dir,
+                                                  lr_patience=args.lr_patience,
                                                   tr_patience=50,
                                                   min_delta=1e-5,
                                                   every_n_steps=args.batches_per_epoch)

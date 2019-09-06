@@ -1,4 +1,5 @@
-[{
+[
+    {
     "PID": 0,
     "vol_case": "data/LiTS/Training_Batch/volume-0.nii",
     "lab_case": "data/LiTS/Training_Batch/segmentation-0.nii",

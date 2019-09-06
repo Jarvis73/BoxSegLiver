@@ -20,10 +20,8 @@ from pathlib import Path
 import scipy.ndimage as ndi
 import skimage.measure as measure
 
-from utils import nii_kits_deprecated
 from utils import array_kits
-from utils.misc_deprecated import find_file
-from visualization.View_Kits import ComparePrediction
+from visualization.View_Kits import Framework
 from visualization.Tool_Kits import get_pred_score
 
 
@@ -217,7 +215,7 @@ def main():
         Path("D:/DataSet/LiTS/liver_bbox_nii.pkl")
     )
 
-    demo = ComparePrediction(adapter)
+    demo = Framework(adapter)
     demo.configure_traits()
 
 

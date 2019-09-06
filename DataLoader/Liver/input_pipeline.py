@@ -66,6 +66,8 @@ def add_arguments(parser):
     group.add_argument("--eval_in_patches", action="store_true")
     group.add_argument("--eval_num_batches_per_epoch", type=int, default=100)
     group.add_argument("--eval_mirror", action="store_true")
+    group.add_argument("--liver_percent", type=float, default=LIVER_PERCENT)
+    group.add_argument("--tumor_percent", type=float, default=TUMOR_PERCENT)
 
 
 def _get_datasets(test_fold=-1, filter_size=10, choices=None, exclude=None):
@@ -165,7 +167,7 @@ def _get_test_data():
     with obj_file.open() as f:
         dataset_dict = json.load(f)
 
-    return dataset_dict
+    return {"infer": dataset_dict}
 
 
 def _collect_datasets(test_fold, mode, filter_tumor_size=0, filter_only_liver_in_val=True):
@@ -199,13 +201,13 @@ def input_fn(mode, params):
     with tf.variable_scope("InputPipeline"):
         if mode == ModeKeys.TRAIN:
             return get_dataset_for_train(dataset,
-                                         liver_percent=LIVER_PERCENT,
-                                         tumor_percent=TUMOR_PERCENT,
+                                         liver_percent=args.liver_percent,
+                                         tumor_percent=args.tumor_percent,
                                          random_scale=args.zoom_scale, config=args)
         elif mode == "eval_online":
             return get_dataset_for_eval_online(dataset,
-                                               liver_percent=LIVER_PERCENT,
-                                               tumor_percent=TUMOR_PERCENT,
+                                               liver_percent=args.liver_percent,
+                                               tumor_percent=args.tumor_percent,
                                                config=args)
         elif mode == ModeKeys.EVAL:
             if args.eval_in_patches:
@@ -213,7 +215,7 @@ def input_fn(mode, params):
             else:
                 return get_dataset_for_eval_image_v2(dataset, config=args)
         elif mode == ModeKeys.PREDICT:
-            return
+            return get_dataset_for_infer(dataset, config=args)
 
 
 #####################################
@@ -536,7 +538,7 @@ def get_dataset_for_eval_image(data_list, config=None):
                     yield tmp, None
 
 
-def parse_case_eval(case, align, padding, padding_z, im_channel, parse_label=True):
+def parse_case_eval(case, align, padding, padding_z, im_channel, parse_label=True, test_data=False):
     """ Return cropped normalized volume (y, x, z) with type float32 and
                cropped segmentation (z, y, x) with type uint8 """
     d, h, w = case["size"]
@@ -562,7 +564,10 @@ def parse_case_eval(case, align, padding, padding_z, im_channel, parse_label=Tru
                   .format(align, x1, y1, x2, y2))
 
     obj_num = int(case["vol_case"][:-4].split("-")[-1])
-    _, volume = nii_kits.read_lits(obj_num, "vol", PROJ_ROOT / case["vol_case"])
+    if test_data:
+        _, volume = nii_kits.read_nii(PROJ_ROOT / case["vol_case"])
+    else:
+        _, volume = nii_kits.read_lits(obj_num, "vol", PROJ_ROOT / case["vol_case"])
     left_half_channel = (im_channel - 1) // 2
     right_half_channel = im_channel - 1 - left_half_channel
     left_pad = left_half_channel - z1 if z1 < left_half_channel else 0
@@ -594,7 +599,10 @@ def parse_case_eval(case, align, padding, padding_z, im_channel, parse_label=Tru
 
 
 def get_dataset_for_eval_image_v2(data_list, config=None):
-    align = 16      # Necessary if not resize for batching
+    if config.model != "DenseUNet":
+        align = 16      # Necessary if not resize for batching
+    else:
+        align = 32
     padding = 25
     padding_z = 0
 
@@ -743,14 +751,70 @@ def get_dataset_for_eval_patches(data_list, step=2, config=None):
         yield copy.copy(eval_batch), labels
 
 
-def gen_dataset_jsons():
-    # exclude = [32, 34, 38, 41, 47, 87, 89, 91, 105, 106, 114, 115, 119]
-    exclude = []
-    _get_datasets(test_fold=0, filter_size=20, exclude=exclude)
-    _get_datasets(test_fold=1, filter_size=20, exclude=exclude)
-    _get_datasets(test_fold=2, filter_size=20, exclude=exclude)
-    _get_datasets(test_fold=3, filter_size=20, exclude=exclude)
-    _get_datasets(test_fold=4, filter_size=20, exclude=exclude)
+def get_dataset_for_infer(data_list, config=None):
+    align = 16      # Necessary if not resize for batching
+    padding = 25
+    padding_z = 0
+
+    batch_size = config.batch_size
+    c = config.im_channel
+    pshape = config.im_height, config.im_width
+    resize = True
+    if config.im_height <= 0 or config.im_width <= 0:
+        logging.info("Disable image resize for evaluating")
+        resize = False
+
+    for ci, case in enumerate(data_list[config.eval_skip_num:]):
+        pid, vol_path, _, bbox, oshape, cshape, lhc, rhc, volume, _ = \
+            parse_case_eval(case, align, padding, padding_z, c,
+                            parse_label=config.mode != ModeKeys.PREDICT, test_data=True)
+        if not resize:
+            pshape = cshape[1:]
+
+        eval_batch = {"images": np.empty((batch_size, *pshape, c), dtype=np.float32),
+                      "names": pid,
+                      "mirror": 0}
+
+        pads = (batch_size - ((bbox[5] - bbox[2] + 1) % batch_size)) % batch_size
+        if pads > 0:
+            volume = np.concatenate((volume, np.zeros((*cshape[1:], pads), volume.dtype)), axis=-1)
+        d = volume.shape[-1]
+        if resize:
+            if d > 512:
+                # cv2.resize can only resize at most 512 channels, so we must resize in batches
+                volumes = []
+                for b in range(0, d, 512):
+                    volumes.append(cv2.resize(volume[..., b:b + 512], pshape, interpolation=cv2.INTER_LINEAR))
+                volume = np.concatenate(volumes, axis=-1)
+            else:
+                volume = cv2.resize(volume, pshape, interpolation=cv2.INTER_LINEAR)
+
+        num_of_batches = (volume.shape[-1] - lhc - rhc) // batch_size
+        assert volume.shape[-1] - lhc - rhc == batch_size * num_of_batches, \
+            "Wrong padding: volume length: {}, lhc: {}, rhc: {}, batch_size: {}, num_of_batches: {}".format(
+                volume.shape[-1], lhc, rhc, batch_size, num_of_batches)
+        for idx in range(lhc, volume.shape[-1] - rhc, batch_size):
+            for j in range(batch_size):
+                eval_batch["images"][j] = volume[:, :, idx + j - lhc:idx + j + rhc + 1]
+            yield copy.copy(eval_batch), None
+
+            if config.eval_mirror:
+                if config.random_flip & 1 > 0:
+                    tmp = copy.copy(eval_batch)
+                    tmp["images"] = np.flip(tmp["images"], axis=2)
+                    tmp["mirror"] = 1
+                    yield tmp, None
+                if config.random_flip & 2 > 0:
+                    tmp = copy.copy(eval_batch)
+                    tmp["images"] = np.flip(tmp["images"], axis=1)
+                    tmp["mirror"] = 2
+                    yield tmp, None
+                if config.random_flip & 3 > 0:
+                    tmp = copy.copy(eval_batch)
+                    tmp["images"] = np.flip(np.flip(tmp["images"], axis=2), axis=1)
+                    tmp["mirror"] = 3
+                    yield tmp, None
+        yield None, (None, vol_path, pads, bbox, resize)
 
 
 if __name__ == "__main__":

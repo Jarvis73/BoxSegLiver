@@ -61,6 +61,10 @@ def _get_arguments():
         global evaluator_lib, input_pipeline
         from DataLoader.Liver import input_pipeline
         from evaluators import evaluator_liver as evaluator_lib
+    elif argv[1] == "nf":
+        global evaluator_lib, input_pipeline
+        from DataLoader.NF import input_pipeline
+        from evaluators import evaluator_nf as evaluator_lib
     elif argv[1] not in ["-h", "--help"]:
         raise ValueError("First argument must be choose from [only_liver, liver], got {}".format(argv[1]))
 
@@ -146,7 +150,8 @@ def main():
                                                  output_dir=args.model_dir,
                                                  do_logging=False)]
         if args.learning_policy == "plateau":
-            lr_hook = hooks.ReduceLROnPlateauHook(lr_patience=args.lr_patience,
+            lr_hook = hooks.ReduceLROnPlateauHook(args.model_dir,
+                                                  lr_patience=args.lr_patience,
                                                   tr_patience=50,
                                                   min_delta=1e-5,
                                                   every_n_steps=args.batches_per_epoch)

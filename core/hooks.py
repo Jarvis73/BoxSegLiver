@@ -533,8 +533,9 @@ class AverageTensorHook(session_run_hook.SessionRunHook):
 
 class ReduceLROnPlateauHook(session_run_hook.SessionRunHook):
     def __init__(self,
+                 save_dir,
                  monitor='total_loss',
-                 lr_patience=10,
+                 lr_patience=30,
                  tr_patience=50,
                  mode='min',
                  min_delta=0.0001,
@@ -542,6 +543,7 @@ class ReduceLROnPlateauHook(session_run_hook.SessionRunHook):
                  moving_average=0.95,
                  every_n_steps=200,
                  every_n_secs=None):
+        self.save_dir = save_dir
         self.monitor = monitor
         self.lr_patience = lr_patience    # wait number of epochs
         self.tr_patience = tr_patience  # wait number of epochs
@@ -556,8 +558,10 @@ class ReduceLROnPlateauHook(session_run_hook.SessionRunHook):
         self.alpha = moving_average
         self.total_loss_MA = None
         self.lr = None
+        self.lr_threshold = 1e-6
         self._reset()
-
+        self.load_lr_schedule()
+        self.inc_tr_patience = self.tr_patience // 2
         self._timer = basic_session_run_hooks.SecondOrStepTimer(every_steps=every_n_steps,
                                                                 every_secs=every_n_secs)
         self._steps_per_run = 1
@@ -586,11 +590,39 @@ class ReduceLROnPlateauHook(session_run_hook.SessionRunHook):
                 stale_global_step + self._steps_per_run):
             # get the real value after train op.
             global_step = run_context.session.run(self._global_step_tensor)
-            if self._timer.should_trigger_for_step(global_step):
+            if self._timer.should_trigger_for_step(global_step) and global_step > 2:
                 self._timer.update_last_triggered_step(global_step)
                 self.try_update_lr(run_context.session, current)
                 if self.check_stop(old_lr):
                     run_context.request_stop()
+
+    def load_lr_schedule(self):
+        schedule_file = Path(self.save_dir) / "lr_schedule"
+        if schedule_file.exists():
+            with schedule_file.open() as f:
+                lr_schedule = json.load(f)
+            self.best = lr_schedule["best"]
+            # self.lr_patience = lr_schedule["lr_patience"]
+            # self.tr_patience = lr_schedule["tr_patience"]
+            self.total_loss_MA = lr_schedule["total_loss_MA"]
+            self.tr_wait = lr_schedule["tr_wait"]
+            self.lr_wait = lr_schedule["lr_wait"]
+            self.cooldown_counter = lr_schedule["cooldown_counter"]
+
+    def save_lr_schedule(self):
+        schedule_file = Path(self.save_dir) / "lr_schedule"
+        lr_schedule = {"best": self.best,
+                       "total_loss_MA": self.total_loss_MA,
+                       "tr_wait": self.tr_wait,
+                       "lr_wait": self.lr_wait,
+                       "lr_patience": self.lr_patience,
+                       "lr_threshold": self.lr_threshold,
+                       "tr_patience": self.tr_patience,
+                       "cooldown_counter": self.cooldown_counter,
+                       "monitor": self.monitor,
+                       "mode": self.mode}
+        with schedule_file.open("w") as f:
+            json.dump(lr_schedule, f)
 
     def try_update_lr(self, session, current):
         if self.total_loss_MA is None:
@@ -602,6 +634,8 @@ class ReduceLROnPlateauHook(session_run_hook.SessionRunHook):
             self.cooldown_counter -= 1
             self.lr_wait = 0
 
+        logging.info("*** total_loss_MA={:.3g}, last_best={:.3g}, wait {} epochs/tr, {} epochs/lr"
+                     .format(self.total_loss_MA, self.best, self.tr_wait, self.lr_wait))
         if self.monitor_op(self.total_loss_MA, self.best):
             self.best = self.total_loss_MA
             self.lr_wait = 0
@@ -614,11 +648,13 @@ class ReduceLROnPlateauHook(session_run_hook.SessionRunHook):
                 session.run(self.update_op)
                 self.cooldown_counter = self.cooldown
                 self.lr_wait = 0
+        self.save_lr_schedule()
 
     def check_stop(self, old_lr):
-        if old_lr > 1e-6:
-            return False
         if self.tr_wait <= self.tr_patience:
+            return False
+        elif old_lr > self.lr_threshold:
+            self.tr_wait -= self.inc_tr_patience
             return False
         return True
 

@@ -1168,3 +1168,21 @@ def glcm_features(image, distances, angles, levels=256,
             results["entropy"] /= 8
 
     return glcm, results
+
+
+if __name__ == "__main__":
+    a = np.zeros((512, 512))
+    x = y = np.arange(512)
+    xm, ym = np.meshgrid(x, y, indexing="ij")
+    res = []
+    for i in range(5, 200, 5):
+        a[np.sqrt((xm - 255.5) ** 2 + (ym - 255.5) ** 2) < i] = 1
+        res.append(compute_robust_moments(a)[1][0])
+
+    xx = np.arange(5, 200, 5) ** 0.5
+    p = np.polyfit(xx, res, 1)
+    print(p)
+    import matplotlib.pyplot as plt
+    plt.plot(xx, res)
+    plt.plot([5, 15], [5 * p[0] + p[1], 15 * p[0] + p[1]])
+    plt.show()

@@ -15,6 +15,7 @@
 # =================================================================================
 
 import json
+import shutil
 import numpy as np
 import nibabel as nib
 import tensorflow as tf
@@ -95,9 +96,17 @@ class EvaluateVolume(EvaluateBase):
         self.params = params or estimator.params
         self.config = self.params["args"]
         self._timer = timer.Timer()
+        # Load meta.json
         meta_file = Path(__file__).parent.parent / "DataLoader/NF/prepare/meta.json"
+        if not meta_file.exists():
+            src_meta = Path(__file__).parent.parent / "data/NF/png/meta.json"
+            if not src_meta.exists():
+                raise FileNotFoundError(str(src_meta))
+            meta_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(str(src_meta), str(meta_file))
         with meta_file.open() as f:
             meta = json.load(f)
+
         self.meta = {x["PID"]: x for x in meta}
         if hasattr(self.config, "eval_in_patches"):
             self.eval_in_patches = self.config.eval_in_patches
@@ -117,10 +126,6 @@ class EvaluateVolume(EvaluateBase):
 
         if hasattr(self.config, "use_spatial") and self.config.use_spatial:
             tf.logging.info("Enable --> use spatial guide")
-            if self.use_sg_reduce_fp:
-                tf.logging.info("Enable --> use_sg_reduce_fp")
-        else:
-            self.use_sg_reduce_fp = False
         if hasattr(self.config, "use_context") and self.config.use_context:
             tf.logging.info("Enable --> use context guide")
 
@@ -425,21 +430,21 @@ class EvaluateVolume(EvaluateBase):
                     logits3d[-1] += np.flip(np.flip(predict["Prob"], axis=2), axis=1) / self.mirror_div
             else:
                 assert isinstance(labels, tuple), type(labels)
-                segmentation, vol_path, pads, bbox, reshape_ori = labels
+                segmentation, vol_path, pads, ori_shape, reshape_ori = labels
                 volume = np.concatenate(logits3d)   # [d, h, w, c]
                 if pads > 0:
                     volume = volume[:-pads]
                 if dtype == "pred":
                     volume = np.argmax(volume, axis=-1).astype(np.uint8)    # [d, h, w]
                 if resize and reshape_ori:
-                    ori_shape = (volume.shape[0],) + arr_ops.bbox_to_shape(bbox)[1:]
+                    ori_shape = (volume.shape[0],) + tuple(ori_shape[1:])
                     if volume.ndim == 4:
                         ori_shape = ori_shape + (volume.shape[-1],)
                     scales = np.array(ori_shape) / np.array(volume.shape)
                     if np.any(scales != 1):
                         volume = ndi.zoom(volume, scales, order=0 if dtype == "pred" else 1)
                 yield (cur_case, segmentation) + self.maybe_save_case(
-                    cur_case, vol_path, volume, bbox, dtype, save_path)
+                    cur_case, vol_path, volume, dtype, save_path)
 
                 logits3d.clear()
                 cur_case = None
@@ -447,7 +452,7 @@ class EvaluateVolume(EvaluateBase):
                 if 0 < cases <= counter:
                     break
 
-    def _postprocess(self, volume, is_label=False, ori_shape=None):
+    def _postprocess(self, volume, ori_shape=None):
         if not isinstance(volume, dict):
             decouple_volume = {cls: volume == i + 1 for i, cls in enumerate(self.classes)}
         else:
@@ -694,7 +699,7 @@ class EvaluateVolume(EvaluateBase):
                 if do_eval:
                     if not post_processed:
                         volume = self._postprocess(volume)
-                    labels = self._postprocess(labels, is_label=True)
+                    labels = self._postprocess(labels)
                     # For global dice
                     for i, cls in enumerate(self.classes):
                         conf = metric_ops.ConfusionMatrix(volume[cls].astype(int), labels[cls].astype(int))
@@ -732,7 +737,7 @@ class EvaluateVolume(EvaluateBase):
                 results = {}
                 if not post_processed:
                     volume = self._postprocess(volume)
-                labels = self._postprocess(labels, is_label=True)
+                labels = self._postprocess(labels)
 
                 for i, cls in enumerate(self.classes):
                     conf = metric_ops.ConfusionMatrix(volume[cls].astype(int), labels[cls].astype(int))

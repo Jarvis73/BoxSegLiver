@@ -120,6 +120,7 @@ def add_arguments(parser):
     group.add_argument("--min_std", type=float, default=2.,
                        help="Minimum stddev for spatial guide")
     group.add_argument("--save_sp_guide", action="store_true", help="Save spatial guide")
+    group.add_argument("--use_se", action="store_true", help="Use SE-Block in G-Nets context guide module")
 
 
 def _get_datasets(test_fold=-1, filter_size=0, choices=None, exclude=None):
@@ -268,15 +269,14 @@ def input_fn(mode, params):
                                                context_guide=args.use_context,
                                                context_list=tuple(context_list),
                                                spatial_guide=args.use_spatial,
-                                               spatial_random=args.spatial_random,
+                                               spatial_random=0. if args.spatial_random < 1. else args.spatial_random,
                                                config=args,
                                                **kwargs)
         elif mode == ModeKeys.EVAL:
             if args.use_context and "hist" in features:
                 kwargs["hist_scale"] = args.hist_scale
             if args.eval_no_sp:
-                return get_dataset_for_eval_image_sp(dataset,
-                                                     config=args)
+                return get_dataset_for_eval_image_sp(dataset, tuple(context_list), config=args)
             if args.use_spatial:
                 return EvalImage3DLoader(dataset,
                                          context_guide=args.use_context,
@@ -479,6 +479,9 @@ def gen_train_batch(data_list,
             yield_list = (selected_slices, lb_pattern.format(pid, selected_slice),
                           [off_y, off_x] + crop_size, pid, img_clip, {})
 
+            use_spatial_guide = None, None
+            if context_guide or spatial_guide:
+                use_spatial_guide = random.random() < spatial_random
             # context guide
             if context_guide:
                 # Load texture features when needed
@@ -494,29 +497,32 @@ def gen_train_batch(data_list,
                                                        % (feat.shape[1], f_len)
                         context[pid][cls] = eval("feature_ops.%s_preprocess" % cls)(feat, **kwargs)
 
-                features = []   # Collect features of selected slice
-                for cls, _ in context_list:
-                    if cls == "hist":
-                        feat = context[pid]["hist"][selected_slice]
-                        if "hist_noise" in kwargs and kwargs["hist_noise"]:
-                            feat += np.random.normal(
-                                loc=0., scale=1., size=feat.shape) * kwargs.get("hist_noise_scale", 0.005)
-                        features.append(feat)
-                    elif cls == "glcm":
-                        feat = context[pid]["glcm"][selected_slice]
-                        if "glcm_noise" in kwargs:
-                            # We use 1% value scale(between 2.5% percentile and 97.5% percentile)
-                            # of each feature as random scale
-                            feat += np.random.normal(
-                                loc=0., scale=1., size=feat.shape) * glcm_noise_scale
-                        features.append(feat)
-                    else:
-                        features.append(context[pid][cls][selected_slice])
-                yield_list[-1]["context"] = np.concatenate(features, axis=0)
+                if use_spatial_guide:
+                    features = []   # Collect features of selected slice
+                    for cls, _ in context_list:
+                        if cls == "hist":
+                            feat = context[pid]["hist"][selected_slice]
+                            if "hist_noise" in kwargs and kwargs["hist_noise"]:
+                                feat += np.random.normal(
+                                    loc=0., scale=1., size=feat.shape) * kwargs.get("hist_noise_scale", 0.005)
+                            features.append(feat)
+                        elif cls == "glcm":
+                            feat = context[pid]["glcm"][selected_slice]
+                            if "glcm_noise" in kwargs:
+                                # We use 1% value scale(between 2.5% percentile and 97.5% percentile)
+                                # of each feature as random scale
+                                feat += np.random.normal(
+                                    loc=0., scale=1., size=feat.shape) * glcm_noise_scale
+                            features.append(feat)
+                        else:
+                            features.append(context[pid][cls][selected_slice])
+                    yield_list[-1]["context"] = np.concatenate(features, axis=0)
+                else:
+                    feat_length = sum([x for _, x in context_list])
+                    yield_list[-1]["context"] = np.zeros((feat_length,), dtype=np.float32)
 
             # spatial guide
             if spatial_guide:
-                use_spatial_guide = random.random() < spatial_random
                 if use_spatial_guide and ind >= 0:
                     centers = np.asarray(case["centers"][ind], dtype=np.float32)
                     stddevs = np.asarray(case["stddevs"][ind], dtype=np.float32)
@@ -920,7 +926,7 @@ def get_dataset_for_eval_image(data_list, context_list, config=None, **kwargs):
         yield None, (segmentation, seg_path, pads, bbox)
 
 
-def get_dataset_for_eval_image_sp(data_list, config=None):
+def get_dataset_for_eval_image_sp(data_list, context_list, config=None):
     """ For spatial guide without spatial guide in evaluation
     """
     align = 16
@@ -930,6 +936,7 @@ def get_dataset_for_eval_image_sp(data_list, config=None):
     batch_size = config.batch_size
     c = config.im_channel
     pshape = config.im_height, config.im_width
+    feat_length = sum([x for _, x in context_list])
 
     for ci, case in enumerate(data_list[config.eval_skip_num:]):
         pid, _, seg_path, bbox, oshape, cshape, lhc, rhc, volume, segmentation = \
@@ -938,6 +945,7 @@ def get_dataset_for_eval_image_sp(data_list, config=None):
         eval_batch = {"images": np.empty((batch_size, *pshape, c), dtype=np.float32),
                       "names": pid,
                       "sp_guide": np.ones((batch_size, *pshape, 1), dtype=np.float32) * 0.5,
+                      "context": np.zeros((batch_size, feat_length), dtype=np.float32),
                       "mirror": 0,
                       "direction": "Forward"}
 

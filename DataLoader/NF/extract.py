@@ -61,7 +61,7 @@ def process_case(args):
 
     disc3 = ndi.generate_binary_structure(3, connectivity=2)
     # disc2 = ndi.generate_binary_structure(2, connectivity=1)
-    dst_dir = dst_path / vol_case.stem
+    dst_dir = dst_path / vol_case.name.split(".")[0]
     pid = int(vol_case.name.split(".")[0].split("-")[-1])
 
     vh, volume = nii_kits.read_nii(vol_case, out_dtype=np.int16)
