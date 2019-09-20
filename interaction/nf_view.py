@@ -22,15 +22,15 @@ import scipy.ndimage as ndi
 import skimage.measure as measure
 
 from DataLoader.Liver import nii_kits
-from interaction.liver_fw import Framework
+from interaction.nf_fw import Framework
 from utils import array_kits
 
 
 class SegViewerAdapter(object):
     def __init__(self, data_dir, lab_dir, json_file,
-                 data_pat="test-volume-{}.nii",
-                 lab_pat="test-segmentation-{}.nii",
-                 meta_file=None):
+                 data_pat="volume-{}.nii",
+                 lab_pat="segmentation-{}.nii",
+                 meta_file=None, base_size=None):
         self.data_dir = Path(data_dir)
         self.lab_dir = Path(lab_dir)
         for dir_ in [self.data_dir, self.lab_dir]:
@@ -39,6 +39,7 @@ class SegViewerAdapter(object):
         self.lab_pat = lab_pat
         self.meta_file = Path(meta_file)
         self.json_file = Path(json_file)
+        self.base_size = base_size
 
         if self.json_file.exists():
             try:
@@ -71,21 +72,18 @@ class SegViewerAdapter(object):
     def update_case(self, case_path):
         self.gt = self.mask = self.mask_ = None
         self.pid = int(case_path.split(".")[0].split("-")[-1])
-        vol_file = self.data_dir / self.data_pat.format(self.pid)
-        lab_file = self.lab_dir / self.lab_pat.format(self.pid)
+        vol_file = self.data_dir / self.data_pat.replace("{}", "{:03d}").format(self.pid)
+        lab_file = self.lab_dir / self.lab_pat.replace("{}", "{:03d}").format(self.pid)
 
         self.header, self.vol = nii_kits.read_nii(vol_file, np.float16)
-        self.lab_bk = nii_kits.read_nii(lab_file, np.uint8)[1]
+        self.lab_bk = np.clip(nii_kits.read_nii(lab_file, np.uint8)[1], 0, 1)
         self.shape = self.vol.shape
-        if self.meta_data is not None:
-            self.bb = self.meta_data[self.pid]["bbox"]
-            ranges = slice(self.get_min_idx(), self.get_max_idx())
-            self.vol = self.vol[ranges]
-            self.lab_bk = self.lab_bk[ranges]
+        self.bb = [0] * 3 + self.meta_data[self.pid]["size"]
+        self.my = self.shape[1] / self.base_size[0]
+        self.mx = self.shape[2] / self.base_size[1]
 
-        np.clip(self.vol, -200, 250, out=self.vol)
-        np.add(self.vol, 200, out=self.vol)
-        np.multiply(self.vol, 255 / 450, out=self.vol)
+        np.clip(self.vol, 0, 800, out=self.vol)
+        np.multiply(self.vol, 255 / 800, out=self.vol)
         self.vol = self.vol.astype(np.uint8)
         self.update_lab(self.label)
 
@@ -144,6 +142,7 @@ class SegViewerAdapter(object):
 
     def resized_image_single(self, im, ges, ind):
         spacing = self.meta_data[self.pid]["spacing"]
+        print(ges, ind, im.shape)
         if ges == 1:
             image = im[ind]
             return image
@@ -173,8 +172,8 @@ class SegViewerAdapter(object):
         if sind in self.interaction[spid] and len(self.interaction[spid][sind]["centers"]) > 0:
             ind = (ind - self.get_min_idx(ges)) % self.vol.shape[ges - 1]
             img = self.resized_image_single(self.vol, ges, ind)
-            center = np.array(self.interaction[spid][sind]["centers"])
-            stddev = np.array(self.interaction[spid][sind]["stddevs"])
+            center = np.array(self.interaction[spid][sind]["centers"]) / [self.my, self.mx]
+            stddev = np.array(self.interaction[spid][sind]["stddevs"]) / [self.my, self.mx]
             img = array_kits.create_gaussian_distribution_v2(img.shape, center, stddev)
             return np.repeat(img[:, :, np.newaxis], 3, axis=2)
         else:
@@ -195,8 +194,7 @@ class SegViewerAdapter(object):
             for path in self.data_dir.glob(self.data_pat.format("*")):
                 pid = int(path.name.split(".")[0].split("-")[-1])
                 size = self.meta_data[pid]["size"]
-                rng = self.meta_data[pid]["bbox"]
-                self.table.append((path.name, "{}/{}".format(rng[3] - rng[0], size[0])))
+                self.table.append((path.name, "{}".format(size[0])))
 
         return self.table
 
@@ -216,13 +214,11 @@ class SegViewerAdapter(object):
         self.data_dir = Path(new_path)
         self.table = []
 
-    def update_interaction(self, ind, center, axes):
+    def update_interaction(self, ind, center, stddev):
         sind = str(ind)
         spid = str(self.pid)
-        center = [round(x, 3) for x in center]
-        stddev = [round(x * 0.37065, 3) for x in axes]
-        center = center[::-1]
-        stddev = stddev[::-1]
+        center = [round(center[1] * self.my, 3), round(center[0] * self.mx, 3)]
+        stddev = [round(stddev[1] * 0.37065 * self.my, 3), round(stddev[0] * 0.37065 * self.mx, 3)]
         if sind in self.interaction[spid]:
             self.interaction[spid][sind]["centers"].append(list(center))
             self.interaction[spid][sind]["stddevs"].append(stddev)
@@ -243,19 +239,20 @@ class SegViewerAdapter(object):
 
 def main():
     adapter = SegViewerAdapter(
-        "E:/DataSet/LiTS/Training_Batch",
+        "E:/DataSet/Neurofibromatosis/nii_NF",
         # r"D:\0WorkSpace\MedicalImageSegmentation\data\LiTS\Test_Batch",
-        "E:/DataSet/LiTS/Training_Batch",
+        "E:/DataSet/Neurofibromatosis/nii_NF",
         # Path(__file__).parent.parent / "model_dir/merge_001_unet_noise_0_05",
-        Path(__file__).parent.parent / "DataLoader/liver/prepare/interaction.json",
-        meta_file=Path(__file__).parent.parent / "DataLoader/Liver/prepare/meta.json",
+        Path(__file__).parent.parent / "DataLoader/NF/prepare/interaction.json",
+        meta_file=Path(__file__).parent.parent / "DataLoader/NF/prepare/meta.json",
         # data_pat="test-volume-{}.nii",
         # lab_pat="test-segmentation-{}.nii",
-        data_pat="volume-{}.nii",
-        lab_pat="segmentation-{}.nii",
+        data_pat="volume-{}.nii.gz",
+        lab_pat="segmentation-{}.nii.gz",
+        base_size=(1180, 322)
     )
 
-    demo = Framework(adapter)
+    demo = Framework(adapter, (1180, 322))
     demo.configure_traits()
 
 

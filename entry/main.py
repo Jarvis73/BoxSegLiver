@@ -52,7 +52,7 @@ def _get_arguments():
 
     argv = sys.argv
     if len(argv) == 1:
-        raise ValueError("Please choice first argument from [only_liver, liver]")
+        raise ValueError("Please choice first argument from [only_liver, liver, nf]")
     if argv[1] == "only_liver":
         global evaluator_lib, input_pipeline
         from DataLoader.Liver import input_pipeline_li as input_pipeline
@@ -66,7 +66,7 @@ def _get_arguments():
         from DataLoader.NF import input_pipeline
         from evaluators import evaluator_nf as evaluator_lib
     elif argv[1] not in ["-h", "--help"]:
-        raise ValueError("First argument must be choose from [only_liver, liver], got {}".format(argv[1]))
+        raise ValueError("First argument must be choose from [only_liver, liver, nf], got {}".format(argv[1]))
 
     input_pipeline.add_arguments(parser)
     evaluator_lib.add_arguments(parser)

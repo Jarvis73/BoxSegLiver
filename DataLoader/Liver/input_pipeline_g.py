@@ -121,6 +121,8 @@ def add_arguments(parser):
                        help="Minimum stddev for spatial guide")
     group.add_argument("--save_sp_guide", action="store_true", help="Save spatial guide")
     group.add_argument("--use_se", action="store_true", help="Use SE-Block in G-Nets context guide module")
+    group.add_argument("--eval_discount", type=float, default=0.85)
+    group.add_argument("--real_sp", type=str, help="Path to real spatial guide.")
 
 
 def _get_datasets(test_fold=-1, filter_size=0, choices=None, exclude=None):
@@ -168,23 +170,31 @@ def _get_datasets(test_fold=-1, filter_size=0, choices=None, exclude=None):
         return case
 
     if not choices:
-        # Load k_folds
-        fold_path = prepare_dir / "k_folds.txt"
-        all_cases = list(range(131))
-        if exclude:
-            for exc in exclude:
-                all_cases.remove(exc)
-        print("Read:: k folds, test fold = %d" % test_fold)
-        k_folds = misc.read_or_create_k_folds(fold_path, all_cases, k_split=5, seed=1357)
-        if test_fold + 1 > len(k_folds):
-            raise ValueError("test_fold too large")
-        if test_fold < 0:
-            raise ValueError("test_fold must be non-negative")
-        testset = k_folds[test_fold]
-        trainset = []
-        for i, folds in enumerate(k_folds):
-            if i != test_fold:
-                trainset.extend(folds)
+        # Here we leave a postern for loading determined dataset (Using 3D-IRCAD-B as validation set)
+        if test_fold == 73239:  # magic number
+            print("Custom:: train/val split")
+            print("         Train: 0~27, 48~130")
+            print("         Val: 28~47 (3D-IRCAD-B)")
+            trainset = list(range(28)) + list(range(48, 131))
+            testset = list(range(28, 48))
+        else:
+            # Load k_folds
+            fold_path = prepare_dir / "k_folds.txt"
+            all_cases = list(range(131))
+            if exclude:
+                for exc in exclude:
+                    all_cases.remove(exc)
+            print("Read:: k folds, test fold = %d" % test_fold)
+            k_folds = misc.read_or_create_k_folds(fold_path, all_cases, k_split=5, seed=1357)
+            if test_fold + 1 > len(k_folds):
+                raise ValueError("test_fold too large")
+            if test_fold < 0:
+                raise ValueError("test_fold must be non-negative")
+            testset = k_folds[test_fold]
+            trainset = []
+            for i, folds in enumerate(k_folds):
+                if i != test_fold:
+                    trainset.extend(folds)
 
         dataset_dict = {"train": [], "val": []}
         for idx in sorted([int(x) for x in trainset]):
@@ -202,10 +212,27 @@ def _get_datasets(test_fold=-1, filter_size=0, choices=None, exclude=None):
     return dataset_dict
 
 
+def _get_test_data():
+    prepare_dir = Path(__file__).parent / "prepare"
+    prepare_dir.mkdir(parents=True, exist_ok=True)
+
+    # Check existence
+    obj_file = prepare_dir / "test_meta_update.json"
+    if not obj_file.exists():
+        raise FileNotFoundError("Cannot find test_meta_update.json")
+
+    with obj_file.open() as f:
+        dataset_dict = json.load(f)
+
+    return {"infer": dataset_dict}
+
+
 def _collect_datasets(test_fold, mode, filter_tumor_size=0, filter_only_liver_in_val=True):
-    dataset_dict = _get_datasets(test_fold, filter_size=filter_tumor_size)
+    dataset_dict = _get_datasets(test_fold, filter_size=filter_tumor_size) if mode != "infer" else _get_test_data()
     if mode == "train":
         return dataset_dict["train"]
+    elif mode == "infer":
+        return dataset_dict["infer"]
     else:
         if not filter_only_liver_in_val:
             return dataset_dict["val"]
@@ -227,11 +254,12 @@ def input_fn(mode, params):
                                 filter_only_liver_in_val=params.get("filter_only_liver_in_val", True))
     if len(dataset) == 0:
         raise ValueError("No valid dataset found!")
-    logging.info("{}: {} Liver CTs ({} slices, {} slices contain livers, {} slices contain tumors)"
-                 .format(mode[:1].upper() + mode[1:], len(dataset),
-                         sum([x["size"][0] for x in dataset]),
-                         sum([x["bbox"][3] - x["bbox"][0] for x in dataset]),
-                         sum([len(x["tumor_slices_index"]) for x in dataset])))
+    if mode != ModeKeys.PREDICT:
+        logging.info("{}: {} Liver CTs ({} slices, {} slices contain livers, {} slices contain tumors)"
+                     .format(mode[:1].upper() + mode[1:], len(dataset),
+                             sum([x["size"][0] for x in dataset]),
+                             sum([x["bbox"][3] - x["bbox"][0] for x in dataset]),
+                             sum([len(x["tumor_slices_index"]) for x in dataset])))
     # Parse context_list
     context_list = []
     if args.use_context and args.context_list is not None:
@@ -291,6 +319,8 @@ def input_fn(mode, params):
                                                   **kwargs)
             else:
                 raise ValueError("Cannot set both use_context and use_spatial to false")
+        elif mode == ModeKeys.PREDICT:
+            return get_dataset_for_infer(dataset, tuple(context_list), config=args)
 
 #####################################
 #
@@ -801,7 +831,7 @@ def get_dataset_for_eval_online(data_list,
     return dataset
 
 
-def parse_case_eval(case, align, padding, padding_z, im_channel):
+def parse_case_eval(case, align, padding, padding_z, im_channel, parse_label=True, test_data=False):
     """ Return cropped normalized volume (y, x, z) with type float32 and
                cropped segmentation (z, y, x) with type uint8 """
 
@@ -828,8 +858,10 @@ def parse_case_eval(case, align, padding, padding_z, im_channel):
                   .format(align, x1, y1, x2, y2))
 
     obj_num = int(case["vol_case"][:-4].split("-")[-1])
-    _, volume = nii_kits.read_lits(obj_num, "vol", PROJ_ROOT / case["vol_case"])
-    _, segmentation = nii_kits.read_lits(obj_num, "lab", PROJ_ROOT / case["lab_case"])
+    if test_data:
+        _, volume = nii_kits.read_nii(PROJ_ROOT / case["vol_case"])
+    else:
+        _, volume = nii_kits.read_lits(obj_num, "vol", PROJ_ROOT / case["vol_case"])
     left_half_channel = (im_channel - 1) // 2
     right_half_channel = im_channel - 1 - left_half_channel
     left_pad = left_half_channel - z1 if z1 < left_half_channel else 0
@@ -845,12 +877,18 @@ def parse_case_eval(case, align, padding, padding_z, im_channel):
         cd, ch, cw = volume.shape
     volume = (np.clip(volume, GRAY_MIN, GRAY_MAX) - GRAY_MIN) / (GRAY_MAX - GRAY_MIN)
     volume = volume.transpose((1, 2, 0)).astype(np.float32)  # (y, x, z) for convenient
-    segmentation = segmentation.astype(np.uint8)[z1:z2, y1:y2, x1:x2]
+
+    segmentation = None
+    lab_case = None
+    if parse_label:
+        _, segmentation = nii_kits.read_lits(obj_num, "lab", PROJ_ROOT / case["lab_case"])
+        segmentation = segmentation.astype(np.uint8)[z1:z2, y1:y2, x1:x2]
+        lab_case = case["lab_case"]
 
     bbox = [x1, y1, z1, x2 - 1, y2 - 1, z2 - 1]
     oshape = [d, h, w]
     cshape = [cd, ch, cw]
-    return case["PID"], case["vol_case"], case["lab_case"], bbox, oshape, cshape, \
+    return case["PID"], case["vol_case"], lab_case, bbox, oshape, cshape, \
         left_half_channel, right_half_channel, volume, segmentation
 
 
@@ -868,7 +906,7 @@ def get_dataset_for_eval_image(data_list, context_list, config=None, **kwargs):
     gd_pattern = str(PROJ_ROOT / "data/LiTS/feat/%s/eval/%03d.npy")
 
     for ci, case in enumerate(data_list[config.eval_skip_num:]):
-        pid, _, seg_path, bbox, oshape, cshape, lhc, rhc, volume, segmentation = \
+        pid, vol_path, _, bbox, oshape, cshape, lhc, rhc, volume, segmentation = \
             parse_case_eval(case, align, padding, padding_z, c)
 
         # Load evaluation context
@@ -923,7 +961,7 @@ def get_dataset_for_eval_image(data_list, context_list, config=None, **kwargs):
                     tmp["images"] = np.flip(np.flip(tmp["images"], axis=2), axis=1)
                     tmp["mirror"] = 3
                     yield tmp, None
-        yield None, (segmentation, seg_path, pads, bbox)
+        yield None, (segmentation, vol_path, pads, bbox)
 
 
 def get_dataset_for_eval_image_sp(data_list, context_list, config=None):
@@ -938,9 +976,15 @@ def get_dataset_for_eval_image_sp(data_list, context_list, config=None):
     pshape = config.im_height, config.im_width
     feat_length = sum([x for _, x in context_list])
 
+    real_meta = None
+    if config.real_sp and Path(config.real_sp).exists():
+        with Path(config.real_sp).open() as f:
+            real_meta = json.load(f)
+
     for ci, case in enumerate(data_list[config.eval_skip_num:]):
-        pid, _, seg_path, bbox, oshape, cshape, lhc, rhc, volume, segmentation = \
+        pid, vol_path, _, bbox, oshape, cshape, lhc, rhc, volume, segmentation = \
             parse_case_eval(case, align, padding, padding_z, c)
+        spid = str(pid)
 
         eval_batch = {"images": np.empty((batch_size, *pshape, c), dtype=np.float32),
                       "names": pid,
@@ -960,27 +1004,145 @@ def get_dataset_for_eval_image_sp(data_list, context_list, config=None):
             "Wrong padding: volume length: {}, lhc: {}, rhc: {}, batch_size: {}, num_of_batches: {}".format(
                 volume.shape[-1], lhc, rhc, batch_size, num_of_batches)
         for idx in range(lhc, volume.shape[-1] - rhc, batch_size):
+            ssid = str(bbox[2] + idx - lhc)
+            has_guide = False
             for j in range(batch_size):
                 eval_batch["images"][j] = volume[:, :, idx + j - lhc:idx + j + rhc + 1]
+                if real_meta is not None and spid in real_meta and ssid in real_meta[spid]:
+                    guide = array_kits.create_gaussian_distribution_v2(
+                        cshape[1:], np.array(real_meta[spid][ssid]["centers"]) - bbox[1::-1],
+                        real_meta[spid][ssid]["stddevs"])
+                    # print(np.array(real_meta[spid][ssid]["centers"]) - bbox[1::-1], real_meta[spid][ssid]["centers"],
+                    #       real_meta[spid][ssid]["stddevs"])
+                    # print(config.eval_discount)
+                    guide = guide * config.eval_discount / 2 + 0.5
+                    # print(guide.max(), guide.min(), eval_batch["images"][j, :, :, 1].max(), eval_batch["images"][j, :, :, 1].min())
+                    guide = cv2.resize(guide, pshape, interpolation=cv2.INTER_LINEAR)
+                    # cv2.imwrite("a.png", (np.clip((eval_batch["images"][j, :, :, 1] + guide - 0.5) * 255, 0, 255)).astype(np.uint8))
+                    eval_batch["sp_guide"][j] = guide[:, :, None]
+                    has_guide = True
+
             yield copy.copy(eval_batch), None
 
             if config.eval_mirror:
                 if config.random_flip & 1 > 0:
                     tmp = copy.copy(eval_batch)
                     tmp["images"] = np.flip(tmp["images"], axis=2)
+                    if has_guide:
+                        tmp["sp_guide"] = np.flip(tmp["sp_guide"], axis=2)
                     tmp["mirror"] = 1
                     yield tmp, None
                 if config.random_flip & 2 > 0:
                     tmp = copy.copy(eval_batch)
                     tmp["images"] = np.flip(tmp["images"], axis=1)
+                    if has_guide:
+                        tmp["sp_guide"] = np.flip(tmp["sp_guide"], axis=1)
                     tmp["mirror"] = 2
                     yield tmp, None
                 if config.random_flip & 3 > 0:
                     tmp = copy.copy(eval_batch)
                     tmp["images"] = np.flip(np.flip(tmp["images"], axis=2), axis=1)
+                    if has_guide:
+                        tmp["sp_guide"] = np.flip(np.flip(tmp["sp_guide"], axis=2), axis=1)
                     tmp["mirror"] = 3
                     yield tmp, None
-        yield None, (segmentation, seg_path, pads, bbox, True)
+        yield None, (segmentation, vol_path, pads, bbox, True)
+
+
+def get_dataset_for_infer(data_list, context_list, config=None):
+    """ For spatial guide without spatial guide in evaluation
+    """
+    align = 16
+    padding = 25
+    padding_z = 0
+
+    batch_size = config.batch_size
+    c = config.im_channel
+    pshape = config.im_height, config.im_width
+    feat_length = sum([x for _, x in context_list])
+    resize = True
+    if config.im_height <= 0 or config.im_width <= 0:
+        logging.info("Disable image resize for evaluating")
+        resize = False
+
+    real_meta = None
+    if config.real_sp and Path(config.real_sp).exists():
+        with Path(config.real_sp).open() as f:
+            real_meta = json.load(f)
+
+    for ci, case in enumerate(data_list[config.eval_skip_num:]):
+        pid, vol_path, _, bbox, oshape, cshape, lhc, rhc, volume, segmentation = \
+            parse_case_eval(case, align, padding, padding_z, c,
+                            parse_label=config.mode != ModeKeys.PREDICT, test_data=True)
+        if not resize:
+            pshape = cshape[1:]
+        spid = str(pid)
+
+        eval_batch = {"images": np.empty((batch_size, *pshape, c), dtype=np.float32),
+                      "names": pid,
+                      "sp_guide": np.ones((batch_size, *pshape, 1), dtype=np.float32) * 0.5,
+                      "context": np.zeros((batch_size, feat_length), dtype=np.float32),
+                      "mirror": 0,
+                      "direction": "Forward"}
+
+        pads = (batch_size - ((bbox[5] - bbox[2] + 1) % batch_size)) % batch_size
+        if pads > 0:
+            volume = np.concatenate((volume, np.zeros((*cshape[1:], pads), volume.dtype)), axis=-1)
+            # Avoid index exceed array range
+        d = volume.shape[-1]
+        if resize:
+            if d > 512:
+                # cv2.resize can only resize at most 512 channels, so we must resize in batches
+                volumes = []
+                for b in range(0, d, 512):
+                    volumes.append(cv2.resize(volume[..., b:b + 512], pshape, interpolation=cv2.INTER_LINEAR))
+                volume = np.concatenate(volumes, axis=-1)
+            else:
+                volume = cv2.resize(volume, pshape, interpolation=cv2.INTER_LINEAR)
+
+        num_of_batches = (volume.shape[-1] - lhc - rhc) // batch_size
+        assert volume.shape[-1] - lhc - rhc == batch_size * num_of_batches, \
+            "Wrong padding: volume length: {}, lhc: {}, rhc: {}, batch_size: {}, num_of_batches: {}".format(
+                volume.shape[-1], lhc, rhc, batch_size, num_of_batches)
+        for idx in range(lhc, volume.shape[-1] - rhc, batch_size):
+            ssid = str(bbox[2] + idx - lhc)
+            has_guide = False
+            for j in range(batch_size):
+                eval_batch["images"][j] = volume[:, :, idx + j - lhc:idx + j + rhc + 1]
+                if real_meta is not None and spid in real_meta and ssid in real_meta[spid]:
+                    guide = array_kits.create_gaussian_distribution_v2(
+                        cshape[1:], np.array(real_meta[spid][ssid]["centers"]) - bbox[1::-1],
+                        real_meta[spid][ssid]["stddevs"])
+                    guide = guide * config.eval_discount / 2 + 0.5
+                    guide = cv2.resize(guide, pshape, interpolation=cv2.INTER_LINEAR)
+                    eval_batch["sp_guide"][j] = guide[:, :, None]
+                    has_guide = True
+
+            yield copy.copy(eval_batch), None
+
+            if config.eval_mirror:
+                if config.random_flip & 1 > 0:
+                    tmp = copy.copy(eval_batch)
+                    tmp["images"] = np.flip(tmp["images"], axis=2)
+                    if has_guide:
+                        tmp["sp_guide"] = np.flip(tmp["sp_guide"], axis=2)
+                    tmp["mirror"] = 1
+                    yield tmp, None
+                if config.random_flip & 2 > 0:
+                    tmp = copy.copy(eval_batch)
+                    tmp["images"] = np.flip(tmp["images"], axis=1)
+                    if has_guide:
+                        tmp["sp_guide"] = np.flip(tmp["sp_guide"], axis=1)
+                    tmp["mirror"] = 2
+                    yield tmp, None
+                if config.random_flip & 3 > 0:
+                    tmp = copy.copy(eval_batch)
+                    tmp["images"] = np.flip(np.flip(tmp["images"], axis=2), axis=1)
+                    if has_guide:
+                        tmp["sp_guide"] = np.flip(np.flip(tmp["sp_guide"], axis=2), axis=1)
+                    tmp["mirror"] = 3
+                    yield tmp, None
+        yield None, (segmentation, vol_path, pads, bbox, resize)
 
 
 class EvalImage3DLoader(object):
@@ -1140,7 +1302,7 @@ class EvalImage3DLoader(object):
         #   self.rhc: int
         #   self.volume: [ch, cw, cd]
         #   self.segmentation: [cd, ch, cw]
-        self.pid, _, self.seg_path, self.bbox, self.oshape, self.cshape, \
+        self.pid, self.vol_path, _, self.bbox, self.oshape, self.cshape, \
             self.lhc, self.rhc, self.volume, self.segmentation = \
             parse_case_eval(self.data_list[self.cur_case_idx],
                             align=16, padding=25, padding_z=0, im_channel=self.cfg.im_channel)
@@ -1158,7 +1320,7 @@ class EvalImage3DLoader(object):
                 feat_length += f_len
             self.context_val = np.concatenate(features, axis=1).astype(np.float32)
         self.case_iter = self.gen_next_batch()
-        self.labels = (self.segmentation, self.seg_path, 0, self.bbox)
+        self.labels = (self.segmentation, self.vol_path, 0, self.bbox)
         return True
 
     def slice_iter(self, eval_batch, idx):
@@ -1239,7 +1401,8 @@ class EvalImage3DLoader(object):
             if len(stddevs) > 0:
                 assert np.min(stddevs) >= self.min_std, stddevs
                 # guide has shape [ph, pw, 1]
-                guide = array_kits.create_gaussian_distribution_v2(self.pshape[:2], centers, stddevs) * 0.85
+                guide = array_kits.create_gaussian_distribution_v2(self.pshape[:2], centers, stddevs) * \
+                    self.cfg.eval_discount
                 self._last_guide = guide / 2 + self.sp_guide_bg
             else:
                 self._last_guide = np.empty(self.pshape[:2], dtype=np.float32)
@@ -1286,11 +1449,10 @@ class EvalImage3DLoader(object):
         save_path.mkdir(parents=True, exist_ok=True)
         save_path = save_path / case_name
 
-        header = nii_kits.read_lits(self.pid, "lab", self.seg_path, only_header=True)
+        header = nii_kits.read_lits(self.pid, "vol", self.vol_path, only_header=True)
         pad_with = tuple(zip(self.bbox[2::-1], np.array(header.get_data_shape()[::-1]) - self.bbox[:2:-1] - 1))
         img_array = np.pad(img_array, pad_with, mode="constant", constant_values=np.int16(self.sp_guide_bg * 255))
-        nii_kits.write_nii(img_array, header, save_path,
-                           special=True if 28 <= self.pid < 52 else False)
+        nii_kits.write_nii(img_array, header, save_path, special=True if 28 <= self.pid < 48 else False)
 
     @staticmethod
     def ascent_line(img, x0, y0, x1, y1):

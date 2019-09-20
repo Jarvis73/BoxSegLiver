@@ -82,6 +82,7 @@ def add_arguments(parser):
 def get_model_params(args, build_metrics=False, build_summaries=False):
     params = dict()
     params["model"] = eval(args.model)
+    tf.logging.info("Use {} for learning.".format(args.model))
 
     if not args.model_config:
         args.model_config = args.model + ".yml"

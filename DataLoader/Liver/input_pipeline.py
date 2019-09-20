@@ -121,23 +121,31 @@ def _get_datasets(test_fold=-1, filter_size=10, choices=None, exclude=None):
         return case
 
     if not choices:
-        # Load k_folds
-        fold_path = prepare_dir / "k_folds.txt"
-        all_cases = list(range(131))
-        if exclude:
-            for exc in exclude:
-                all_cases.remove(exc)
-        print("Read:: k folds, test fold = %d" % test_fold)
-        k_folds = misc.read_or_create_k_folds(fold_path, all_cases, k_split=5, seed=1357)
-        if test_fold + 1 > len(k_folds):
-            raise ValueError("test_fold too large")
-        if test_fold < 0:
-            raise ValueError("test_fold must be non-negative")
-        testset = k_folds[test_fold]
-        trainset = []
-        for i, folds in enumerate(k_folds):
-            if i != test_fold:
-                trainset.extend(folds)
+        # Here we leave a postern for loading determined dataset (Using 3D-IRCAD-B as validation set)
+        if test_fold == 73239:  # magic number
+            print("Custom:: train/val split")
+            print("         Train: 0~27, 48~130")
+            print("         Val: 28~47 (3D-IRCAD-B)")
+            trainset = list(range(28)) + list(range(48, 131))
+            testset = list(range(28, 48))
+        else:
+            # Load k_folds
+            fold_path = prepare_dir / "k_folds.txt"
+            all_cases = list(range(131))
+            if exclude:
+                for exc in exclude:
+                    all_cases.remove(exc)
+            print("Read:: k folds, test fold = %d" % test_fold)
+            k_folds = misc.read_or_create_k_folds(fold_path, all_cases, k_split=5, seed=1357)
+            if test_fold + 1 > len(k_folds):
+                raise ValueError("test_fold too large")
+            if test_fold < 0:
+                raise ValueError("test_fold must be non-negative")
+            testset = k_folds[test_fold]
+            trainset = []
+            for i, folds in enumerate(k_folds):
+                if i != test_fold:
+                    trainset.extend(folds)
 
         dataset_dict = {"train": [], "val": []}
         for idx in sorted([int(x) for x in trainset]):

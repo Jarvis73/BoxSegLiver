@@ -14,6 +14,7 @@
 #
 # =================================================================================
 
+import cv2
 import json
 # noinspection PyUnresolvedReferences
 import pprint
@@ -645,6 +646,28 @@ def run_simulate_user_prior():
     simulate_user_prior("prior.json")
 
 
+def test_set_label():
+    data_dir = Path("E:/Dataset/LiTS/Test_Batch")
+    lab_dir = Path("D:/Library/Downloads/ee")
+    out_dir = Path(__file__).parent.parent.parent / "data/LiTS/Test_Label"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for test_file in data_dir.glob("test-volume-*.nii"):
+        pid = int(test_file.name.split(".")[0].split("-")[-1])
+        if pid == 59:
+            continue
+        print(pid)
+        header = nii_kits.read_nii(test_file, only_header=True)
+        spx, spy = abs(header["pixdim"][1]), abs(header["pixdim"][2])
+        labels = np.zeros(header.get_data_shape()[::-1], dtype=np.uint8)
+        for lab_file in lab_dir.glob("test-volume-{}-*.txt".format(pid)):
+            sid = int(lab_file.name.split(".")[0].split("-")[3]) - 1
+            points = np.loadtxt(str(lab_file)) / [spx, spy]
+            points = points.astype(np.int32)
+            cv2.fillPoly(labels[sid], [points], 1)
+        out = nib.Nifti1Image(labels.transpose((2, 1, 0)), affine=None, header=header)
+        nib.save(out, str(out_dir / "test-inter-{}.nii.gz".format(pid)))
+
+
 if __name__ == "__main__":
     cmd = input("Please choice function:\n\t"
                 "a: exit()\n\t"
@@ -652,7 +675,8 @@ if __name__ == "__main__":
                 "c: run_dump_hist_feature()\n\t"
                 "d: run_simulate_user_prior()\n\t"
                 "e: run_dump_glcm_feature_for_train()\n\t"
-                "f: run_dump_glcm_feature_for_eval() [A/b/c/d/e/f]")
+                "f: run_dump_glcm_feature_for_eval()\n\t"
+                "g: test_set_label() [A/b/c/...] ")
     cmd = cmd.lower()
 
     if cmd == "b":
@@ -675,5 +699,7 @@ if __name__ == "__main__":
             run_dump_glcm_feature_for_eval(True)
         else:
             run_dump_glcm_feature_for_eval(False)
+    elif cmd == "g":
+        test_set_label()
 
     print("Exit")

@@ -87,6 +87,8 @@ def _get_datasets(test_fold=-1, filter_size=10, choices=None, exclude=None):
     meta = {x["PID"]: x for x in meta}
 
     def parse(case):
+        if len(case["tumors"]) == 0:
+            return
         case.pop("tumors")
         case.pop("tumor_areas")
         case.pop("tumor_centers")
@@ -137,9 +139,13 @@ def _get_datasets(test_fold=-1, filter_size=10, choices=None, exclude=None):
 
         dataset_dict = {"train": [], "val": []}
         for idx in sorted([int(x) for x in trainset]):
-            dataset_dict["train"].append(parse(meta[idx]))
+            case = parse(meta[idx])
+            if case:
+                dataset_dict["train"].append(case)
         for idx in sorted([int(x) for x in testset]):
-            dataset_dict["val"].append(parse(meta[idx]))
+            case = parse(meta[idx])
+            if case:
+                dataset_dict["val"].append(case)
 
         with obj_file.open("w") as f:
             json.dump(dataset_dict, f)
@@ -151,23 +157,8 @@ def _get_datasets(test_fold=-1, filter_size=10, choices=None, exclude=None):
     return dataset_dict
 
 
-def _get_test_data():
-    prepare_dir = Path(__file__).parent / "prepare"
-    prepare_dir.mkdir(parents=True, exist_ok=True)
-
-    # Check existence
-    obj_file = prepare_dir / "test_meta_update.json"
-    if not obj_file.exists():
-        raise FileNotFoundError("Cannot find test_meta_update.json")
-
-    with obj_file.open() as f:
-        dataset_dict = json.load(f)
-
-    return dataset_dict
-
-
 def _collect_datasets(test_fold, mode, filter_tumor_size=0):
-    dataset_dict = _get_datasets(test_fold, filter_size=filter_tumor_size) if mode != "infer" else _get_test_data()
+    dataset_dict = _get_datasets(test_fold, filter_size=filter_tumor_size)
     if mode == "train":
         return dataset_dict["train"]
     elif mode == "infer":
@@ -196,9 +187,6 @@ def input_fn(mode, params):
                                                tumor_percent=TUMOR_PERCENT,
                                                config=args)
         elif mode == ModeKeys.EVAL:
-            # if args.eval_in_patches:
-            #     return get_dataset_for_eval_patches(dataset, config=args)
-            # else:
             return get_dataset_for_eval_image(dataset, config=args)
         elif mode == ModeKeys.PREDICT:
             return
@@ -397,20 +385,6 @@ def get_dataset_for_eval_online(data_list, tumor_percent=0., config=None):
     return dataset
 
 
-def data_processing_eval(img, x1, y1, x2, y2, dsize, im_scale):
-    img = img[y1:y2, x1:x2]
-    if (y2 - y1, x2 - x1) != dsize:
-        img = cv2.resize(img, dsize, interpolation=cv2.INTER_LINEAR)
-    return img / im_scale
-
-
-def parse_case(case):
-    pid = case["PID"]
-    d, h, w = case["size"]
-
-    return pid, d, h, w
-
-
 def parse_case_eval(case, im_channel, parse_label=True):
     """ Return cropped normalized volume (y, x, z) with type float32 and
                cropped segmentation (z, y, x) with type uint8 """
@@ -440,14 +414,10 @@ def get_dataset_for_eval_image(data_list, config=None):
     batch_size = config.batch_size
     c = config.im_channel
     pshape = config.im_height, config.im_width
-    resize = True
-    logging.info("Disable image resize for evaluating")
 
     for ci, case in enumerate(data_list[config.eval_skip_num:]):
         pid, vol_path, _, oshape, cshape, lhc, rhc, volume, segmentation = \
             parse_case_eval(case, c, parse_label=config.mode != ModeKeys.PREDICT)
-        if not resize:
-            pshape = cshape[1:]
 
         eval_batch = {"images": np.empty((batch_size, *pshape, c), dtype=np.float32),
                       "names": pid,
@@ -457,8 +427,7 @@ def get_dataset_for_eval_image(data_list, config=None):
         volume = np.concatenate((np.zeros((*cshape[1:], lhc), volume.dtype),
                                 volume,
                                 np.zeros((*cshape[1:], pads + rhc), volume.dtype)), axis=-1)
-        if resize:
-            volume = cv2.resize(volume, pshape[::-1], interpolation=cv2.INTER_LINEAR)
+        volume = cv2.resize(volume, pshape[::-1], interpolation=cv2.INTER_LINEAR)
 
         num_of_batches = (volume.shape[-1] - lhc - rhc) // batch_size
         assert volume.shape[-1] - lhc - rhc == batch_size * num_of_batches, \
@@ -485,7 +454,7 @@ def get_dataset_for_eval_image(data_list, config=None):
                     tmp["images"] = np.flip(np.flip(tmp["images"], axis=2), axis=1)
                     tmp["mirror"] = 3
                     yield tmp, None
-        yield None, (segmentation, vol_path, pads, oshape, resize)
+        yield None, (segmentation, vol_path, pads, oshape, True)
 
 
 def get_dataset_for_eval_patches(data_list, step=2, config=None):

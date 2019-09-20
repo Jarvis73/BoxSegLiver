@@ -120,12 +120,19 @@ if __name__ == "__main__":
     # liver_pattern = "./model_dir/merge_002_unet_liver/liver-*.nii.gz"
     # update_json_with_liver(json_file, liver_pattern)
     # -----------------------------------------------------------------
-    tag_list = ["001_unet_noise_0_05_f0",
-                "001_unet_noise_0_05_f1",
-                "001_unet_noise_0_05",
-                "001_unet_noise_0_05_f3",
-                "001_unet_noise_0_05_f4"]
-    out_dir = "merge_001_unet_noise_0_05"
+    # tag_list = ["001_unet_noise_0_05_f0",
+    #             "001_unet_noise_0_05_f1",
+    #             "001_unet_noise_0_05",
+    #             "001_unet_noise_0_05_f3",
+    #             "001_unet_noise_0_05_f4"]
+    # out_dir = "merge_001_unet_noise_0_05"
+    # -----------------------------------------------------------------
+    tag_list = ["013_gnet_sp_rand_f0",
+                "013_gnet_sp_rand_f1",
+                "013_gnet_sp_rand",
+                "013_gnet_sp_rand_f3",
+                "013_gnet_sp_rand_f4"]
+    out_dir = "merge_013_gnet_sp_rand"
     merge_volumes_wrap(tag_list, out_dir)
     # -----------------------------------------------------------------
     fix_test_59(out_dir)

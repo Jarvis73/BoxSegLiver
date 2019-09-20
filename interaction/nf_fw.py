@@ -280,7 +280,6 @@ class Framework(HasTraits):
         self.patches[self.cur_ind].append(elli)
         print(x1, y1, x2, y2)
         self.adap.update_interaction(self.cur_ind, center, axes_length)
-        # self.patch_show()
         self.refresh(ignore_fig1=True)
 
     def scroll_event(self, event):
@@ -290,10 +289,10 @@ class Framework(HasTraits):
             self._lastButton_fired()
 
     def button_press_event(self, event):
-        if event.button == 1:
-            self.accelerate = 3
-        elif event.button == 3:
-            self.accelerate = 6
+        if event.button == 3:
+            print(event.xdata, event.ydata)
+            self.adap.update_interaction(self.cur_ind, (event.xdata, event.ydata), (13.4898,) * 2)
+            self.refresh(ignore_fig1=True)
         self.figure1.canvas.setFocus()
 
     def button_release_event(self, event):

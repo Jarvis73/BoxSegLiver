@@ -71,7 +71,7 @@ def add_arguments(parser):
     group.add_argument("--use_global_dice", action="store_true")
 
 
-def get_evaluator(evaluator, estimator=None, model_dir=None, params=None):
+def get_evaluator(evaluator, estimator=None, model_dir=None, params=None, **kwargs):
     if evaluator == "Volume":
         return EvaluateVolume(estimator,
                               model_dir=model_dir,
@@ -510,6 +510,7 @@ class EvaluateVolume(EvaluateBase):
                 saver.restore(sess, checkpoint_path)
 
                 predictions = {"Prob": model.probability}
+                sp_guides = []
                 for features, labels in input_fn(self.config.mode, self.params):
                     if features:
                         feed_dict = {images: features.pop("images")}
@@ -517,10 +518,16 @@ class EvaluateVolume(EvaluateBase):
                             feed_dict[context] = features.pop("context")
                         if use_spatial and "sp_guide" in features:
                             feed_dict[sp_guide] = features.pop("sp_guide")
+                        if use_spatial and self.config.save_sp_guide and features["mirror"] == 0:
+                            sp_guides.append(feed_dict[sp_guide])
                         preds_eval = sess.run(predictions, feed_dict)
                         preds_eval.update(features)
                         yield preds_eval, None
                     else:
+                        if hasattr(self.config, "save_sp_guide") and self.config.save_sp_guide:
+                            segmentation, vol_path, pads, ori_shape, reshape_ori = labels
+                            self._save_guide(sp_guides, ori_shape, vol_path)
+                            sp_guides.clear()
                         yield None, labels
 
         if self.eval_in_patches:
@@ -529,6 +536,24 @@ class EvaluateVolume(EvaluateBase):
         else:
             resize = self.config.im_height > 0 and self.config.im_width > 0
             self._run_actual(self._predict_case, run_pred, save, resize=resize)
+
+    def _save_guide(self, sp_guides, ori_shape, vol_path):
+        pid = int(Path(vol_path).name.split(".")[0].split("-")[-1])
+        img_array = np.squeeze(np.concatenate(sp_guides, axis=0), axis=-1)
+        # Resize logits3d to the shape of labels3d
+        cur_shape = img_array.shape
+        ori_shape[0] = cur_shape[0]
+        scales = np.array(ori_shape) / np.array(cur_shape)
+        img_array = ndi.zoom(img_array, scales, order=1)
+        img_array = (img_array * 255).astype(np.int16)
+
+        case_name = "guide-{:03d}.nii.gz".format(pid)
+        save_path = Path(self.config.model_dir) / "sp_guide"
+        save_path.mkdir(parents=True, exist_ok=True)
+        save_path = save_path / case_name
+
+        header = nii_kits.read_nii(vol_path, only_header=True)
+        nii_kits.write_nii(img_array, header, save_path)
 
     def _predict_case_g(self, predicts, cases=-1, dtype="pred", save_path=None):
         logits3d = defaultdict(list)
@@ -622,7 +647,7 @@ class EvaluateVolume(EvaluateBase):
                 sess.run(tf.global_variables_initializer())
                 saver.restore(sess, checkpoint_path)
 
-                predictions = {"Prob": model.probability, "TumorPred": model.predictions["TumorPred"]}
+                predictions = {"Prob": model.probability, "NFPred": model.predictions["NFPred"]}
 
                 if self.config.use_spatial:
                     eil = input_fn(ModeKeys.EVAL, self.params)  # EvalImage3DLoader

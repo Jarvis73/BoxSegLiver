@@ -305,8 +305,7 @@ class EvaluateVolume(EvaluateBase):
             # We just use model_instances[0] to get prediction name.
             # Its value will still be collected from multi-gpus
             predicts = ["labels"] + list(self.params["model_instances"][0].predictions)
-            # TODO(zjw) Maybe add eval with mirror here
-            tf.logging.info("Begin evaluating 2d at epoch end(global dice) ...")
+            tf.logging.info("Begin evaluating 2d patches at epoch end(global dice) ...")
             predict_gen = self.estimator.evaluate_online(session, predicts, yield_single_examples=False)
 
             self._timer.reset()
@@ -791,7 +790,7 @@ class EvaluateVolume(EvaluateBase):
                     logits3d[di][-1] += np.flip(np.flip(predict["Prob"], axis=2), axis=1) / self.mirror_div
             else:
                 assert isinstance(labels, tuple), type(labels)
-                segmentation, seg_path, pads, bbox = labels
+                segmentation, vol_path, pads, bbox = labels
                 volume = np.concatenate(logits3d["Forward"], axis=0)    # [d, h, w, c]
                 if "Backward" in logits3d:
                     volume_rev = np.concatenate(logits3d["Backward"], axis=0)
@@ -808,7 +807,7 @@ class EvaluateVolume(EvaluateBase):
                     if np.any(scales != 1):
                         volume = ndi.zoom(volume, scales, order=0 if dtype == "pred" else 1)
                 yield (cur_case, segmentation) + self.maybe_save_case(
-                    cur_case, seg_path, volume, bbox, dtype, save_path)
+                    cur_case, vol_path, volume, bbox, dtype, save_path)
 
                 logits3d.clear()
                 cur_case = None

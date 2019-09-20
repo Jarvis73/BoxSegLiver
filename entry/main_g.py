@@ -34,7 +34,8 @@ from DataLoader.Liver import input_pipeline_g
 from evaluators import evaluator_liver
 
 ModeKeys = tfes.estimator.ModeKeys
-input_pipeline = input_pipeline_g
+input_pipeline = None
+evaluator_lib = None
 
 # Some global hyper parameters that have no effect on training
 TF_RANDOM_SEED = None
@@ -52,12 +53,21 @@ def _get_arguments():
     loss_metrics.add_arguments(parser)
 
     argv = sys.argv
-    if argv[1] == "liver" or argv[1] in ["-h", "--help"]:
-        input_pipeline.add_arguments(parser)
-        evaluator_liver.add_arguments(parser)
-    else:
-        raise ValueError("First argument must be choose from [liver], got {}".format(argv[1]))
+    if len(argv) == 1:
+        raise ValueError("Please choice first argument from [liver, nf]")
+    if argv[1] == "liver":
+        global evaluator_lib, input_pipeline
+        from DataLoader.Liver import input_pipeline_g as input_pipeline
+        from evaluators import evaluator_liver as evaluator_lib
+    elif argv[1] == "nf":
+        global evaluator_lib, input_pipeline
+        from DataLoader.NF import input_pipeline_g as input_pipeline
+        from evaluators import evaluator_nf as evaluator_lib
+    elif argv[1] not in ["-h", "--help"]:
+        raise ValueError("First argument must be choose from [liver, nf], got {}".format(argv[1]))
 
+    input_pipeline.add_arguments(parser)
+    evaluator_lib.add_arguments(parser)
     args = parser.parse_args(argv[2:])
     config.check_args(args, parser)
     config.fill_default_args(args)
@@ -142,25 +152,30 @@ def main():
         if args.learning_policy == "plateau":
             lr_hook = hooks.ReduceLROnPlateauHook(args.model_dir,
                                                   lr_patience=args.lr_patience,
-                                                  tr_patience=50,
-                                                  min_delta=1e-5,
+                                                  min_delta=5e-4,
                                                   every_n_steps=args.batches_per_epoch)
             train_hooks.append(lr_hook)
 
         if args.eval_per_epoch:
-            evaluator_lib = eval("evaluator_{}".format(subcommand))
             evaluator = evaluator_lib.get_evaluator(args.evaluator,
                                                     estimator=estimator,
                                                     use_sg_reduce_fp=False)
-            eval_hook = hooks.EvaluatorHook(evaluator,
-                                            checkpoint_dir=estimator.model_dir,
-                                            compare_fn=functools.partial(evaluator.compare,
-                                                                         primary_metric=args.primary_metric,
-                                                                         secondary_metric=args.secondary_metric),
-                                            prefix=args.summary_prefix,
-                                            eval_n_steps=args.batches_per_epoch,
-                                            save_best=args.save_best,
-                                            save_interval=args.save_interval)
+            if not args.save_interval:
+                eval_hook = hooks.EvaluatorHookV2(evaluator,
+                                                  checkpoint_dir=estimator.model_dir,
+                                                  prefix=args.summary_prefix,
+                                                  eval_n_steps=args.batches_per_epoch,
+                                                  save_best=args.save_best)
+            else:
+                eval_hook = hooks.EvaluatorHook(evaluator,
+                                                checkpoint_dir=estimator.model_dir,
+                                                compare_fn=functools.partial(evaluator.compare,
+                                                                             primary_metric=args.primary_metric,
+                                                                             secondary_metric=args.secondary_metric),
+                                                prefix=args.summary_prefix,
+                                                eval_n_steps=args.batches_per_epoch,
+                                                save_best=args.save_best,
+                                                save_interval=args.save_interval)
             train_hooks.append(eval_hook)
 
         steps, max_steps = ((args.num_of_steps, None)
@@ -173,12 +188,11 @@ def main():
     elif args.mode in [ModeKeys.EVAL, ModeKeys.PREDICT]:
         params = {"args": args}
         params.update(models.get_model_params(args))
-        evaluator_lib = eval("evaluator_{}".format(subcommand))
         evaluator = evaluator_lib.get_evaluator(args.evaluator,
                                                 model_dir=args.model_dir,
                                                 params=params,
                                                 use_sg_reduce_fp=True)
-        if args.use_spatial and args.eval_no_sp:
+        if args.use_spatial and args.eval_no_sp or ("eval_no_p" in args and args.eval_no_p):
             evaluator.run(input_pipeline.input_fn,
                           checkpoint_path=args.ckpt_path,
                           latest_filename=(args.load_status_file if not args.eval_final else None),

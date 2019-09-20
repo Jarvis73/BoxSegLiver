@@ -190,7 +190,7 @@ def run_nii_3d_to_png():
 
 def dump_hist_feature(in_path, out_path,
                       mode="train",
-                      bins=100,
+                      bins=200,
                       xrng=(GRAY_MIN, GRAY_MAX),
                       number=0):
     """
@@ -205,7 +205,7 @@ def dump_hist_feature(in_path, out_path,
     mode: str
         for train or eval
     bins: int
-        number of bins of histogram, default 100
+        number of bins of histogram, default 200
     xrng: tuple
         (x_min, x_max), default (GRAY_MIN, GRAY_MAX)
     number: int
@@ -231,30 +231,28 @@ def dump_hist_feature(in_path, out_path,
         lab_case = vol_case.parent / vol_case.name.replace("volume", "segmentation")
         _, labels = nii_kits.read_nii(lab_case, np.uint8)
         assert volume.shape == labels.shape, "Vol{} vs Lab{}".format(volume.shape, labels.shape)
+        labels = np.clip(labels, 0, 1)
 
         if mode == "train":
             tumor_labels = labels
         else:
-            tumor_labels = array_kits.get_guide_image(
-                labels, obj_val=2, guide="middle", tile_guide=True) * 2
+            tumor_labels = array_kits.get_guide_image(labels, obj_val=1, guide="middle", tile_guide=True)
 
-        slice_hists = np.empty((volume.shape[0], bins * 2), dtype=np.float32)
+        slice_hists = np.empty((volume.shape[0], bins), dtype=np.float32)
         for k in range(volume.shape[0]):
             with np.errstate(invalid='ignore'):
-                val1, _ = np.histogram(volume[k][labels[k] >= 1], bins=bins, range=xrng, density=True)
-                val2, _ = np.histogram(volume[k][tumor_labels[k] == 1], bins=bins, range=xrng, density=True)
+                val, _ = np.histogram(volume[k][tumor_labels[k] == 1], bins=bins, range=xrng, density=True)
             # Convert float64 to float32
-            slice_hists[k, :bins] = np.nan_to_num(val1.astype(np.float32))
-            slice_hists[k, bins:] = np.nan_to_num(val2.astype(np.float32))
+            slice_hists[k] = np.nan_to_num(val.astype(np.float32))
         np.save(dst_file % PID, slice_hists)
 
 
 def run_dump_hist_feature(num=-1):
     data_dir = Path(__file__).parent.parent.parent / "data/NF/nii_NF"
     features_dir = Path(__file__).parent.parent.parent / "data/NF/feat/hist"
-    dump_hist_feature(data_dir, features_dir, mode="train", bins=100,
+    dump_hist_feature(data_dir, features_dir, mode="train", bins=200,
                       xrng=(GRAY_MIN, GRAY_MAX), number=num)
-    dump_hist_feature(data_dir, features_dir, mode="eval", bins=100,
+    dump_hist_feature(data_dir, features_dir, mode="eval", bins=200,
                       xrng=(GRAY_MIN, GRAY_MAX), number=num)
 
 
@@ -265,7 +263,7 @@ def dump_glcm_feature_for_train(in_path, out_path,
                                 symmetric=True,
                                 normed=True,
                                 features="all",
-                                filter_size=20,
+                                filter_size=10,
                                 average_num=1,
                                 norm_levels=True,
                                 number=-1):
@@ -404,7 +402,7 @@ def dump_glcm_feature_for_eval(in_path, out_path,
                                symmetric=True,
                                normed=True,
                                features="all",
-                               filter_size=20,
+                               filter_size=10,
                                average_num=1,
                                norm_levels=True,
                                number=-1):
@@ -530,13 +528,26 @@ def dump_glcm_feature_for_eval(in_path, out_path,
 def run_dump_glcm_feature_for_train(norm_levels=True):
     data_dir = Path(__file__).parent.parent.parent / "data/NF/nii_NF"
     features_dir = Path(__file__).parent.parent.parent / "data/NF/feat/glcm"
-    dump_glcm_feature_for_train(data_dir, features_dir, average_num=3, norm_levels=norm_levels)
+    dump_glcm_feature_for_train(data_dir, features_dir, average_num=3, norm_levels=norm_levels, number=90)
 
 
 def run_dump_glcm_feature_for_eval(norm_levels=True):
     data_dir = Path(__file__).parent.parent.parent / "data/NF/nii_NF"
     features_dir = Path(__file__).parent.parent.parent / "data/NF/feat/glcm"
     dump_glcm_feature_for_eval(data_dir, features_dir, average_num=3, norm_levels=norm_levels)
+
+
+def get_glcm_noise_scale():
+    glcm = []
+    for f in Path("./data/NF/feat/glcm/train").glob("*.npy"):
+        a = np.load(str(f))
+        aa = a[a.max(axis=1) > 0]
+        if len(aa) > 0:
+            glcm.append(np.mean(aa, axis=0))
+        else:
+            print(f)
+    scale = np.round(np.mean(glcm, axis=0) / 100, 4)
+    print(scale)
 
 
 def simulate_user_prior(simul_name):
@@ -589,7 +600,8 @@ if __name__ == "__main__":
                 "c: run_dump_hist_feature()\n\t"
                 "d: run_simulate_user_prior()\n\t"
                 "e: run_dump_glcm_feature_for_train()\n\t"
-                "f: run_dump_glcm_feature_for_eval() [A/b/c/d/e/f]")
+                "f: run_dump_glcm_feature_for_eval()\n\t"
+                "g: get_glcm_noise_scale() [A/b/c/...] ")
     cmd = cmd.lower()
 
     if cmd == "b":
@@ -612,5 +624,7 @@ if __name__ == "__main__":
             run_dump_glcm_feature_for_eval(True)
         else:
             run_dump_glcm_feature_for_eval(False)
+    elif cmd == "g":
+        get_glcm_noise_scale()
 
     print("Exit")

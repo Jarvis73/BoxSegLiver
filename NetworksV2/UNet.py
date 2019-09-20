@@ -45,7 +45,8 @@ class UNet(base.BaseNet):
         with slim.arg_scope([slim.conv2d, slim.conv2d_transpose],
                             weights_regularizer=default_w_regu,
                             weights_initializer=default_w_init,
-                            biases_regularizer=default_b_regu) as scope:
+                            biases_regularizer=default_b_regu,
+                            outputs_collections=["EPts"]) as scope:
             if self.args.without_norm:
                 return scope
             normalizer, params = self._get_normalization()
@@ -169,3 +170,39 @@ class UNet(base.BaseNet):
         for key, value in self._image_summaries.items():
             tf.summary.image("{}/{}".format(self.args.tag, key), value * 255,
                              max_outputs=1, collections=[self.DEFAULT])
+
+
+if __name__ == "__main__":
+    from tensorflow.contrib.layers.python.layers import utils
+    from pprint import pprint
+    from pathlib import Path
+
+    class FOO(object):
+        im_height = 256
+        im_width = 256
+        im_channel = 3
+        batch_size = 1
+        num_gpus = 1
+        classes = ["Liver"]
+        without_norm = False
+        weight_decay_rate = 0.
+        weight_init = "xavier"
+        normalizer = "batch_norm"
+        tag = "002_unet_liver"
+    args = FOO()
+
+    x = tf.placeholder(tf.float32, (1, 256, 256, 3), "Input")
+    model = UNet(args)
+    model({"images": x}, mode="infer", ret_prob=True)
+    # pprint(tf.get_collection("EPts"))
+    outputs = utils.convert_collection_to_dict("EPts")
+    outputs = {k.replace("UNet/", "").replace("Repeat/", "").replace("/", "_").replace("convolution2d", "conv").
+               replace("Conv2d_transpose", "up").replace("AdjustChannels", "out"):
+               v for k, v in outputs.items()}
+    outputs.update({"y": model.probability})
+    saver = tf.train.Saver()
+    with tf.Session() as sess:
+        ckpt = tf.train.latest_checkpoint(Path(__file__).parent.parent / "model_dir" / args.tag,
+                                          "checkpoint_best_125000")
+        saver.restore(sess, ckpt)
+        tf.saved_model.simple_save(sess, "export_dir/{}".format(args.tag), {"x": x}, outputs)

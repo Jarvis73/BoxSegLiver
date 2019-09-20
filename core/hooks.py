@@ -285,6 +285,189 @@ class EvaluatorHook(session_run_hook.SessionRunHook):
         return self._saver
 
 
+class EvaluatorHookV2(session_run_hook.SessionRunHook):
+    """ Hook to evaluate at epoch end during training
+    V2 save best checkpoint by the metric with moving average
+    """
+
+    def __init__(self,
+                 evaluator,
+                 checkpoint_dir=None,
+                 compare_fn=lambda x, y: x > y,
+                 prefix=None,
+                 eval_n_secs=None,
+                 eval_n_steps=None,
+                 saver=None,
+                 checkpoint_basename="best_model.ckpt",
+                 save_best=False,
+                 ma_alpha=0.9):
+        """Initializes a `CheckpointSaverHook`.
+
+        Args:
+          evaluator: for evaluate model
+          checkpoint_dir: `str`, base directory for the checkpoint files.
+          compare_fn: `function`, compare function for the better results
+          prefix: `str`, summary prefix
+          eval_n_secs: `int`, save every N secs.
+          eval_n_steps: `int`, save every N steps.
+          saver: `Saver` object, used for saving.
+          checkpoint_basename: `str`, base name for the checkpoint files.
+          save_best: `bool`, save best ckpt or not
+
+        Raises:
+          ValueError: One of `save_steps` or `save_secs` should be set.
+          ValueError: At most one of `saver` or `scaffold` should be set.
+        """
+        logging.info("Create BestCheckpointSaverHook V2(MA).")
+        if not isinstance(evaluator, evaluator_base.EvaluateBase):
+            raise TypeError("`evaluator` must be an EvaluateBase instance")
+        self._summary_tag = prefix + "/Eval/{}" if prefix else "Eval/{}"
+        self._evaluator = evaluator
+        self._compare_fn = compare_fn
+        self._saver = saver
+        self._checkpoint_dir = checkpoint_dir
+        self._timer = basic_session_run_hooks.SecondOrStepTimer(every_secs=eval_n_secs,
+                                                                every_steps=eval_n_steps)
+        self._steps_per_run = 1
+        self._save_best = save_best
+        self._ma_results = None
+        self._ma_best_result = None
+        self.ma_alpha = ma_alpha
+        self._trigger_counter = 0
+
+        if self._save_best:
+            logging.info("Enable --> save best checkpoint!")
+            self._save_path = os.path.join(checkpoint_dir, checkpoint_basename)
+            self._need_save = False
+            self._last_step_in_get_saver = 0
+            best_file = self._get_best_result_dump_file()
+            if best_file.exists():
+                with best_file.open() as f:
+                    data = json.load(f)
+                    self._ma_results = data["ma_results"]
+                    self._ma_best_result = data["ma_best_result"]
+                logging.info("Load previous best result records: ", data)
+
+    def _set_steps_per_run(self, steps_per_run):
+        self._steps_per_run = steps_per_run
+
+    def begin(self):
+        self._summary_writer = SummaryWriterCache.get(self._checkpoint_dir)
+        self._global_step_tensor = training_util._get_or_create_global_step_read()  # pylint: disable=protected-access
+        if self._global_step_tensor is None:
+            raise RuntimeError(
+                "Global step should be created to use BestCheckpointSaverHook.")
+
+    def before_run(self, run_context):
+        return session_run_hook.SessionRunArgs(self._global_step_tensor)
+
+    def after_run(self, run_context, run_values):
+        stale_global_step = run_values.results
+        if self._timer.should_trigger_for_step(
+                stale_global_step + self._steps_per_run):
+            # get the real value after train op.
+            global_step = run_context.session.run(self._global_step_tensor)
+            if self._timer.should_trigger_for_step(global_step):
+                self._timer.update_last_triggered_step(global_step)
+                self._trigger_counter += 1
+                if self._evaluate(run_context.session, global_step):
+                    run_context.request_stop()
+
+    def end(self, session):
+        last_step = session.run(self._global_step_tensor)
+        if last_step != self._timer.last_triggered_step():
+            self._evaluate(session, last_step)
+
+    def _evaluate(self, session, step):
+        results = self._evaluator.run_with_session(session)
+        # We update moving average for 1 trigger delay
+        if self._trigger_counter <= 1:
+            return False
+        if self._ma_results is None:
+            self._ma_results = {k: float(v) for k, v in results.items()}
+            self._ma_best_result = np.mean(list(results.values()))
+            self._need_save = True
+        else:
+            self._ma_results = {k: float(self.ma_alpha * v + (1 - self.ma_alpha) * results[k])
+                                for k, v in self._ma_results.items()}
+            new_avg = np.mean(list(self._ma_results.values()))
+            if self._compare_fn(new_avg, self._ma_best_result):
+                self._ma_best_result = new_avg
+                self._need_save = True
+
+        self._summary(step, self._ma_results)
+        if self._save_best and self._need_save:
+            self._need_save = False
+            return self._save(session, step)
+        else:
+            return False
+
+    def _save(self, session, step):
+        """Saves the better checkpoint, returns should_stop."""
+        logging.info("Saving (best) checkpoints for %d into %s (checkpoint_best).",
+                     step - 1, self._save_path)
+
+        # We must use a different latest_filename comparing with the default "checkpoint"
+        self._get_saver().save(session, self._save_path, global_step=step,
+                               write_meta_graph=False,
+                               latest_filename="checkpoint_best")
+        with self._get_best_result_dump_file().open("w") as f:
+            json.dump(self._get_result_for_json_dump(), f)
+
+        should_stop = False
+        return should_stop
+
+    def _summary(self, step, result=None):
+        if result is None:
+            result = self._ma_results
+
+        tags, values_ = [], []
+        for key, value in result.items():
+            if key == ops.GraphKeys.GLOBAL_STEP:
+                continue
+            tags.append(self._summary_tag.format(key))
+            values_.append(value)
+
+        summary_scalar(self._summary_writer, step, tags, values_)
+
+    def _get_result_for_json_dump(self):
+        res = {"ma_results": self._ma_results, "ma_best_result": float(self._ma_best_result)}
+        return res
+
+    def _get_best_result_dump_file(self, name="best_result", use_glob=False):
+        if use_glob:
+            return Path(self._save_path).parent.glob(name)
+        return Path(self._save_path).parent / name
+
+    def _get_saver(self, step=None):
+        if self._saver is not None and (
+                step is None or (step // self._save_interval ==
+                                 self._last_step_in_get_saver // self._save_interval)):
+            self._last_step_in_get_saver = step
+            return self._saver
+
+        # Get saver from the SAVERS collection if present.
+        collection_key = ops.GraphKeys.SAVERS
+        savers = ops.get_collection(collection_key)
+        if not savers:
+            raise RuntimeError(
+                "No items in collection {}. Please add a saver to the collection "
+                "or provide a saver or scaffold.".format(collection_key))
+        elif len(savers) > 1:
+            raise RuntimeError(
+                "More than one item in collection {}. "
+                "Please indicate which one to use by passing it to the constructor."
+                .format(collection_key))
+
+        # We create a new saver with the SaverDef of the model main saver
+        # With SaverDef we don't need create extra graph nodes
+        # It is pity that parameter `max_to_keep` is saved to SaverDef and we cannot
+        # change it in duplicate Saver
+        self._saver = saver_lib.Saver(saver_def=savers[0].as_saver_def())
+        self._last_step_in_get_saver = step
+        return self._saver
+
+
 # class FeedGuideHook(session_run_hook.SessionRunHook):
 #     def __init__(self, features_ph, labels_ph, features, labels, model_dir, model_args):
 #         self.args = model_args
@@ -538,7 +721,7 @@ class ReduceLROnPlateauHook(session_run_hook.SessionRunHook):
                  lr_patience=30,
                  tr_patience=50,
                  mode='min',
-                 min_delta=0.0001,
+                 min_delta=0.0005,
                  cooldown=0,
                  moving_average=0.95,
                  every_n_steps=200,
@@ -611,15 +794,14 @@ class ReduceLROnPlateauHook(session_run_hook.SessionRunHook):
 
     def save_lr_schedule(self):
         schedule_file = Path(self.save_dir) / "lr_schedule"
-        lr_schedule = {"best": self.best,
-                       "total_loss_MA": self.total_loss_MA,
+        lr_schedule = {"best": float(self.best),
+                       "total_loss_MA": float(self.total_loss_MA),
                        "tr_wait": self.tr_wait,
                        "lr_wait": self.lr_wait,
                        "lr_patience": self.lr_patience,
-                       "lr_threshold": self.lr_threshold,
+                       "lr_threshold": float(self.lr_threshold),
                        "tr_patience": self.tr_patience,
                        "cooldown_counter": self.cooldown_counter,
-                       "monitor": self.monitor,
                        "mode": self.mode}
         with schedule_file.open("w") as f:
             json.dump(lr_schedule, f)
@@ -648,6 +830,7 @@ class ReduceLROnPlateauHook(session_run_hook.SessionRunHook):
                 session.run(self.update_op)
                 self.cooldown_counter = self.cooldown
                 self.lr_wait = 0
+
         self.save_lr_schedule()
 
     def check_stop(self, old_lr):

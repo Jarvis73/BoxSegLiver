@@ -42,6 +42,22 @@ def curve(root):
     print(spacing.max(0), spacing.min(0))
     print(len(tumors))
 
+    print()
+    all_rates = []
+    for i, x, in meta.items():
+        for j, y in enumerate(x["tumor_slices"]):
+            rate = (y[2] - y[0]) / (y[3] - y[1])
+            all_rates.append(rate)
+            if rate > 8 or rate < 0.125:
+                cnt = 0
+                for k in x["tumor_slices_from_to"][1:]:
+                    if j < k:
+                        break
+                    cnt += 1
+                print(i, x["tumor_slices_index"][cnt], round(rate, 3), y)
+    plt.hist(all_rates, bins=50)
+    plt.show()
+
     indices = []
     tumor_volume = []
     for i, x in meta.items():
@@ -63,7 +79,7 @@ tumor_volume = curve(Path(__file__).parent)
 # xs = np.logspace(0, 4, 100)
 # ax.plot(xs, density(xs))
 #
-tumor_volume = curve(Path(__file__).parent.parent / "Liver")
+# tumor_volume = curve(Path(__file__).parent.parent / "Liver")
 # density = gaussian_kde(tumor_volume)
 # density.covariance_factor = lambda: .25
 # density._compute_covariance()
@@ -133,3 +149,13 @@ tumor_volume = curve(Path(__file__).parent.parent / "Liver")
 # #                 ax[j, k].set_ylabel('volume-45.nii', fontsize=15)
 
 # plt.show()
+
+
+def show(x):
+    ah, a = nii_kits.read_nii("E:/Dataset/Neurofibromatosis/nii_NF/volume-{:03d}.nii.gz".format(x))
+    bh, b = nii_kits.read_nii("E:/Dataset/Neurofibromatosis/nii_NF/segmentation-{:03d}.nii.gz".format(x))
+    b = np.clip(b, 0, 1)
+    a2 = a * b
+    plt.hist(a2[a2 > 0], bins=150, range=(0, 900), density=True)
+    plt.show()
+
