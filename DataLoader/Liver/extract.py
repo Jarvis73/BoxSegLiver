@@ -33,6 +33,7 @@ GRAY_MIN = -250
 GRAY_MAX = 300
 IM_SCALE = 64
 LB_SCALE = 64
+ROOT_DIR = Path(__file__).parent.parent.parent
 
 
 def check_dataset(file_path):
@@ -260,6 +261,7 @@ def dump_hist_feature(in_path, out_path,
     -------
 
     """
+    print("\n\nDeprecated!!!!!!!!!!!!!!!!!! Use v2 !!!!!!!!!!!!!\n\n")
     src_path = Path(in_path)
     dst_path = Path(out_path) / mode
     dst_path.mkdir(parents=True, exist_ok=True)
@@ -270,7 +272,6 @@ def dump_hist_feature(in_path, out_path,
         if number >= 0 and number != i:
             continue
         PID = int(vol_case.stem.split("-")[-1])
-        print("{:03d} {:47s}".format(i, str(vol_case)))
 
         vh, volume = nii_kits.read_lits(vol_case.stem.split("-")[-1], "vol", vol_case)
         lab_case = vol_case.parent / vol_case.name.replace("volume", "segmentation")
@@ -292,15 +293,85 @@ def dump_hist_feature(in_path, out_path,
             slice_hists[k, :bins] = np.nan_to_num(val1.astype(np.float32))
             slice_hists[k, bins:] = np.nan_to_num(val2.astype(np.float32))
         np.save(dst_file % PID, slice_hists)
+        print("{:03d} {:47s}".format(i, dst_file % PID))
 
 
 def run_dump_hist_feature(num=-1):
     data_dir = Path(__file__).parent.parent.parent / "data/LiTS/Training_Batch"
     features_dir = Path(__file__).parent.parent.parent / "data/LiTS/feat/hist"
     dump_hist_feature(data_dir, features_dir, mode="train", bins=100,
-                      xrng=(GRAY_MIN, GRAY_MAX), number=num)
+                      xrng=(GRAY_MIN + 50, GRAY_MAX - 50), number=num)
     dump_hist_feature(data_dir, features_dir, mode="eval", bins=100,
-                      xrng=(GRAY_MIN, GRAY_MAX), number=num)
+                      xrng=(GRAY_MIN + 50, GRAY_MAX - 50), number=num)
+
+
+def dump_hist_feature_v2(in_path, out_path,
+                         mode="train",
+                         bins=100,
+                         xrng=(GRAY_MIN, GRAY_MAX),
+                         number=0):
+    """
+    Compute histogram features for context guide
+
+    Parameters
+    ----------
+    in_path: str
+        data directory
+    out_path: str
+        npy/npz directory
+    mode: str
+        for train or eval
+    bins: int
+        number of bins of histogram, default 100
+    xrng: tuple
+        (x_min, x_max), default (GRAY_MIN, GRAY_MAX)
+    number: int
+        for debug
+
+    Returns
+    -------
+
+    """
+    src_path = Path(in_path)
+    dst_path = Path(out_path) / mode
+    dst_path.mkdir(parents=True, exist_ok=True)
+    dst_file = str(dst_path / "%03d")
+
+    for i, vol_case in enumerate(sorted(src_path.glob("volume-*.nii"),
+                                        key=lambda x: int(str(x).split(".")[0].split("-")[-1]))):
+        if number >= 0 and number != i:
+            continue
+        PID = int(vol_case.stem.split("-")[-1])
+
+        vh, volume = nii_kits.read_lits(vol_case.stem.split("-")[-1], "vol", vol_case)
+        lab_case = vol_case.parent / vol_case.name.replace("volume", "segmentation")
+        _, labels = nii_kits.read_lits(vol_case.stem.split("-")[-1], "lab", lab_case)
+        assert volume.shape == labels.shape, "Vol{} vs Lab{}".format(volume.shape, labels.shape)
+
+        if mode == "train":
+            gpl = [np.where(sli == 2) for sli in labels]
+        else:
+            gpl = array_kits.guide_pixel_list(
+                labels, obj_val=2, guide="middle", tile_guide=True)
+            print("gpl length in tumors slices: ", [len(x[0]) for x in gpl if len(x[0]) > 0])
+
+        slice_hists = np.empty((volume.shape[0], bins * 2), dtype=np.float32)
+        for k in range(volume.shape[0]):
+            with np.errstate(invalid='ignore'):
+                val1, _ = np.histogram(volume[k][labels[k] >= 1], bins=bins, range=xrng, density=True)
+                val2, _ = np.histogram(volume[gpl[k][0], gpl[k][1], gpl[k][2]], bins=bins, range=xrng, density=True)
+            # Convert float64 to float32
+            slice_hists[k, :bins] = np.nan_to_num(val1.astype(np.float32))
+            slice_hists[k, bins:] = np.nan_to_num(val2.astype(np.float32))
+        np.save(dst_file % PID, slice_hists)
+        print("{:03d} {:47s}".format(i, dst_file % PID))
+
+
+def run_dump_hist_feature_v2(num=-1):
+    data_dir = Path(__file__).parent.parent.parent / "data/LiTS/Training_Batch"
+    features_dir = Path(__file__).parent.parent.parent / "data/LiTS/feat/hist"
+    dump_hist_feature_v2(data_dir, features_dir, mode="eval", bins=100,
+                         xrng=(GRAY_MIN + 50, GRAY_MAX - 50), number=num)
 
 
 def dump_glcm_feature_for_train(in_path, out_path,
@@ -668,21 +739,79 @@ def test_set_label():
         nib.save(out, str(out_dir / "test-inter-{}.nii.gz".format(pid)))
 
 
+def gen_infer_context(guide_file, test_meta_file,
+                      bins=100,
+                      xrng=(GRAY_MIN, GRAY_MAX)):
+    guide_file = Path(guide_file)
+    test_meta_file = Path(test_meta_file)
+    with guide_file.open() as f:
+        guide_list = json.load(f)
+    with test_meta_file.open() as f:
+        test_meta = json.load(f)
+        test_meta = {x["PID"]: x for x in test_meta}
+
+    hist_out_dir = Path(__file__).parent.parent.parent / "data/LiTS/feat/hist/infer"
+    hist_out_dir.mkdir(parents=True, exist_ok=True)
+    hist_dst_file = str(hist_out_dir / "%03d")
+    # glcm_out_dir = Path(__file__).parent.parent.parent / "data/LiTS/feat/glcm/infer"
+    # glcm_out_dir.mkdir(parents=True, exist_ok=True)
+    for k in guide_list.keys():
+        PID = int(k)
+        case = test_meta[PID]
+        guide = guide_list[k]
+        d = case["size"][0]
+
+        gpl = [[[], [], []] for _ in range(d)]
+        for kk, vv in guide.items():
+            sid = int(kk)
+            x = np.arange(512)
+            coords = np.stack(np.meshgrid(x, x, indexing="ij"), axis=-1)
+            for t in vv:
+                pi, pj = np.where(np.sum(((coords - t["center"]) / (np.array(t["stddev"]) / 0.7413)) ** 2, axis=-1) <= 1)
+                for m in range(t["z"][0], t["z"][1]):
+                    gpl[m][0].extend([sid] * len(pi))
+                    gpl[m][1].extend(pi)
+                    gpl[m][2].extend(pj)
+
+        _, volume = nii_kits.read_nii(ROOT_DIR / case["vol_case"])
+        _, labels = nii_kits.read_nii(ROOT_DIR / case["lab_case"])
+        slice_hists = np.empty((volume.shape[0], bins * 2), dtype=np.float32)
+        for n in range(volume.shape[0]):
+            with np.errstate(invalid='ignore'):
+                val1, _ = np.histogram(volume[n][labels[n] >= 1], bins=bins, range=xrng, density=True)
+                val2, _ = np.histogram(volume[gpl[n][0], gpl[n][1], gpl[n][2]], bins=bins, range=xrng, density=True)
+            # Convert float64 to float32
+            slice_hists[n, :bins] = np.nan_to_num(val1.astype(np.float32))
+            slice_hists[n, bins:] = np.nan_to_num(val2.astype(np.float32))
+        np.save(hist_dst_file % PID, slice_hists)
+        print("{:47s}".format(hist_dst_file % PID))
+
+
+def run_gen_infer_context():
+    guide_file = Path(__file__).parent / "prepare/interaction.json"
+    test_meta_file = Path(__file__).parent / "prepare/test_meta_update.json"
+    gen_infer_context(guide_file, test_meta_file, xrng=(GRAY_MIN + 50, GRAY_MAX - 50))
+
+
 if __name__ == "__main__":
     cmd = input("Please choice function:\n\t"
                 "a: exit()\n\t"
                 "b: run_nii_3d_to_png()\n\t"
                 "c: run_dump_hist_feature()\n\t"
+                "c2: run_dump_hist_feature_v2()\n\t"
                 "d: run_simulate_user_prior()\n\t"
                 "e: run_dump_glcm_feature_for_train()\n\t"
                 "f: run_dump_glcm_feature_for_eval()\n\t"
-                "g: test_set_label() [A/b/c/...] ")
+                "g: test_set_label()\n\t"
+                "h: run_gen_infer_context() [A/b/c/...] ")
     cmd = cmd.lower()
 
     if cmd == "b":
         run_nii_3d_to_png()
     elif cmd == "c":
         run_dump_hist_feature()
+    elif cmd == "c2":
+        run_dump_hist_feature_v2()
     elif cmd == "d":
         run_simulate_user_prior()
     elif cmd == "e":
@@ -701,5 +830,7 @@ if __name__ == "__main__":
             run_dump_glcm_feature_for_eval(False)
     elif cmd == "g":
         test_set_label()
+    elif cmd == "h":
+        run_gen_infer_context()
 
     print("Exit")

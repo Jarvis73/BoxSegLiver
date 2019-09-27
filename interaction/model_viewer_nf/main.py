@@ -38,7 +38,7 @@ class mainWin(QMainWindow, Ui_MainWindow):
         self.setupUi(self)
         self.setWindowTitle("Network Explorer")
         self.setWindowIcon(QIcon(str(viewer_root / "Assets/icon.png")))
-        self.settings = QSettings('Jarvis', 'NetworkExplorer')
+        self.settings = QSettings('Jarvis', 'NetworkExplorerNF')
         self.init_data()
         self.init_action()
         self.init_state()
@@ -62,7 +62,7 @@ class mainWin(QMainWindow, Ui_MainWindow):
         self.nextPageButton.clicked.connect(self.nextPageButton_clicked)
         self.firstPageButton.clicked.connect(self.firstPageButton_clicked)
         self.finalPageButton.clicked.connect(self.finalPageButton_clicked)
-        for i in range(8):
+        for i in range(3):
             for j in range(8):
                 label = eval("self.label_%d%d" % (i, j))
                 label.clicked.connect(self.labelButton_clicked)
@@ -82,8 +82,8 @@ class mainWin(QMainWindow, Ui_MainWindow):
 
     def display_page(self, page):
         self.page.setText(str(page))
-        first_idx_this_page = 64 * (page - 1)
-        for i in range(8):
+        first_idx_this_page = 24 * (page - 1)
+        for i in range(3):
             for j in range(8):
                 if first_idx_this_page + i * 8 + j >= self.total:
                     qImg = q2a.gray2qimage(np.zeros((self.thumb_height, self.thumb_width), np.float32), normalize=True)
@@ -102,7 +102,7 @@ class mainWin(QMainWindow, Ui_MainWindow):
                 qImg = q2a.gray2qimage(self.feature_maps[..., self.show_sid], normalize=True)
                 self.label.setPixmap(QPixmap.fromImage(qImg))
                 # Change apperance of current thumb for clarity
-                idx = self.sender().sid % 64
+                idx = self.sender().sid % 24
                 cur_label = eval("self.label_{}{}".format(idx // 8, idx % 8))
                 if cur_label != self.last_label:
                     cur_label.setStyleSheet("""
@@ -147,7 +147,7 @@ class mainWin(QMainWindow, Ui_MainWindow):
         self.height, self.width = self.feature_maps.shape[:-1]
         self.thumbs = self.feature_maps[::4, ::4]
         self.thumb_height, self.thumb_width, self.total = self.thumbs.shape
-        self.pageTotal.setText(str((self.total + 63) // 64))
+        self.pageTotal.setText(str((self.total + 23) // 24))
         self.display_page(1)        
 
     def lastPageButton_clicked(self):

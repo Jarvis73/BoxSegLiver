@@ -850,7 +850,7 @@ class EvaluateVolume(EvaluateBase):
                 model = self.params["model"](self.config)
                 self.params["model_instances"] = [model]
                 # build model
-                model(model_inputs, ModeKeys.EVAL, *model_args, **model_kwargs)
+                model(model_inputs, self.config.mode, *model_args, **model_kwargs)
                 saver = tf.train.Saver()
                 sess = tf.Session()
                 # load weights
@@ -860,7 +860,7 @@ class EvaluateVolume(EvaluateBase):
                 predictions = {"Prob": model.probability, "TumorPred": model.predictions["TumorPred"]}
 
                 if self.config.use_spatial:
-                    eil = input_fn(ModeKeys.EVAL, self.params)  # EvalImage3DLoader
+                    eil = input_fn(self.config.mode, self.params)  # EvalImage3DLoader
                     # TODO(zjw) remove these lines
                     from DataLoader.Liver import input_pipeline_g
                     assert isinstance(eil, input_pipeline_g.EvalImage3DLoader)
@@ -893,7 +893,7 @@ class EvaluateVolume(EvaluateBase):
                                 .astype(np.uint8)[..., None]
                         yield None, eil.labels
                 else:
-                    for features, labels in input_fn(ModeKeys.EVAL, self.params):
+                    for features, labels in input_fn(self.config.mode, self.params):
                         if features:
                             preds_eval = sess.run(predictions, {images: features.pop("images"),
                                                                 context: features.pop("context")})

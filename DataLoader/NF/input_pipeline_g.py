@@ -635,7 +635,7 @@ def get_dataset_for_eval_online(data_list,
         feature_length = sum([x for _, x in context_list])
         guide_shapes_dict["context"] = tf.TensorShape([feature_length])
         logging.info("Train: Use context guide")
-        kwargs["context_mode"] = "eval"
+        kwargs["context_mode"] = "eval2"
     if spatial_guide:
         guide_types_dict.update({"centers": tf.float32,
                                  "stddevs": tf.float32,
@@ -677,7 +677,7 @@ def parse_case_eval(case, im_channel, parse_label=True):
     left_half_channel = (im_channel - 1) // 2
     right_half_channel = im_channel - 1 - left_half_channel
     cd, ch, cw = volume.shape
-    volume = (np.clip(volume, GRAY_MIN, GRAY_MAX) - GRAY_MIN) / (GRAY_MAX - GRAY_MIN)
+    volume = np.clip(volume, 0, 900) / 900
     volume = volume.transpose((1, 2, 0)).astype(np.float32)  # (y, x, z) for convenient
 
     segmentation = None

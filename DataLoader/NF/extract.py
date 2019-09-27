@@ -215,6 +215,7 @@ def dump_hist_feature(in_path, out_path,
     -------
 
     """
+    print("\n\nDeprecated!!!!!!!!!!!!!!!!!! Use v2 !!!!!!!!!!!!!\n\n")
     src_path = Path(in_path)
     dst_path = Path(out_path) / mode
     dst_path.mkdir(parents=True, exist_ok=True)
@@ -254,6 +255,74 @@ def run_dump_hist_feature(num=-1):
                       xrng=(GRAY_MIN, GRAY_MAX), number=num)
     dump_hist_feature(data_dir, features_dir, mode="eval", bins=200,
                       xrng=(GRAY_MIN, GRAY_MAX), number=num)
+
+
+def dump_hist_feature_v2(in_path, out_path,
+                         mode="train",
+                         bins=200,
+                         xrng=(GRAY_MIN, GRAY_MAX),
+                         number=0):
+    """
+    Compute histogram features for context guide
+
+    Parameters
+    ----------
+    in_path: str
+        data directory
+    out_path: str
+        npy/npz directory
+    mode: str
+        for train or eval
+    bins: int
+        number of bins of histogram, default 200
+    xrng: tuple
+        (x_min, x_max), default (GRAY_MIN, GRAY_MAX)
+    number: int
+        for debug
+
+    Returns
+    -------
+
+    """
+    src_path = Path(in_path)
+    dst_path = Path(out_path) / mode
+    dst_path.mkdir(parents=True, exist_ok=True)
+    dst_file = str(dst_path / "%03d")
+
+    for i, vol_case in enumerate(sorted(src_path.glob("volume-*.nii.gz"),
+                                        key=lambda x: int(str(x).split(".")[0].split("-")[-1]))):
+        if number >= 0 and number != i:
+            continue
+        PID = int(vol_case.name.split(".")[0].split("-")[-1])
+
+        vh, volume = nii_kits.read_nii(vol_case)
+        lab_case = vol_case.parent / vol_case.name.replace("volume", "segmentation")
+        _, labels = nii_kits.read_nii(lab_case, np.uint8)
+        assert volume.shape == labels.shape, "Vol{} vs Lab{}".format(volume.shape, labels.shape)
+        labels = np.clip(labels, 0, 1)
+
+        if mode == "train":
+            gpl = [np.where(sli == 2) for sli in labels]
+        else:
+            gpl = array_kits.guide_pixel_list(
+                labels, obj_val=1, guide="middle", tile_guide=True)
+            print("gpl length in tumors slices: ", [len(x[0]) for x in gpl if len(x[0]) > 0])
+
+        slice_hists = np.empty((volume.shape[0], bins), dtype=np.float32)
+        for k in range(volume.shape[0]):
+            with np.errstate(invalid='ignore'):
+                val, _ = np.histogram(volume[gpl[k][0], gpl[k][1], gpl[k][2]], bins=bins, range=xrng, density=True)
+            # Convert float64 to float32
+            slice_hists[k] = np.nan_to_num(val.astype(np.float32))
+        np.save(dst_file % PID, slice_hists)
+        print("{:03d} {:47s}".format(i, dst_file % PID))
+
+
+def run_dump_hist_feature_v2(num=-1):
+    data_dir = Path(__file__).parent.parent.parent / "data/NF/nii_NF"
+    features_dir = Path(__file__).parent.parent.parent / "data/NF/feat/hist"
+    dump_hist_feature_v2(data_dir, features_dir, mode="eval2", bins=200,
+                         xrng=(GRAY_MIN, GRAY_MAX - 100), number=num)
 
 
 def dump_glcm_feature_for_train(in_path, out_path,
@@ -598,6 +667,7 @@ if __name__ == "__main__":
                 "a: exit()\n\t"
                 "b: run_nii_3d_to_png()\n\t"
                 "c: run_dump_hist_feature()\n\t"
+                "c2: run_dump_hist_feature_v2()\n\t"
                 "d: run_simulate_user_prior()\n\t"
                 "e: run_dump_glcm_feature_for_train()\n\t"
                 "f: run_dump_glcm_feature_for_eval()\n\t"
@@ -608,6 +678,8 @@ if __name__ == "__main__":
         run_nii_3d_to_png()
     elif cmd == "c":
         run_dump_hist_feature()
+    elif cmd == "c2":
+        run_dump_hist_feature_v2()
     elif cmd == "d":
         run_simulate_user_prior()
     elif cmd == "e":

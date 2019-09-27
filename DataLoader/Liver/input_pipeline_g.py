@@ -320,7 +320,21 @@ def input_fn(mode, params):
             else:
                 raise ValueError("Cannot set both use_context and use_spatial to false")
         elif mode == ModeKeys.PREDICT:
-            return get_dataset_for_infer(dataset, tuple(context_list), config=args)
+            if args.use_context and "hist" in features:
+                kwargs["hist_scale"] = args.hist_scale
+            if args.eval_no_sp or args.use_context:
+                return get_dataset_for_infer(dataset,
+                                             context_guide=args.use_context,
+                                             context_list=tuple(context_list),
+                                             config=args, **kwargs)
+            if args.use_spatial:
+                return EvalImage3DLoader(dataset,
+                                         context_guide=args.use_context,
+                                         context_list=tuple(context_list),
+                                         spatial_guide=args.use_spatial,
+                                         config=args,
+                                         **kwargs)
+
 
 #####################################
 #
@@ -1012,13 +1026,8 @@ def get_dataset_for_eval_image_sp(data_list, context_list, config=None):
                     guide = array_kits.create_gaussian_distribution_v2(
                         cshape[1:], np.array(real_meta[spid][ssid]["centers"]) - bbox[1::-1],
                         real_meta[spid][ssid]["stddevs"])
-                    # print(np.array(real_meta[spid][ssid]["centers"]) - bbox[1::-1], real_meta[spid][ssid]["centers"],
-                    #       real_meta[spid][ssid]["stddevs"])
-                    # print(config.eval_discount)
                     guide = guide * config.eval_discount / 2 + 0.5
-                    # print(guide.max(), guide.min(), eval_batch["images"][j, :, :, 1].max(), eval_batch["images"][j, :, :, 1].min())
                     guide = cv2.resize(guide, pshape, interpolation=cv2.INTER_LINEAR)
-                    # cv2.imwrite("a.png", (np.clip((eval_batch["images"][j, :, :, 1] + guide - 0.5) * 255, 0, 255)).astype(np.uint8))
                     eval_batch["sp_guide"][j] = guide[:, :, None]
                     has_guide = True
 
@@ -1049,7 +1058,10 @@ def get_dataset_for_eval_image_sp(data_list, context_list, config=None):
         yield None, (segmentation, vol_path, pads, bbox, True)
 
 
-def get_dataset_for_infer(data_list, context_list, config=None):
+def get_dataset_for_infer(data_list,
+                          context_guide=None,
+                          context_list=None,
+                          config=None, **kwargs):
     """ For spatial guide without spatial guide in evaluation
     """
     align = 16
@@ -1059,16 +1071,19 @@ def get_dataset_for_infer(data_list, context_list, config=None):
     batch_size = config.batch_size
     c = config.im_channel
     pshape = config.im_height, config.im_width
-    feat_length = sum([x for _, x in context_list])
     resize = True
-    if config.im_height <= 0 or config.im_width <= 0:
-        logging.info("Disable image resize for evaluating")
-        resize = False
+    logging.info("{} {} cases ...".format(config.mode.capitalize(), len(data_list)))
+    # if config.im_height <= 0 or config.im_width <= 0:
+    #     logging.info("Disable image resize for evaluating")
+    #     resize = False
 
     real_meta = None
     if config.real_sp and Path(config.real_sp).exists():
         with Path(config.real_sp).open() as f:
             real_meta = json.load(f)
+
+    context_val = None
+    gd_pattern = str(PROJ_ROOT / "data/LiTS/feat/%s/infer/%03d.npy")
 
     for ci, case in enumerate(data_list[config.eval_skip_num:]):
         pid, vol_path, _, bbox, oshape, cshape, lhc, rhc, volume, segmentation = \
@@ -1078,10 +1093,22 @@ def get_dataset_for_infer(data_list, context_list, config=None):
             pshape = cshape[1:]
         spid = str(pid)
 
+        if context_guide:
+            # Load evaluation context
+            features = []
+            feat_length = 0
+            for cls, f_len in context_list:
+                feat = np.load(gd_pattern % (cls, pid), allow_pickle=True)
+                assert isinstance(feat, np.ndarray), "`feat` must be a numpy.ndarray"
+                assert feat.shape[1] == f_len, "feature length mismatch %d vs %d" % (feat.shape[1], f_len)
+                features.append(eval("feature_ops.%s_preprocess" % cls)(feat, **kwargs))
+                feat_length += f_len
+            context_val = np.concatenate(features, axis=1).astype(np.float32)
+
         eval_batch = {"images": np.empty((batch_size, *pshape, c), dtype=np.float32),
                       "names": pid,
                       "sp_guide": np.ones((batch_size, *pshape, 1), dtype=np.float32) * 0.5,
-                      "context": np.zeros((batch_size, feat_length), dtype=np.float32),
+                      "context": None,
                       "mirror": 0,
                       "direction": "Forward"}
 
@@ -1105,7 +1132,8 @@ def get_dataset_for_infer(data_list, context_list, config=None):
             "Wrong padding: volume length: {}, lhc: {}, rhc: {}, batch_size: {}, num_of_batches: {}".format(
                 volume.shape[-1], lhc, rhc, batch_size, num_of_batches)
         for idx in range(lhc, volume.shape[-1] - rhc, batch_size):
-            ssid = str(bbox[2] + idx - lhc)
+            sid = bbox[2] + idx - lhc
+            ssid = str(sid)
             has_guide = False
             for j in range(batch_size):
                 eval_batch["images"][j] = volume[:, :, idx + j - lhc:idx + j + rhc + 1]
@@ -1117,6 +1145,8 @@ def get_dataset_for_infer(data_list, context_list, config=None):
                     guide = cv2.resize(guide, pshape, interpolation=cv2.INTER_LINEAR)
                     eval_batch["sp_guide"][j] = guide[:, :, None]
                     has_guide = True
+            if context_guide:
+                eval_batch["context"] = context_val[sid:sid + batch_size]
 
             yield copy.copy(eval_batch), None
 
@@ -1142,7 +1172,7 @@ def get_dataset_for_infer(data_list, context_list, config=None):
                         tmp["sp_guide"] = np.flip(np.flip(tmp["sp_guide"], axis=2), axis=1)
                     tmp["mirror"] = 3
                     yield tmp, None
-        yield None, (segmentation, vol_path, pads, bbox, resize)
+        yield None, (segmentation, vol_path, pads, bbox)
 
 
 class EvalImage3DLoader(object):
@@ -1156,7 +1186,8 @@ class EvalImage3DLoader(object):
                  **kwargs):
         self.cfg = config
         self.data_list = data_list[self.cfg.eval_skip_num:]
-        self.num_cases = len(self.data_list)
+        self.num_cases = self.cfg.eval_num if self.cfg.eval_num > 0 else len(self.data_list)
+        logging.info("{} {} cases ...".format(self.cfg.mode.capitalize(), self.num_cases))
         self.cur_case_idx = -1
         self.use_context = context_guide
         self.context_list = context_list
@@ -1181,9 +1212,16 @@ class EvalImage3DLoader(object):
         self.filter_thresh = 0.15 + self.sp_guide_bg
         self.disc = ndi.generate_binary_structure(2, connectivity=1)
         self.gd_pattern = str(PROJ_ROOT / "data/LiTS/feat/%s/eval/%03d.npy")
-        prior_file = Path(__file__).parent / "prepare" / "prior.json"
+
+        if not self.cfg.real_sp:
+            if self.cfg.mode == ModeKeys.PREDICT:
+                raise ValueError("`--real_sp` should be set when running inference.")
+            prior_file = Path(__file__).parent / "prepare" / "prior.json"
+        else:
+            prior_file = Path(self.cfg.real_sp)
         with prior_file.open() as f:
             self.user_info = json.load(f)
+        logging.info("Load prior file " + str(prior_file))
 
         self.debug = False
 
@@ -1236,7 +1274,8 @@ class EvalImage3DLoader(object):
         for i, slicer in zip(range(n_objs), slicers):
             res_obj = labeled_objs == i + 1
             res_obj_slicer = res_obj[slicer]
-            # 1. Filter wrong tumors(no corresponding guide)
+            # 1. For test: Filter wrong tumors(no corresponding guide)
+            #    For infer: Filter not guided tumors(maybe some automatic predicted tumors)
             mask_guide_by_res = res_obj_slicer * self._last_guide[slicer]
             if np.max(mask_guide_by_res) < self.filter_thresh:
                 self.print(self.sid, "Remove",
@@ -1293,7 +1332,6 @@ class EvalImage3DLoader(object):
         self.cur_case_idx += 1
         if self.cur_case_idx >= self.num_cases:
             return False
-
         # Shape
         #   self.bbox: [x1, y1, z1, x2 - 1, y2 - 1, z2 - 1]
         #   self.oshape: [d, h, w]
@@ -1305,7 +1343,9 @@ class EvalImage3DLoader(object):
         self.pid, self.vol_path, _, self.bbox, self.oshape, self.cshape, \
             self.lhc, self.rhc, self.volume, self.segmentation = \
             parse_case_eval(self.data_list[self.cur_case_idx],
-                            align=16, padding=25, padding_z=0, im_channel=self.cfg.im_channel)
+                            align=16, padding=25, padding_z=0, im_channel=self.cfg.im_channel,
+                            parse_label=self.cfg.mode != ModeKeys.PREDICT,
+                            test_data=self.cfg.mode == ModeKeys.PREDICT)
         self.volume = cv2.resize(self.volume, self.pshape[:2], interpolation=cv2.INTER_LINEAR)[None]
         self.spid = str(self.pid)
         feat_length = 0

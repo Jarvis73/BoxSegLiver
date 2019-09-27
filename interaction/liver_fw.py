@@ -22,11 +22,13 @@ ETSConfig.toolkit = "qt4"
 from matplotlib.figure import Figure
 from traits.api import (
     HasTraits, Instance, Button, Directory, Str, List, Int, Bool, Float,
-    Color, File, Any, Enum
+    Color, File, Any, Enum, Event, on_trait_change
 )
+
 from traitsui.api import (
     View, Item, VSplit, HSplit, VGroup, HGroup, TableEditor,
-    Handler
+    Handler, OKCancelButtons, Label, FileEditor, MenuBar, Menu, Action,
+    CloseAction, Separator
 )
 from traitsui.table_column import ObjectColumn
 import numpy as np
@@ -140,6 +142,14 @@ class MedicalItem(HasTraits):
     slices = Str
 
 
+class GuideItem(HasTraits):
+    PID = Str
+    SID = Str
+    z = Str
+    center = Str
+    stddev = Str
+
+
 class ViewHandler(Handler):
 
     def setattr(self, info, object_, name, value):
@@ -156,12 +166,31 @@ def key_press_event_wrapper(cls):
     return key_press_event_inner
 
 
+class CheckOverwriteWindow(Handler):
+    finished = Bool
+    notify = Event
+
+    def init_info(self, info):
+        self.finished = False
+
+    def closed(self, info, is_ok):
+        self.finished = is_ok
+        self.notify = True
+
+    view = View(
+        Label('Really overwrite?'),
+        buttons=OKCancelButtons
+    )
+
+
 class Framework(HasTraits):
     root_path = Directory(entries=10)
     data_list = List(MedicalItem)
+    guide_list = List(GuideItem)
     cur_case = Any
+    cur_guide = Any
     splitter = Str
-    space = Str(" " * 2)
+    space = Str(" " * 30)
     contour = Bool(False)
     label = Enum(0, 1, 2)
     alpha = Float(0.3)
@@ -172,76 +201,18 @@ class Framework(HasTraits):
     cur_ind = Int
     total_ind = Int
 
+    _check_overwrite_window = Instance(CheckOverwriteWindow, ())
     figure1 = Instance(Figure, ())
     figure2 = Instance(Figure, ())
     showButton = Button("Show")
     lastButton = Button("Last")
     nextButton = Button("Next")
-    saveButton = Button("SaveInteraction")
-    view = View(
-        HGroup(
-            VGroup(
-                VGroup(
-                    Item("root_path", width=250),
-                ),
-                Item("data_list",
-                     editor=TableEditor(
-                         columns=[ObjectColumn(name="name", width=0.7),
-                                  ObjectColumn(name="slices", width=0.3), ],
-                         auto_size=True,
-                         orientation="vertical",
-                         row_factory=MedicalItem,
-                         editable=False,
-                         selected="cur_case"
-                     ),
-                     show_label=False
-                     ),
-                show_border=True
-            ),
-            VSplit(
-                HSplit(
-                    VGroup(
-                        HGroup(
-                            Item("title1", show_label=False, style="readonly"),
-                            Item("space", show_label=False, style="readonly"),
-                            Item("color1", label="Color")
-                        ),
-                        Item("figure1", editor=MPLFigureEditor(toolbar=True), show_label=False, height=768)
-                    ),
-                    VGroup(
-                        HGroup(
-                            Item("title2", show_label=False, style="readonly"),
-                            Item("space", show_label=False, style="readonly"),
-                        ),
-                        Item("figure2", editor=MPLFigureEditor(toolbar=True), show_label=False)
-                    )
-                ),
-                HGroup(
-                    Item("space", show_label=False, style="readonly"),
-                    Item("showButton", show_label=False),
-                    Item("label", style="custom"),
-                    Item("contour"),
-                    Item("alpha"),
-                    Item("cur_ind", label="Index"),
-                    Item("splitter", label="/", style="readonly"),
-                    Item("total_ind", show_label=False, style="readonly"),
-                    Item("space", show_label=False, style="readonly"),
-                ),
-                HGroup(
-                    Item("space", show_label=False, style="readonly"),
-                    Item("lastButton", show_label=False),
-                    Item("nextButton", show_label=False),
-                    Item("saveButton", show_label=False),
-                    Item("space", show_label=False, style="readonly"),
-                )
-            ),
-        ),
-        width=1036,
-        height=868,
-        title="Image Viewer",
-        resizable=True,
-        handler=ViewHandler()
-    )
+    saveButton = Button("Save")
+    loadButton = Button("Load")
+    save_guide_path = File
+    load_guide_path = File
+    load_guide_path_bk = None
+    guide_ind = Int
 
     def __init__(self, adapter, base_size, **kw):
         super(Framework, self).__init__(**kw)
@@ -257,10 +228,111 @@ class Framework(HasTraits):
         self.patches = collections.defaultdict(list)
         self.connected = False
 
+    def default_traits_view(self):
+        return View(
+            HSplit(
+                VGroup(
+                    VGroup(
+                        Item("root_path", width=250),
+                    ),
+                    Item("data_list",
+                         editor=TableEditor(
+                             columns=[ObjectColumn(name="name", width=0.7),
+                                      ObjectColumn(name="slices", width=0.3), ],
+                             auto_size=True,
+                             orientation="vertical",
+                             row_factory=MedicalItem,
+                             editable=False,
+                             selected="cur_case"
+                         ),
+                         show_label=False
+                         ),
+                    show_border=True
+                ),
+                VGroup(
+                    HSplit(
+                        VGroup(
+                            HGroup(
+                                Item("title1", show_label=False, style="readonly"),
+                                Item("space", show_label=False, style="readonly"),
+                                Item("color1", label="Color")
+                            ),
+                            Item("figure1", editor=MPLFigureEditor(toolbar=True), show_label=False, height=768, width=690)
+                        ),
+                        VGroup(
+                            HGroup(
+                                Item("title2", show_label=False, style="readonly"),
+                                Item("space", show_label=False, style="readonly"),
+                            ),
+                            Item("figure2", editor=MPLFigureEditor(toolbar=True), show_label=False, width=690)
+                        )
+                    ),
+                    HGroup(
+                        Item("showButton", show_label=False),
+                        Item("label", style="custom"),
+                        Item("contour"),
+                        Item("alpha"),
+                        Item("cur_ind", label="Index"),
+                        Item("splitter", label="/", style="readonly"),
+                        Item("total_ind", show_label=False, style="readonly"),
+                        Item("space", show_label=False, style="readonly"),
+                    ),
+                    HGroup(
+                        Item("lastButton", show_label=False),
+                        Item("nextButton", show_label=False),
+                        Item("space", show_label=False, style="readonly"),
+                    ),
+                    show_border=True
+                ),
+                VGroup(
+                    Item("guide_list",
+                         editor=TableEditor(
+                             columns=[ObjectColumn(name="PID", width=0.1),
+                                      ObjectColumn(name="SID", width=0.1),
+                                      ObjectColumn(name="z", width=0.2),
+                                      ObjectColumn(name="center", width=0.3),
+                                      ObjectColumn(name="stddev", width=0.3)],
+                             auto_size=True,
+                             orientation="vertical",
+                             row_factory=GuideItem,
+                             editable=False,
+                             selected="cur_guide",
+                             selected_indices="guide_ind",
+                         ),
+                         show_label=False,
+                         ),
+                    VGroup(
+                        HGroup(
+                            Item('load_guide_path', editor=FileEditor(dialog_style='open'), width=200),
+                            Item("loadButton", show_label=False)
+                        ),
+                        HGroup(
+                            Item('save_guide_path', editor=FileEditor(dialog_style='save'), width=200),
+                            Item("saveButton", show_label=False)
+                        )
+                    ),
+                    show_border=True
+                )
+            ),
+            width=2536,
+            height=868,
+            title="Image Viewer",
+            resizable=True,
+            handler=ViewHandler(),
+            menubar=MenuBar(
+                Menu(Action(name="Save z1", on_perform=self._save_z1, accelerator="Q"),  # see Controller for
+                     Action(name="Save z2", on_perform=self._save_z2, accelerator="W"),  # these callbacks
+                     Separator(),
+                     CloseAction,
+                     name="&File",
+                     ),
+            ),
+        )
+
     def connect(self):
         self.wrapper = key_press_event_wrapper(self)
         self.wrapper.ES = EllipseSelector(self.figure1.axes[0], self.on_select, drawtype='line', interactive=True,
-                                          button=1,
+                                          button=3,
                                           lineprops=dict(color='black', linestyle='-', linewidth=2, alpha=0.5))
         # Figure events
         self.figure1.canvas.mpl_connect("button_press_event", self.button_press_event)
@@ -279,7 +351,9 @@ class Framework(HasTraits):
         elli = Ellipse(center, *axes_length, alpha=0.5)
         self.patches[self.cur_ind].append(elli)
         print(x1, y1, x2, y2)
-        self.adap.update_interaction(self.cur_ind, center, axes_length)
+        it = self.adap.update_interaction(self.cur_ind, center, axes_length)
+        self.guide_list.append(GuideItem(**it))
+        self.cur_guide = self.guide_list[-1]
         # self.patch_show()
         self.refresh(ignore_fig1=True)
 
@@ -342,7 +416,24 @@ class Framework(HasTraits):
             if len(self.patches[self.cur_ind]) > 0:
                 self.patches[self.cur_ind].pop()
                 self.adap.pop_interaction(self.cur_ind)
+                self.guide_list.pop()
                 self.refresh(ignore_fig1=True)
+
+    def _save_z1(self):
+        if self.cur_guide:
+            i = sum([1 for x in self.guide_list[:self.guide_ind + 1]
+                     if x.PID == self.cur_guide.PID and x.SID == self.cur_guide.SID])
+            guide = self.adap.interaction[self.cur_guide.PID][self.cur_guide.SID][i - 1]
+            guide["z"][0] = self.cur_ind
+            self.cur_guide.z = "{}, {}".format(*guide["z"])
+
+    def _save_z2(self):
+        if self.cur_guide:
+            i = sum([1 for x in self.guide_list[:self.guide_ind + 1]
+                     if x.PID == self.cur_guide.PID and x.SID == self.cur_guide.SID])
+            guide = self.adap.interaction[self.cur_guide.PID][self.cur_guide.SID][i - 1]
+            guide["z"][1] = self.cur_ind + 1
+            self.cur_guide.z = "{}, {}".format(*guide["z"])
 
     def reset_index(self):
         self.cur_ind = self.adap.get_min_idx(self.gesture)
@@ -388,10 +479,13 @@ class Framework(HasTraits):
         else:
             return []
 
+    def _guide_list_default(self):
+        return []
+
     def _root_path_changed(self):
         if Path(self.root_path).exists():
             self.adap.update_root_path(self.root_path)
-            self.pred_list = [MedicalItem(name=x, slices=y)
+            self.data_list = [MedicalItem(name=x, slices=y)
                               for x, y in self.adap.get_file_list()]
 
     def _cur_ind_changed(self):
@@ -446,5 +540,32 @@ class Framework(HasTraits):
             self.refresh()
             self.cur_show = self.cur_case
 
+    def _loadButton_fired(self):
+        if self.load_guide_path:
+            self.guide_list = [GuideItem(PID=a, SID=b, z=c, center=d, stddev=e) for a, b, c, d, e in
+                               self.adap.load_interaction(self.load_guide_path)]
+            print("Finish", self.load_guide_path)
+
     def _saveButton_fired(self):
-        self.adap.save_interaction()
+        if self.save_guide_path:
+            self.adap.save_interaction(self.save_guide_path)
+            print("Finish", self.save_guide_path)
+
+    def _load_guide_path_changed(self):
+        if self.adap.interaction is not None and self.load_guide_path != self.load_guide_path_bk:
+            self._check_overwrite_window.edit_traits()
+
+    @on_trait_change('_check_overwrite_window:notify')
+    def load_guide(self):
+        if self._check_overwrite_window.finished:
+            print("Finish", self.load_guide_path)
+            self.load_guide_path_bk = self.load_guide_path
+            self.guide_list = [GuideItem(PID=a, SID=b, z=c, center=d, stddev=e) for a, b, c, d, e in
+                               self.adap.load_interaction(self.load_guide_path)]
+        else:
+            self.load_guide_path = self.load_guide_path_bk
+            print("No", self.load_guide_path)
+
+    def _save_guide_path_changed(self):
+        self.adap.save_interaction(self.save_guide_path)
+

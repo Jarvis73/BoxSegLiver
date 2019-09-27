@@ -8,12 +8,13 @@
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
+
 class ClickQLabel(QtWidgets.QLabel):
-    clicked = QtCore.pyqtSignal()
+    clicked = QtCore.pyqtSignal(QtGui.QMouseEvent)
     sid = -1
 
     def mouseReleaseEvent(self, event):
-        self.clicked.emit()
+        self.clicked.emit(event)
 
 
 class MoveQLabel(QtWidgets.QLabel):

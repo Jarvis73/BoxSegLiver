@@ -17,6 +17,7 @@
 import tensorflow as tf
 import tensorflow_estimator as tfes
 import tensorflow.contrib.slim as slim
+from tensorflow.contrib.layers.python.layers import utils as utils_lib
 
 import loss_metrics as losses
 from NetworksV2 import base
@@ -127,14 +128,15 @@ def modulated_conv_block(self, net, repeat, channels, dilation=1, scope_id=0, de
                          dropout=None,
                          is_training=True,
                          use_se=False,
-                         context_feature_length=None):
+                         context_feature_length=None,
+                         outputs_collections=None):
     spatial_mod_id = 0
     if use_se and context_feature_length is None:
         raise ValueError("`context_feature_length` must be specified when `use_se` is True")
 
     with tf.variable_scope("down_conv{}".format(scope_id)):
         for i in range(repeat):
-            with tf.variable_scope("mod_conv{}".format(i + 1)):
+            with tf.variable_scope("mod_conv{}".format(i + 1)) as sc:
                 if density_modulation or spatial_modulation or self.args.without_norm:
                     net = slim.conv2d(net, channels, 3, rate=dilation, activation_fn=None)
                 else:
@@ -171,6 +173,7 @@ def modulated_conv_block(self, net, repeat, channels, dilation=1, scope_id=0, de
                 if after_affine:
                     net = slim_nets.affine(net)
                 net = tf.nn.relu(net)
+                utils_lib.collect_named_outputs(outputs_collections, sc.name, net)
         return net, density_mod_id
 
 
@@ -198,7 +201,8 @@ class GUNet(base.BaseNet):
         with slim.arg_scope([slim.conv2d, slim.conv2d_transpose],
                             weights_regularizer=default_w_regu,
                             weights_initializer=default_w_init,
-                            biases_regularizer=default_b_regu):
+                            biases_regularizer=default_b_regu,
+                            outputs_collections=["EPts"]):
             with slim.arg_scope([slim.avg_pool2d, slim.max_pool2d],
                                 padding="SAME") as scope:
                 if self.args.without_norm:
@@ -272,7 +276,8 @@ class GUNet(base.BaseNet):
                         })
                     with slim.arg_scope([slim.conv2d],
                                         normalizer_fn=self._get_normalization()[0],
-                                        normalizer_params=encoder_norm_params) as scope:
+                                        normalizer_params=encoder_norm_params,
+                                        outputs_collections=None) as scope:
                         return scope
 
             # Encoder
@@ -291,7 +296,8 @@ class GUNet(base.BaseNet):
                         dropout=self.dropout,
                         is_training=self.is_training,
                         use_se=self.use_se,
-                        context_feature_length=context_fc_channels[-1])
+                        context_feature_length=context_fc_channels[-1],
+                        outputs_collections=["EPts"])
                     nets[-1] = net
                     if i < num_down_samples:
                         net = slim.max_pool2d(nets[-1], 2, scope="pool%d" % (i + 1))
@@ -406,3 +412,63 @@ class GUNet(base.BaseNet):
             for key, value in self._image_summaries.items():
                 tf.summary.image("{}/{}".format(self.args.tag, key), value * 255,
                                  max_outputs=1, collections=[self.DEFAULT])
+
+
+if __name__ == "__main__":
+    from tensorflow.contrib.layers.python.layers import utils
+    from pprint import pprint
+    from pathlib import Path
+
+    class FOO(object):
+        im_height = 256
+        im_width = 256
+        im_channel = 3
+        batch_size = 1
+        num_gpus = 1
+        classes = ["Liver", "Tumor"]
+        without_norm = False
+        weight_decay_rate = 0.
+        weight_init = "xavier"
+        normalizer = "instance_norm"
+        tag = "013_gnet_sp_rand"
+        use_spatial = True
+        use_context = False
+        side_dropout = True
+        dropout = 0
+        use_se = False
+    args = FOO()
+
+    x = tf.placeholder(tf.float32, (1, 256, 256, 3), "Input")
+    # context = tf.placeholder(tf.float32, (1, 200), "Context")
+    spatial = tf.placeholder(tf.float32, (1, 256, 256, 1), "Spatial")
+    model = GUNet(args)
+    model({"images": x, "sp_guide": spatial}, mode="infer",
+          init_channels=64,
+          num_down_samples=4,
+          mod_layers=[1, 2, 3, 4],
+          context_fc_channels=[256, 256],
+          context_model="fc",
+          context_conv_init_channels=2,
+          norm_with_center=False,
+          norm_with_scale=True,
+          ret_prob=False,
+          ret_pred=True)
+    outputs = utils.convert_collection_to_dict("EPts")
+    rep_from = ["GUNet/", "Encode/", "Decode/", "Conv/", "/", "AdjustChannels"]
+    rep_to = ["", "", "", "", "_", "out"]
+
+    def apply_trans(x):
+        for ft in zip(rep_from, rep_to):
+            x = x.replace(*ft)
+        return x
+
+    outputs = {apply_trans(k): v for k, v in outputs.items()}
+    outputs.update({"y": model.probability})
+    pprint(outputs)
+
+    saver = tf.train.Saver()
+    with tf.Session() as sess:
+        ckpt = tf.train.latest_checkpoint(Path(__file__).parent.parent / "model_dir" / args.tag,
+                                          "checkpoint_best_600000")
+        saver.restore(sess, ckpt)
+        tf.saved_model.simple_save(sess, "export_dir/{}".format(args.tag), {"x": x, "sp_guide": spatial}, outputs)

@@ -20,6 +20,7 @@ import numpy as np
 from pathlib import Path
 import scipy.ndimage as ndi
 import skimage.measure as measure
+import nibabel as nib
 
 from DataLoader.Liver import nii_kits
 from interaction.liver_fw import Framework
@@ -27,7 +28,7 @@ from utils import array_kits
 
 
 class SegViewerAdapter(object):
-    def __init__(self, data_dir, lab_dir, json_file,
+    def __init__(self, data_dir, lab_dir,
                  data_pat="test-volume-{}.nii",
                  lab_pat="test-segmentation-{}.nii",
                  meta_file=None):
@@ -38,16 +39,7 @@ class SegViewerAdapter(object):
         self.data_pat = data_pat
         self.lab_pat = lab_pat
         self.meta_file = Path(meta_file)
-        self.json_file = Path(json_file)
-
-        if self.json_file.exists():
-            try:
-                with self.json_file.open() as f:
-                    self.interaction = json.load(f)
-            except json.decoder.JSONDecodeError:
-                self.interaction = collections.defaultdict(dict)
-        else:
-            self.interaction = collections.defaultdict(dict)
+        self.interaction = {}
 
         self.empty = None
         self.ges = None
@@ -73,9 +65,13 @@ class SegViewerAdapter(object):
         self.pid = int(case_path.split(".")[0].split("-")[-1])
         vol_file = self.data_dir / self.data_pat.format(self.pid)
         lab_file = self.lab_dir / self.lab_pat.format(self.pid)
-
         self.header, self.vol = nii_kits.read_nii(vol_file, np.float16)
         self.lab_bk = nii_kits.read_nii(lab_file, np.uint8)[1]
+        # vv = nib.load(str(vol_file))
+        # self.header = vv.header
+        # self.vol = vv.get_fdata().astype(np.float16).transpose(2, 1, 0)
+        # ll = nib.load(str(lab_file))
+        # self.lab_bk = ll.get_fdata().astype(np.uint8).transpose(2, 1, 0)
         self.shape = self.vol.shape
         if self.meta_data is not None:
             self.bb = self.meta_data[self.pid]["bbox"]
@@ -170,11 +166,11 @@ class SegViewerAdapter(object):
         spid = str(self.pid)
         if spid not in self.interaction:
             self.interaction[spid] = {}
-        if sind in self.interaction[spid] and len(self.interaction[spid][sind]["centers"]) > 0:
+        if sind in self.interaction[spid] and len(self.interaction[spid][sind]) > 0:
             ind = (ind - self.get_min_idx(ges)) % self.vol.shape[ges - 1]
             img = self.resized_image_single(self.vol, ges, ind)
-            center = np.array(self.interaction[spid][sind]["centers"])
-            stddev = np.array(self.interaction[spid][sind]["stddevs"])
+            center = np.array([x["center"] for x in self.interaction[spid][sind]])
+            stddev = np.array([x["stddev"] for x in self.interaction[spid][sind]])
             img = array_kits.create_gaussian_distribution_v2(img.shape, center, stddev)
             return np.repeat(img[:, :, np.newaxis], 3, axis=2)
         else:
@@ -224,30 +220,59 @@ class SegViewerAdapter(object):
         center = center[::-1]
         stddev = stddev[::-1]
         if sind in self.interaction[spid]:
-            self.interaction[spid][sind]["centers"].append(list(center))
-            self.interaction[spid][sind]["stddevs"].append(stddev)
+            self.interaction[spid][sind].append({"center": list(center),
+                                                 "stddev": stddev,
+                                                 "z": [ind, ind + 1]})
         else:
-            self.interaction[spid][sind] = {"centers": [list(center)], "stddevs": [stddev]}
+            self.interaction[spid][sind] = [{"center": list(center), "stddev": stddev, "z": [ind, ind + 1]}]
+        return {
+            "PID": spid,
+            "SID": sind,
+            "z": "{}, {}".format(ind, ind + 1),
+            "center": "{}, {}".format(*center),
+            "stddev": "{}, {}".format(*stddev)
+        }
 
     def pop_interaction(self, ind):
         sind = str(ind)
         spid = str(self.pid)
         if sind in self.interaction[spid]:
-            self.interaction[spid][sind]["centers"].pop()
-            self.interaction[spid][sind]["stddevs"].pop()
+            self.interaction[spid][sind].pop()
 
-    def save_interaction(self):
-        with self.json_file.open("w") as f:
-            json.dump(self.interaction, f)
+    def save_interaction(self, save_path):
+        res = {}
+        for k, v in self.interaction.items():
+            if v:
+                case = {}
+                for kk, vv in v.items():
+                    if vv:
+                        case[kk] = vv
+                res[k] = case
+        with Path(save_path).open("w") as f:
+            json.dump(res, f)
+
+    def load_interaction(self, load_path):
+        with Path(load_path).open() as f:
+            self.interaction = json.load(f)
+        guide_list = []
+        for pid, v in self.interaction.items():
+            for sid, vv in v.items():
+                for x in vv:
+                    guide_list.append((pid, sid,
+                                       "{}, {}".format(*x["z"]),
+                                       "{}, {}".format(*x["center"]),
+                                       "{}, {}".format(*x["stddev"])))
+        return guide_list
 
 
 def main():
     adapter = SegViewerAdapter(
         "E:/DataSet/LiTS/Training_Batch",
-        # r"D:\0WorkSpace\MedicalImageSegmentation\data\LiTS\Test_Batch",
+        # "E:/DataSet/LiTS/Test_Batch",
         "E:/DataSet/LiTS/Training_Batch",
         # Path(__file__).parent.parent / "model_dir/merge_001_unet_noise_0_05",
-        Path(__file__).parent.parent / "DataLoader/liver/prepare/interaction.json",
+        # "E:/DataSet/LiTS/merge_013_gnet_sp_rand",
+        # meta_file=Path(__file__).parent.parent / "DataLoader/Liver/prepare/test_meta_update.json",
         meta_file=Path(__file__).parent.parent / "DataLoader/Liver/prepare/meta.json",
         # data_pat="test-volume-{}.nii",
         # lab_pat="test-segmentation-{}.nii",
@@ -255,7 +280,7 @@ def main():
         lab_pat="segmentation-{}.nii",
     )
 
-    demo = Framework(adapter)
+    demo = Framework(adapter, (512, 512))
     demo.configure_traits()
 
 

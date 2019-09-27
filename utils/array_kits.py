@@ -757,6 +757,48 @@ def get_guide_image(mask, obj_val=None, guide="first", tile_guide=False):
     return guide_image
 
 
+def guide_pixel_list(mask, obj_val=None, guide="first", tile_guide=False):
+    if len(mask.shape) != 3:
+        raise ValueError("`mask` must be 3D array")
+
+    pixel_list = [[[], [], []] for _ in range(len(mask))]
+
+    if not np.any(mask):
+        # return a blank gd image
+        return pixel_list
+
+    if obj_val is not None:
+        mask = merge_labels(mask, [0, obj_val])
+    disc = ndi.generate_binary_structure(3, connectivity=2)
+    labeled_image, n_objs = ndi.label(mask, structure=disc)
+    slicers = ndi.find_objects(labeled_image)
+
+    def gen_obj_image():
+        for i, slicer in enumerate(slicers):
+            yield i, slices_to_bbox(slicer)
+
+    for i, bb in gen_obj_image():
+        if guide == "first":
+            idx = bb[0]
+        else:  # partial_slice == "middle"
+            # The case of labels == 0 is excluded, and here len(indices) >= 1 is satisfied.
+            idx = (bb[3] - bb[0] - 1) // 2 + bb[0]
+        pi, pj = np.where(labeled_image[idx] == i + 1)
+        print(pi.shape, " ", end="")
+        if tile_guide:
+            for j in range(bb[0], bb[3]):
+                pixel_list[j][0].extend([idx] * len(pi))
+                pixel_list[j][1].extend(pi)
+                pixel_list[j][2].extend(pj)
+        else:
+            pixel_list[idx][0].extend([idx] * len(pi))
+            pixel_list[idx][1].extend(pi)
+            pixel_list[idx][2].extend(pj)
+    print()
+
+    return pixel_list
+
+
 def aug_window_width_level(image, ww, wl, rand=False, norm_scale=1.0, normalize=False):
 
     def randu():
@@ -1171,18 +1213,28 @@ def glcm_features(image, distances, angles, levels=256,
 
 
 if __name__ == "__main__":
-    a = np.zeros((512, 512))
-    x = y = np.arange(512)
-    xm, ym = np.meshgrid(x, y, indexing="ij")
-    res = []
-    for i in range(5, 200, 5):
-        a[np.sqrt((xm - 255.5) ** 2 + (ym - 255.5) ** 2) < i] = 1
-        res.append(compute_robust_moments(a)[1][0])
-
-    xx = np.arange(5, 200, 5) ** 0.5
-    p = np.polyfit(xx, res, 1)
-    print(p)
     import matplotlib.pyplot as plt
-    plt.plot(xx, res)
-    plt.plot([5, 15], [5 * p[0] + p[1], 15 * p[0] + p[1]])
+    a = np.zeros((6, 8, 8))
+    a[:3, 1, 1] = 1
+    a[1, :3, :3] = 1
+    a[2:5, 6, 6] = 1
+    a[3, 5:, 5:] = 1
+    gpl = guide_pixel_list(a, 1, "middle", tile_guide=True)
+    for x in gpl:
+        print(x[0])
+        print(x[1])
+        print(x[2], "\n")
+
+    plt.subplot(231)
+    plt.imshow(a[0], cmap="gray")
+    plt.subplot(232)
+    plt.imshow(a[1], cmap="gray")
+    plt.subplot(233)
+    plt.imshow(a[2], cmap="gray")
+    plt.subplot(234)
+    plt.imshow(a[3], cmap="gray")
+    plt.subplot(235)
+    plt.imshow(a[4], cmap="gray")
+    plt.subplot(236)
+    plt.imshow(a[5], cmap="gray")
     plt.show()
