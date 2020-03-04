@@ -15,6 +15,7 @@
 # =================================================================================
 
 import json
+import nibabel as nib
 import shutil
 import multiprocessing
 import numpy as np
@@ -111,6 +112,13 @@ def fix_test_59(out_dir):
     nii_kits.write_nii(v2, vh, out_dir / "test-segmentation-59.nii", out_dtype=np.uint8)
 
 
+def gz2nii(out_dir):
+    out_dir = ROOT_DIR / "model_dir" / out_dir
+    for x in out_dir.glob("*.nii.gz"):
+        im = nib.load(str(x))
+        nib.save(im, str(x)[:-3])
+
+
 if __name__ == "__main__":
     # tag_list = ["002_unet_liver", "002_unet_liver_f0"]
     # out_dir = "merge_002_unet_liver"
@@ -127,12 +135,13 @@ if __name__ == "__main__":
     #             "001_unet_noise_0_05_f4"]
     # out_dir = "merge_001_unet_noise_0_05"
     # -----------------------------------------------------------------
-    tag_list = ["013_gnet_sp_rand_f0",
-                "013_gnet_sp_rand_f1",
-                "013_gnet_sp_rand",
-                "013_gnet_sp_rand_f3",
-                "013_gnet_sp_rand_f4"]
-    out_dir = "merge_013_gnet_sp_rand"
-    merge_volumes_wrap(tag_list, out_dir)
+    # tag_list = ["013_gnet_sp_rand_f0",
+    #             "013_gnet_sp_rand_f1",
+    #             "013_gnet_sp_rand",
+    #             "013_gnet_sp_rand_f3",
+    #             "013_gnet_sp_rand_f4"]
+    out_dir = "013_gnet_sp_rand_full/prediction"
+    # merge_volumes_wrap(tag_list, out_dir)
     # -----------------------------------------------------------------
+    gz2nii(out_dir)
     fix_test_59(out_dir)

@@ -140,8 +140,9 @@ def _get_datasets(test_fold=-1, filter_size=10, choices=None, exclude=None):
             if test_fold + 1 > len(k_folds):
                 raise ValueError("test_fold too large")
             if test_fold < 0:
-                raise ValueError("test_fold must be non-negative")
-            testset = k_folds[test_fold]
+                testset = []
+            else:
+                testset = k_folds[test_fold]
             trainset = []
             for i, folds in enumerate(k_folds):
                 if i != test_fold:
@@ -205,6 +206,12 @@ def input_fn(mode, params):
                                 filter_only_liver_in_val=params.get("filter_only_liver_in_val", True))
     if len(dataset) == 0:
         raise ValueError("No valid dataset found!")
+    if mode != ModeKeys.PREDICT:
+        logging.info("{}: {} Liver CTs ({} slices, {} slices contain livers, {} slices contain tumors)"
+                     .format(mode[:1].upper() + mode[1:], len(dataset),
+                             sum([x["size"][0] for x in dataset]),
+                             sum([x["bbox"][3] - x["bbox"][0] for x in dataset]),
+                             sum([len(x["tumor_slices_index"]) for x in dataset])))
 
     with tf.variable_scope("InputPipeline"):
         if mode == ModeKeys.TRAIN:

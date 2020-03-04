@@ -113,6 +113,8 @@ def main():
 
     session_config = _get_session_config(args)
 
+    if args.num_gpus < 2:
+        args.distribution_strategy = "off"
     distribution_strategy = distribution_utils.get_distribution_strategy(
         distribution_strategy=args.distribution_strategy,
         num_gpus=args.num_gpus,

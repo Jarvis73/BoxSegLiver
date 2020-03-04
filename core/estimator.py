@@ -626,7 +626,8 @@ class CustomEstimator(object):
                     strategy.read_var(global_step_tensor))
 
                 features, labels = estimator_util.parse_iterator_result(
-                    per_device_dataset(iterator, strategy.extended._devices))
+                    per_device_dataset(iterator, strategy.extended._devices)
+                    if self.double_dataloader_modes else iterator.get_next())
                 grouped_estimator_spec = strategy.call_for_each_replica(
                     self._call_model_fn,
                     args=(features,

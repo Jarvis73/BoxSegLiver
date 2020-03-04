@@ -34,7 +34,7 @@ def add_arguments(parser):
     group.add_argument("--loss_type",
                        type=str,
                        default="xentropy",
-                       choices=["xentropy", "dice"],
+                       choices=["xentropy", "dice", "xentropy+dice"],
                        required=False, help="Loss type (default %(default)s)")
     group.add_argument("--loss_weight_type",
                        type=str,
@@ -115,7 +115,7 @@ def _compute_weights(w_type, one_hot_labels, name=None, **kwargs):
     w_type = w_type.lower()
     # num_cls = one_hot_labels.shape[-1]
     bs = one_hot_labels.shape[0]
-    ndim = len(one_hot_labels.shape)
+    size = tf.cast(tf.shape(one_hot_labels), tf.float32)
 
     with tf.name_scope(name, "_compute_weights"):
         if w_type == "none":
@@ -127,17 +127,18 @@ def _compute_weights(w_type, one_hot_labels, name=None, **kwargs):
             w = tf.constant([numeric_w for _ in range(bs)], dtype=tf.float32)
             w = tf.reduce_sum(w[:, None, None, :] * one_hot_labels, axis=-1)  # [bs, h, w]
         elif w_type == "proportion":
-            num_labels = tf.reduce_sum(one_hot_labels, axis=range(1, ndim - 1))
+            num_labels = tf.reduce_sum(one_hot_labels, axis=[1, 2])
             if "proportion_decay" in kwargs:
                 num_labels += kwargs["proportion_decay"]
             proportions = 1.0 / num_labels
-            w = proportions / tf.reduce_sum(proportions)
+            w = proportions / tf.reduce_sum(proportions, axis=1, keepdims=True)
             w = tf.reduce_sum(w[:, None, None, :] * one_hot_labels, axis=-1)  # [bs, h, w]
         elif w_type == "examples":
             w = kwargs["examples_w"][:, None, None]
         else:
             raise ValueError("Not supported weight type: " + w_type)
-
+        # norm
+        w = w / tf.reduce_sum(w, axis=(1, 2), keepdims=True) * (size[1] * size[2])
         return w
 
 

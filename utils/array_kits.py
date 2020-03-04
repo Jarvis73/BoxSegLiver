@@ -28,6 +28,31 @@ from collections import OrderedDict
 WARNING_ONCE = False
 
 
+def zscore(img):
+    mask = img > 0
+    fg_list = img[mask]
+    img[mask] = (fg_list - fg_list.mean()) / (fg_list.std() + 1e-8)
+
+
+def augment_gamma(image:np.ndarray, gamma_range, retain_stats=False, p_per_sample=1, epsilon=1e-7):
+    if retain_stats:
+        mn, sd = image.mean(), image.std()
+
+    if random.random() < p_per_sample:
+        gamma = np.random.uniform(gamma_range[0], 1)
+    else:
+        gamma = np.random.uniform(1, gamma_range[1])
+    minm = image.min()
+    rnge = image.max() - minm
+    new_image = np.power((image - minm) / (rnge + epsilon), gamma) * rnge + minm
+
+    if retain_stats:
+        new_mn, new_sd = new_image.mean(), new_image.std()
+        new_image = new_image - new_mn + mn
+        new_image = new_image / (new_sd + 1e-8) * sd
+    return new_image
+
+
 def moments(image, mask=None, rev_mask=False, ret_var=False):
     """
     :param image: compute moments of an n-dim image

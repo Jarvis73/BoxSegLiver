@@ -22,6 +22,16 @@ import random
 import tensorflow as tf
 
 
+def zscore(img):
+    nonzero_region = img > 0
+    flatten_img = tf.reshape(img, [-1])
+    flatten_mask = tf.reshape(nonzero_region, [-1])
+    mean, variance = tf.nn.moments(tf.boolean_mask(flatten_img, flatten_mask), axes=(0,))
+    float_region = tf.cast(nonzero_region, img.dtype)
+    new_img = (img - float_region * mean) / (float_region * tf.math.sqrt(variance) + 1e-8)
+    return new_img
+
+
 def adjust_window_width_level(image, w_width, w_level, name=None):
     """
     Adjust the window width and window level of a gray-scale image.
@@ -196,7 +206,7 @@ def random_crop(image, label, shape, seed=None, name=None):
         return cropped_image, cropped_label
 
 
-def random_noise(image, scale, mask=None, seed=None, name=None):
+def random_noise(image, scale, mask=None, seed=None, name=None, ntype="uniform"):
     """
     Add a random noise tensor to image.
 
@@ -222,8 +232,11 @@ def random_noise(image, scale, mask=None, seed=None, name=None):
     with tf.name_scope(name, "random_noise", [image, scale]):
         shape = tf.shape(image)
         abs_scale = tf.abs(scale)
-        rd_tensor = tf.random_uniform(shape, -abs_scale, abs_scale, seed=seed,
-                                      dtype=image.dtype)
+        if ntype == "uniform":
+            rd_tensor = tf.random_uniform(shape, -abs_scale, abs_scale, seed=seed, dtype=image.dtype)
+        else:
+            rd_tensor = tf.random_normal(shape, stddev=abs_scale, seed=seed, dtype=image.dtype)
+
         if mask is None:
             new_image = tf.add(image, rd_tensor, name="NoisedImage")
         else:
@@ -305,6 +318,23 @@ def random_zero_or_one(shape, dtype, seed=None):
     rd_val = tf.random_uniform((), 0, 1, dtype=dtype, seed=seed)
     rd_rnd = tf.round(rd_val)
     return tf.fill(shape, rd_rnd)
+
+
+def augment_gamma(image, gamma_range, retain_stats=False, p_per_sample=1, epsilon=1e-7):
+    if retain_stats:
+        mn, variance = tf.nn.moments(image, axes=(0, 1, 2))
+        sd = tf.math.sqrt(variance)
+    gamma = tf.cond(tf.random_uniform((), 0, 1, dtype=tf.float32) < p_per_sample,
+                    lambda: tf.random_uniform((), gamma_range[0], 1),
+                    lambda: tf.random_uniform((), 1, gamma_range[1]))
+    minm = tf.reduce_min(image)
+    rnge = tf.reduce_max(image) - minm
+    new_image = tf.math.pow((image - minm) / (rnge + epsilon), gamma) * rnge + minm
+    if retain_stats:
+        new_mn, new_variance = tf.nn.moments(new_image, axes=(0, 1, 2))
+        new_image = new_image - new_mn + mn
+        new_image = new_image / (tf.math.sqrt(new_variance) + 1e-8) * sd
+    return new_image
 
 
 def binary_dilation2d(inputs, connection=1, iterations=1, padding="SAME", name=None):

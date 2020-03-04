@@ -63,6 +63,7 @@ def add_arguments(parser):
     group.add_argument("--eval_in_patches", action="store_true")
     group.add_argument("--eval_num_batches_per_epoch", type=int, default=100)
     group.add_argument("--eval_mirror", action="store_true")
+    group.add_argument("--img_grad", action="store_true", help="Use image gradients")
 
 
 def _get_datasets(test_fold=-1, filter_size=10, choices=None, exclude=None):

@@ -64,7 +64,9 @@ class EvaluateBase(object):
 
         Returns
         -------
-        A dict with evaluation results
+        A dict with
+            * evaluation results
+            * global_step
 
         """
         pass

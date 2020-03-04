@@ -188,6 +188,55 @@ def run_nii_3d_to_png():
         nii_3d_to_png(data_dir, png_dir, only_meta=only_meta)
 
 
+def nf_analysis(args):
+    vol_case, i = args
+    print("{:03d} {:47s}".format(i, str(vol_case)))
+
+    disc3 = ndi.generate_binary_structure(3, connectivity=2)
+    pid = int(vol_case.name.split(".")[0].split("-")[-1])
+
+    vh, volume = nii_kits.read_nii(vol_case, out_dtype=np.int16)
+    lab_case = vol_case.parent / vol_case.name.replace("volume", "segmentation")
+    _, labels = nii_kits.read_nii(lab_case, out_dtype=np.uint8)
+    assert volume.shape == labels.shape, "Vol{} vs Lab{}".format(volume.shape, labels.shape)
+
+    def analy(im):
+        res = {}
+        id_t, area_t = np.unique(im, return_counts=True)
+        for idx, i in enumerate(id_t[1:]):
+            t = {"id": i, "area": area_t[idx + 1], "pix": np.array(np.where(im == i)).transpose()}
+            t["bb"] = t["pix"].min(axis=0).tolist() + (t["pix"].max(axis=0) + 1).tolist()
+            res[i] = t
+        return res
+
+    t3d = analy(labels)    # 3D Tumor Analysis
+    t2d = [analy(lab) for lab in labels]    # 2D Tumor Analysis
+
+    meta_data = {"PID": pid,
+                 "vol_case": str(vol_case),
+                 "lab_case": str(lab_case),
+                 "size": volume.shape,
+                 "spacing": [float(x) for x in vh.get_zooms()[::-1]],
+                 3: t3d,
+                 2: t2d}
+
+    return meta_data
+
+
+def run_nf_analysis():
+    src_dir = Path(__file__).parent.parent.parent / "data/NF/nii_NF"
+    json_file = Path(__file__).parent / "prepare/nf_analy.pkl"
+
+    all_files = sorted(src_dir.glob("volume-*.nii.gz"), key=lambda x: int(str(x).split(".")[0].split("-")[-1]))
+    p = multiprocessing.Pool(4)
+    all_meta_data = p.map(nf_analysis, zip(all_files, range(len(all_files))))
+    all_meta_data = sorted(all_meta_data, key=lambda x: x["PID"])
+
+    import pickle
+    with json_file.open("wb") as f:
+        pickle.dump(all_meta_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+
 def dump_hist_feature(in_path, out_path,
                       mode="train",
                       bins=200,
@@ -666,6 +715,7 @@ if __name__ == "__main__":
     cmd = input("Please choice function:\n\t"
                 "a: exit()\n\t"
                 "b: run_nii_3d_to_png()\n\t"
+                "b2: run_nf_analysis()\n\t"
                 "c: run_dump_hist_feature()\n\t"
                 "c2: run_dump_hist_feature_v2()\n\t"
                 "d: run_simulate_user_prior()\n\t"
@@ -676,6 +726,8 @@ if __name__ == "__main__":
 
     if cmd == "b":
         run_nii_3d_to_png()
+    elif cmd == "b2":
+        run_nf_analysis()
     elif cmd == "c":
         run_dump_hist_feature()
     elif cmd == "c2":

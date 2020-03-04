@@ -97,6 +97,8 @@ def add_arguments(parser):
     group.add_argument("--glcm", action="store_true",
                        help="Use glcm texture features")
     group.add_argument("--glcm_noise", action="store_true")
+    group.add_argument("--use_zscore", action="store_true", help="If use z-score, window/level will be disabled")
+    group.add_argument("--use_gamma", action="store_true", help="Apply gamma transform for data augmentation")
 
     group.add_argument("--use_spatial", action="store_true")
     group.add_argument("--spatial_random", type=float, default=1.,
@@ -116,6 +118,7 @@ def add_arguments(parser):
     group.add_argument("--eval_discount", type=float, default=0.85)
     group.add_argument("--eval_no_p", action="store_true", help="Evaluate with no propagation")
     group.add_argument("--real_sp", type=str, help="Path to real spatial guide.")
+    group.add_argument("--guide_scale", type=float, default=5., help="Base scale of guides")
 
 
 def _get_datasets(test_fold=-1, filter_size=10, choices=None, exclude=None):
@@ -243,7 +246,7 @@ def input_fn(mode, params):
             context_list.append((args.context_list[2 * i], int(args.context_list[2 * i + 1])))
     features = [x for x, y in context_list]
     # Context parameters
-    kwargs = {}
+    kwargs = {"z_score": args.use_zscore, "use_gamma": args.use_gamma}
 
     with tf.variable_scope("InputPipeline"):
         if mode == ModeKeys.TRAIN:
@@ -269,7 +272,7 @@ def input_fn(mode, params):
                                                context_guide=args.use_context,
                                                context_list=tuple(context_list),
                                                spatial_guide=args.use_spatial,
-                                               spatial_random=0. if args.spatial_random < 1. else args.spatial_random,
+                                               spatial_random=0. if args.spatial_random < 1. else 1.,
                                                config=args,
                                                **kwargs)
         elif mode == ModeKeys.EVAL:
@@ -303,8 +306,17 @@ def data_processing_train(im_files, seg_file, read_size, bbox, PID_ci, img_clip,
     img = tf.image.resize_bilinear(img, (config.im_height, config.im_width), align_corners=True)
     img = tf.transpose(tf.squeeze(img, axis=-1), perm=(1, 2, 0))
     img = tf.cast(img, tf.float32)
-    clip_min, clip_max = tf.split(img_clip, 2)
-    img = (tf.clip_by_value(img, clip_min, clip_max) - clip_min) / (clip_max - clip_min)
+    if kwargs.get("z_score", False):
+        logging.info("Train: Use z-score")
+        nonzero_region = img > 0
+        flatten_img = tf.reshape(img, [-1])
+        flatten_mask = tf.reshape(nonzero_region, [-1])
+        mean, variance = tf.nn.moments(tf.boolean_mask(flatten_img, flatten_mask), axes=(0,))
+        float_region = tf.cast(nonzero_region, img.dtype)
+        img = (img - float_region * mean) / (float_region * tf.math.sqrt(variance) + 1e-8)
+    else:
+        clip_min, clip_max = tf.split(img_clip, 2)
+        img = (tf.clip_by_value(img, clip_min, clip_max) - clip_min) / (clip_max - clip_min)
 
     seg = tf.cond(tf.greater(tf.strings.length(seg_file), 0),
                   lambda: tf.image.decode_png(tf.io.read_file(seg_file), dtype=tf.uint8),
@@ -329,14 +341,18 @@ def data_processing_train(im_files, seg_file, read_size, bbox, PID_ci, img_clip,
         gd = tf.expand_dims(gd, axis=0)
         gd_resize = tf.image.resize_bilinear(gd, (config.im_height, config.im_width), align_corners=True)
         gd_resize = tf.squeeze(gd_resize, axis=0)
-        return tf.cast(gd_resize / 2 + 0.5, tf.float32)
+        return tf.cast(gd_resize, tf.float32)
 
     def false_fn():
-        return tf.ones((config.im_height, config.im_width, 1), tf.float32) * 0.5
+        return tf.zeros((config.im_height, config.im_width, 1), tf.float32)
 
     if use_spatial:
         features["sp_guide"] = tf.cond(tf.shape(guide["centers"])[0] > 0, true_fn, false_fn)
 
+    if kwargs.get("use_gamma", False):
+        features["images"] = image_ops.augment_gamma(features["images"], gamma_range=(0.7, 1.5), retain_stats=True,
+                                                     p_per_sample=0.3)
+        logging.info("Train: Add gamma transform, scale=(0.7, 1.5), retain_stats=True, p_per_sample=0.3")
     if random_noise:
         features["images"] = image_ops.random_noise(features["images"], config.noise_scale, seed=RND_SEED)
         # Remove noise in empty slice
@@ -371,6 +387,7 @@ def gen_train_batch(data_list,
     """ All coordinates are ij index """
     # Load context guide if needed
     context = {case["PID"]: None for case in data_list} if context_guide else None
+    z_score = kwargs.get("z_score", False)
 
     d = data_list
     list_of_keys = np.arange(len(d))
@@ -445,8 +462,9 @@ def gen_train_batch(data_list,
                     else:
                         selected_slices.append("")
 
-            # Random clip image value
-            if random_window_level:
+            if z_score:
+                img_clip = (GRAY_MIN, GRAY_MAX)
+            elif random_window_level:   # Random clip image value
                 img_clip = (0, random.randint(800, 1000))
             else:
                 img_clip = (0, 900)
@@ -502,7 +520,8 @@ def gen_train_batch(data_list,
                 if use_guide and ind >= 0:
                     centers = np.asarray(case["centers"][ind], dtype=np.float32)
                     # stddevs = np.asarray(case["stddevs"][ind], dtype=np.float32)
-                    stddevs = np.array([[5., 5.]] * len(case["stddevs"][ind]), dtype=np.float32)
+                    stddevs = np.array([[config.guide_scale, config.guide_scale]] * len(case["stddevs"][ind]),
+                                       dtype=np.float32)
                     num_of_tumors = centers.shape[0]
                     tumor_choose = list(range(num_of_tumors))
                     inbox_tumors = []
@@ -635,7 +654,7 @@ def get_dataset_for_eval_online(data_list,
         feature_length = sum([x for _, x in context_list])
         guide_shapes_dict["context"] = tf.TensorShape([feature_length])
         logging.info("Train: Use context guide")
-        kwargs["context_mode"] = "eval2"
+        kwargs["context_mode"] = "eval"
     if spatial_guide:
         guide_types_dict.update({"centers": tf.float32,
                                  "stddevs": tf.float32,
@@ -661,14 +680,15 @@ def get_dataset_for_eval_online(data_list,
                                                              random_noise=False,
                                                              random_flip_left_right=False,
                                                              random_flip_up_down=False,
-                                                             mode="Eval Online"),
+                                                             mode="Eval Online",
+                                                             z_score=config.use_zscore),
                         batch_size, num_parallel_batches=1))
                .prefetch(buffer_size=contrib_data.AUTOTUNE))
 
     return dataset
 
 
-def parse_case_eval(case, im_channel, parse_label=True):
+def parse_case_eval(case, im_channel, parse_label=True, z_score=False):
     """ Return cropped normalized volume (y, x, z) with type float32 and
                cropped segmentation (z, y, x) with type uint8 """
     d, h, w = case["size"]
@@ -677,8 +697,14 @@ def parse_case_eval(case, im_channel, parse_label=True):
     left_half_channel = (im_channel - 1) // 2
     right_half_channel = im_channel - 1 - left_half_channel
     cd, ch, cw = volume.shape
-    volume = np.clip(volume, 0, 900) / 900
-    volume = volume.transpose((1, 2, 0)).astype(np.float32)  # (y, x, z) for convenient
+    volume = volume.astype(np.float32)  # (y, x, z) for convenient
+    if not z_score:
+        volume = np.clip(volume, 0, 900) / 900
+    else:
+        for i in range(volume.shape[0]):
+            nonzero = volume[i][volume[i] > 0]
+            volume[i] = (volume[i] - nonzero.mean()) / (nonzero.std() + 1e-8)
+    volume = volume.transpose((1, 2, 0))
 
     segmentation = None
     lab_case = None
@@ -701,6 +727,7 @@ def get_dataset_for_sp_point(data_list, config, context_guide=None, context_list
     c = config.im_channel
     pshape = config.im_height, config.im_width
     gd_pattern = str(PROJ_ROOT / "data/NF/feat/%s/eval/%03d.npy")
+    z_score = kwargs.get("z_score", False)
 
     real_meta = None
     if config.real_sp and Path(config.real_sp).exists():
@@ -709,7 +736,7 @@ def get_dataset_for_sp_point(data_list, config, context_guide=None, context_list
             real_meta = json.load(f)
 
     for ci, case in enumerate(data_list[config.eval_skip_num:]):
-        pid, vol_path, _, oshape, cshape, lhc, rhc, volume, segmentation = parse_case_eval(case, c)
+        pid, vol_path, _, oshape, cshape, lhc, rhc, volume, segmentation = parse_case_eval(case, c, z_score=z_score)
         spid = str(pid)
 
         pads = (batch_size - (cshape[0] % batch_size)) % batch_size
@@ -719,10 +746,10 @@ def get_dataset_for_sp_point(data_list, config, context_guide=None, context_list
         volume = cv2.resize(volume, pshape[::-1], interpolation=cv2.INTER_LINEAR)
 
         context_val = None
+        feat_length = 0
         if context_guide:
             # Load evaluation context
             features = []
-            feat_length = 0
             for cls, f_len in context_list:
                 feat = np.load(gd_pattern % (cls, pid), allow_pickle=True)
                 assert isinstance(feat, np.ndarray), "`feat` must be a numpy.ndarray"
@@ -748,36 +775,41 @@ def get_dataset_for_sp_point(data_list, config, context_guide=None, context_list
                 if real_meta is not None and spid in real_meta and ssid in real_meta[spid]:
                     guide = array_kits.create_gaussian_distribution_v2(
                         cshape[1:], np.array(real_meta[spid][ssid]["centers"]), real_meta[spid][ssid]["stddevs"])
-                    guide = guide * config.eval_discount / 2 + 0.5
+                    guide *= config.eval_discount
                     guide = cv2.resize(guide, pshape[::-1], interpolation=cv2.INTER_LINEAR)
                     if "sp_guide" not in eval_batch:
-                        eval_batch["sp_guide"] = np.ones((batch_size, *pshape, 1), dtype=np.float32) * 0.5
+                        eval_batch["sp_guide"] = np.ones((batch_size, *pshape, 1), dtype=np.float32)
                     eval_batch["sp_guide"][j, ..., 0] = guide
                 elif spatial_guide and not config.eval_no_sp and sid + j in case["tumor_slices_index"]:
                     ind = case["tumor_slices_index"].index(sid + j)
                     pos_centers = np.asarray(case["centers"][ind], dtype=np.float32)
-                    pos_stddevs = np.array([[5., 5.]] * len(case["stddevs"][ind]), dtype=np.float32)
+                    pos_stddevs = np.array([[config.guide_scale, config.guide_scale]] * len(case["stddevs"][ind]),
+                                           dtype=np.float32)
                     pos_centers = pos_centers / oshape[1:] * pshape
                     pos_stddevs = pos_stddevs / oshape[1:] * pshape
                     sp_guide = array_kits.create_gaussian_distribution_v2(pshape, pos_centers, pos_stddevs)
+                    sp_guide *= config.eval_discount
 
-                    if "neg_centers" in case and sid + j in case["neg_tumor_slices_index"]:
-                        nind = case["neg_tumor_slices_index"].index(sid + j)
-                        neg_centers = np.asarray(case["neg_centers"][nind], dtype=np.float32)
-                        neg_stddevs = np.array([[5., 5.]] * len(case["neg_stddevs"][nind]), dtype=np.float32)
-                        neg_centers = neg_centers / oshape[1:] * pshape
-                        neg_stddevs = neg_stddevs / oshape[1:] * pshape
-                        neg_sp_guide = array_kits.create_gaussian_distribution_v2(pshape, neg_centers, neg_stddevs)
-                        sp_guide -= neg_sp_guide * 2
+                    # if "neg_centers" in case and sid + j in case["neg_tumor_slices_index"]:
+                    #     nind = case["neg_tumor_slices_index"].index(sid + j)
+                    #     neg_centers = np.asarray(case["neg_centers"][nind], dtype=np.float32)
+                    #     neg_stddevs = np.array([[config.guide_scale, config.guide_scale]] * len(case["neg_stddevs"][nind]),
+                    #                            dtype=np.float32)
+                    #     neg_centers = neg_centers / oshape[1:] * pshape
+                    #     neg_stddevs = neg_stddevs / oshape[1:] * pshape
+                    #     neg_sp_guide = array_kits.create_gaussian_distribution_v2(pshape, neg_centers, neg_stddevs)
+                    #     sp_guide -= neg_sp_guide * 2
 
-                    sp_guide = sp_guide / 2 + 0.5
                     if "sp_guide" not in eval_batch:
-                        eval_batch["sp_guide"] = np.ones((batch_size, *pshape, 1), dtype=np.float32) * 0.5
+                        eval_batch["sp_guide"] = np.zeros((batch_size, *pshape, 1), dtype=np.float32)
                     eval_batch["sp_guide"][j, ..., 0] = sp_guide
                 if "sp_guide" not in eval_batch:
-                    eval_batch["sp_guide"] = np.ones((batch_size, *pshape, 1), dtype=np.float32) * 0.5
+                    eval_batch["sp_guide"] = np.zeros((batch_size, *pshape, 1), dtype=np.float32)
                 if context_guide:
-                    eval_batch["context"] = context_val[sid:sid + batch_size]
+                    if config.eval_no_sp:
+                        eval_batch["context"] = np.zeros((batch_size, feat_length), dtype=np.float32)
+                    else:
+                        eval_batch["context"] = context_val[sid:sid + batch_size]
             yield copy.copy(eval_batch), None
 
             if config.eval_mirror:

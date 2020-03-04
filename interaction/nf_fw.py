@@ -260,7 +260,7 @@ class Framework(HasTraits):
     def connect(self):
         self.wrapper = key_press_event_wrapper(self)
         self.wrapper.ES = EllipseSelector(self.figure1.axes[0], self.on_select, drawtype='line', interactive=True,
-                                          button=1,
+                                          button=3,
                                           lineprops=dict(color='black', linestyle='-', linewidth=2, alpha=0.5))
         # Figure events
         self.figure1.canvas.mpl_connect("button_press_event", self.button_press_event)

@@ -66,7 +66,11 @@ class UNet(base.BaseNet):
         if "labels" in self._inputs:
             self._inputs["labels"].set_shape([self.bs, None, None])
 
-        tensor_out = self._inputs["images"]
+        if self.args.img_grad:
+            dy, dx = tf.image.image_gradients(self._inputs["images"])
+            tensor_out = tf.concat((self._inputs["images"], dy, dx), axis=-1)
+        else:
+            tensor_out = self._inputs["images"]
 
         with tf.variable_scope(self.name, "UNet"):
             # encoder

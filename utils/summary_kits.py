@@ -59,8 +59,8 @@ def summary_image(writer, iter_, tag, images, max_outputs=3):
     for i, image in enumerate(images):
         buffer = BytesIO()
         plt.imsave(buffer, image, format="png")
-        image_sum_obj = tf.Summary.Image(height=image.shape[0], width=image.shape[1], colorspace=3,
-                                         encoded_image_string=buffer.getvalue())
+        image_sum_obj = tf.Summary.Image(height=image[0], width=image[1],
+                                         encoded_image_string=buffer)
         all_value.append(tf.Summary.Value(tag="{:s}/image/{:d}".format(tag, i), image=image_sum_obj))
         if i + 1 >= max_outputs:
             break
@@ -120,9 +120,6 @@ def arg_parser():
 
 
 if __name__ == "__main__":
-    import numpy as np
-    a = np.random.rand(2, 64, 64, 3) * 255
-    a = a.astype(np.uint8)
-    writer = tf.summary.FileWriter("D:/Library/Downloads")
-    summary_image(writer, 0, "AAA", a)
-    writer.close()
+    args = arg_parser()
+    change_summary_prefix(args.file, args.output_dir, args.new_prefix, args.remove_prefix,
+                          args.keep_fields)

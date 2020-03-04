@@ -14,6 +14,7 @@
 #
 # =================================================================================
 
+import cv2
 import json
 import collections
 import numpy as np
@@ -77,6 +78,8 @@ class SegViewerAdapter(object):
 
         self.header, self.vol = nii_kits.read_nii(vol_file, np.float16)
         self.lab_bk = np.clip(nii_kits.read_nii(lab_file, np.uint8)[1], 0, 1)
+        self.lab_bk = cv2.resize(self.lab_bk.transpose((1, 2, 0)), self.base_size[::-1], interpolation=cv2.INTER_NEAREST)
+        self.lab_bk = self.lab_bk.transpose((2, 0, 1))
         self.shape = self.vol.shape
         self.bb = [0] * 3 + self.meta_data[self.pid]["size"]
         self.my = self.shape[1] / self.base_size[0]
@@ -85,6 +88,8 @@ class SegViewerAdapter(object):
         np.clip(self.vol, 0, 800, out=self.vol)
         np.multiply(self.vol, 255 / 800, out=self.vol)
         self.vol = self.vol.astype(np.uint8)
+        self.vol = cv2.resize(self.vol.transpose((1, 2, 0)), self.base_size[::-1], interpolation=cv2.INTER_LINEAR)
+        self.vol = self.vol.transpose((2, 0, 1))
         self.update_lab(self.label)
 
         assert self.vol.shape == self.lab.shape, "vol: {}, lab: {}".format(self.vol.shape, self.lab.shape)
@@ -239,11 +244,11 @@ class SegViewerAdapter(object):
 
 def main():
     adapter = SegViewerAdapter(
-        "E:/DataSet/Neurofibromatosis/nii_NF",
+        r"D:\0WorkSpace\MedicalImageSegmentation\data\NF\nii_NF",
         # r"D:\0WorkSpace\MedicalImageSegmentation\data\LiTS\Test_Batch",
-        "E:/DataSet/Neurofibromatosis/nii_NF",
+        r"D:\0WorkSpace\MedicalImageSegmentation\data\NF\nii_NF",
         # Path(__file__).parent.parent / "model_dir/merge_001_unet_noise_0_05",
-        Path(__file__).parent.parent / "DataLoader/NF/prepare/interaction.json",
+        r"E:\Temp\112_nf_sp_dp\inter-87-10.json",
         meta_file=Path(__file__).parent.parent / "DataLoader/NF/prepare/meta.json",
         # data_pat="test-volume-{}.nii",
         # lab_pat="test-segmentation-{}.nii",

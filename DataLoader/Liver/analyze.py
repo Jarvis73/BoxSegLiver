@@ -17,16 +17,22 @@
 import json
 import numpy as np
 from pathlib import Path
+from matplotlib import rcParams, font_manager
+rcParams['font.family'] = 'Times New Roman'
+del font_manager.weight_dict['roman']
+font_manager._rebuild()
+
 import matplotlib.pyplot as plt
 from scipy.stats import gaussian_kde
 from DataLoader.Liver import nii_kits
 from skimage import feature
 
 
-json_file = Path(__file__).parent / "prepare/meta.json"
-with json_file.open() as f:
-    meta = json.load(f)
-meta = {x["PID"]: x for x in meta}
+
+# json_file = Path(__file__).parent / "prepare/meta.json"
+# with json_file.open() as f:
+#     meta = json.load(f)
+# meta = {x["PID"]: x for x in meta}
 
 # size = []
 # spacing = []
@@ -40,17 +46,17 @@ meta = {x["PID"]: x for x in meta}
 # print(size.max(0), size.min(0))
 # print(spacing.max(0), spacing.min(0))
 # print(len(tumors))
-
-indices = []
-tumor_volume = []
-for i, x in meta.items():
-    voxel_volume = x["spacing"][0] * x["spacing"][1] * x["spacing"][2]
-    for t in x["tumor_areas"]:
-        tumor_volume.append(t * voxel_volume)
-        indices.append(i)
-tumor_volume = np.array(tumor_volume) / 1000
-
-print(tumor_volume.max(), tumor_volume.min(), indices[tumor_volume.argmax()])
+#
+# indices = []
+# tumor_volume = []
+# for i, x in meta.items():
+#     voxel_volume = x["spacing"][0] * x["spacing"][1] * x["spacing"][2]
+#     for t in x["tumor_areas"]:
+#         tumor_volume.append(t * voxel_volume)
+#         indices.append(i)
+# tumor_volume = np.array(tumor_volume) / 1000
+#
+# print(tumor_volume.max(), tumor_volume.min(), indices[tumor_volume.argmax()])
 
 # fig, ax = plt.subplots(1, 1)
 # density = gaussian_kde(tumor_volume)
@@ -62,32 +68,47 @@ print(tumor_volume.max(), tumor_volume.min(), indices[tumor_volume.argmax()])
 # ax.tick_params(axis='both', which='major', labelsize=15)
 # ax.set_xlabel('LiTS tumor volume in log scale (cc).', fontsize=15)
 
-_, volume = nii_kits.read_lits(1, "vol", "E:/DataSet/LiTS/Training_Batch/volume-1.nii")
-_, labels = nii_kits.read_lits(1, "lab", "E:/DataSet/LiTS/Training_Batch/segmentation-1.nii")
+fs = 40
+
+_, volume = nii_kits.read_lits(1, "vol", r"D:\0WorkSpace\MedicalImageSegmentation\data\LiTS\Training_Batch\volume-1.nii")
+_, labels = nii_kits.read_lits(1, "lab", r"D:\0WorkSpace\MedicalImageSegmentation\data\LiTS\Training_Batch\segmentation-1.nii")
 liver = volume[labels > 0]
 tumor = volume[labels == 2]
 
-fig, ax = plt.subplots(1, 2)
-ax[0].hist(liver, bins=100, range=(0, 200), density=True)
-ax[0].hist(tumor, bins=100, range=(0, 200), density=True)
-ax[0].set_xlabel('Hounsfield unit', fontsize=15)
-ax[0].set_ylabel('Normalized frequency', fontsize=15)
-ax[0].tick_params(axis='both', which='major', labelsize=15)
-ax[0].legend(["Liver", "Tumor"], fontsize=15)
-ax[0].set_title("volume-1.nii", fontsize=15)
+fig, ax = plt.subplots(1, 2, figsize=(25, 9))
+ax[0].hist(liver, bins=100, range=(0, 200), density=True, alpha=0.8)
+ax[0].hist(tumor, bins=100, range=(0, 200), density=True, alpha=0.8)
+ax[0].set_xlabel('Hounsfield unit', fontsize=fs)
+ax[0].set_ylabel('Normalized frequency', fontsize=fs)
+ax[0].tick_params(axis='both', which='major', labelsize=fs)
+ax[0].legend(["Liver", "Tumor"], fontsize=fs)
+ax[0].set_title("Liver Tumor Example", fontsize=fs)
 
-_, volume = nii_kits.read_lits(45, "vol", "E:/DataSet/LiTS/Training_Batch/volume-45.nii")
-_, labels = nii_kits.read_lits(45, "lab", "E:/DataSet/LiTS/Training_Batch/segmentation-45.nii")
-liver = volume[labels > 0]
-tumor = volume[labels == 2]
+# _, volume = nii_kits.read_lits(45, "vol", "E:/DataSet/LiTS/Training_Batch/volume-45.nii")
+# _, labels = nii_kits.read_lits(45, "lab", "E:/DataSet/LiTS/Training_Batch/segmentation-45.nii")
+# liver = volume[labels > 0]
+# tumor = volume[labels == 2]
+#
+# ax[1].hist(liver, bins=100, range=(0, 200), density=True)
+# ax[1].hist(tumor, bins=100, range=(0, 200), density=True)
+# ax[1].set_xlabel('Hounsfield unit', fontsize=15)
+# ax[1].tick_params(axis='both', which='major', labelsize=15)
+# ax[1].tick_params(axis='y', which='both', labelsize=15, left=False, labelleft=False)
+# ax[1].legend(["Liver", "Tumor"], fontsize=15)
+# ax[1].set_title("volume-45.nii", fontsize=15)
 
-ax[1].hist(liver, bins=100, range=(0, 200), density=True)
-ax[1].hist(tumor, bins=100, range=(0, 200), density=True)
-ax[1].set_xlabel('Hounsfield unit', fontsize=15)
-ax[1].tick_params(axis='both', which='major', labelsize=15)
-ax[1].tick_params(axis='y', which='both', labelsize=15, left=False, labelleft=False)
-ax[1].legend(["Liver", "Tumor"], fontsize=15)
-ax[1].set_title("volume-45.nii", fontsize=15)
+_, volume = nii_kits.read_lits(45, "vol", r"D:\0WorkSpace\MedicalImageSegmentation\data\NF\nii_NF\volume-036.nii.gz")
+_, labels = nii_kits.read_lits(45, "lab", r"D:\0WorkSpace\MedicalImageSegmentation\data\NF\nii_NF\segmentation-036.nii.gz")
+body = volume[volume > 0]
+tumor = volume[labels > 0]
+
+ax[1].hist(liver, bins=100, range=(0, 800), density=True, alpha=0.8)
+ax[1].hist(tumor, bins=100, range=(0, 800), density=True, alpha=0.8)
+ax[1].set_xlabel('MRI intensity', fontsize=fs)
+ax[1].tick_params(axis='both', which='major', labelsize=fs)
+ax[1].tick_params(axis='y', which='both', labelsize=fs, left=False, labelleft=False)
+ax[1].legend(["Whole Body", "Neurofibroma"], fontsize=fs)
+ax[1].set_title("Neurofibroma Example", fontsize=fs)
 
 # fig, ax = plt.subplots(2, 3)
 # GRAY_MIN, GRAY_MAX = -200, 250
@@ -116,4 +137,5 @@ ax[1].set_title("volume-45.nii", fontsize=15)
 #             if j == 1:
 #                 ax[j, k].set_ylabel('volume-45.nii', fontsize=15)
 
+plt.tight_layout()
 plt.show()

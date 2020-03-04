@@ -117,6 +117,9 @@ def check_args(args, parser):
     if not args.summary_prefix:
         args.summary_prefix = args.tag
 
+    if hasattr(args, "enhance") and args.enhance and not args.load_weights:
+        raise parser.error("When `enhance` is enabled, `load_weights` must be provided.")
+
 
 def fill_default_args(args):
     if not args.model_dir:

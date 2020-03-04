@@ -569,3 +569,7 @@ class Framework(HasTraits):
     def _save_guide_path_changed(self):
         self.adap.save_interaction(self.save_guide_path)
 
+    def _cur_guide_changed(self):
+        sid = int(self.cur_guide.SID)
+        if self.total_ind > 0:
+            self.refresh(sid)

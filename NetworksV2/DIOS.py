@@ -54,10 +54,8 @@ def _context_subnets(context,
                                keep_prob=1 - dropout,
                                is_training=is_training,
                                use_final_layer=True,
-                               # final_weight_initializer=tf.zeros_initializer(),
-                               # final_biases_initializer=tf.ones_initializer(),
-                               final_weight_initializer=tf.keras.initializers.he_normal(),
-                               )
+                               final_weight_initializer=tf.zeros_initializer(),
+                               final_biases_initializer=tf.ones_initializer())
         elif context_model in ["vgg16B", "vgg16C", "vgg16D"]:
             res = slim_nets.vgg(context_model,
                                 tf.expand_dims(context, axis=-1),
@@ -76,42 +74,6 @@ def _context_subnets(context,
             raise NotImplementedError
         else:
             raise ValueError("Not supported context model")
-
-        return res
-
-
-def _context_subnets_conv(context,
-                          mod_layers,
-                          context_fc_channels,
-                          init_channels,
-                          num_down_samples,
-                          dropout=None,
-                          scope=None,
-                          is_training=False,
-                          context_model="fc",
-                          context_conv_init_channels=16,
-                          use_se=False):
-    with tf.variable_scope(scope, "context", [context]):
-        n_modulator_param = init_channels * sum(
-            [2 ** i for i in range(num_down_samples + 1) if i in mod_layers]) * 2
-
-        if True:
-            res = slim.conv2d(context, 64, 3)
-            res = slim.conv2d(res, 64, 3)
-            res = slim.conv2d(res, 128, 3)
-            # res = slim.conv2d(res, 256, 3)
-        else:
-            res = slim.conv2d(context, 64, 3)
-            res = slim.max_pool2d(res, 2, padding="SAME")
-            res = slim.conv2d(res, 64, 3)
-            res = slim.max_pool2d(res, 2, padding="SAME")
-            res = slim.conv2d(res, 128, 3)
-            res = slim.max_pool2d(res, 2, padding="SAME")
-            res = slim.conv2d(res, 256, 3)
-        res = tf.reduce_mean(res, axis=(1, 2))
-        res = slim.fully_connected(res, 200, weights_initializer=tf.keras.initializers.he_normal())
-        res = slim.fully_connected(res, n_modulator_param, activation_fn=None,
-                                   weights_initializer=tf.keras.initializers.he_normal())
 
         return res
 
@@ -139,12 +101,13 @@ def _spatial_subnets(sp_guide,
                      num_down_samples,
                      activation_fn=None,
                      normalizer_fn=None,
-                     normalizer_params=None):
+                     normalizer_params=None,
+                     enhance=False):
     with tf.variable_scope("spatial"):
         spatial_params = []
         gs = sp_guide
         # kwargs = {"weights_initializer": tf.zeros_initializer()} if enhance else {}
-        kwargs = {}
+        kwargs = {"weights_initializer": tf.keras.initializers.he_normal()} if enhance else {}
         with slim.arg_scope([slim.conv2d],
                             activation_fn=activation_fn,
                             normalizer_fn=normalizer_fn,
@@ -169,7 +132,8 @@ def modulated_conv_block(self, net, repeat, channels, dilation=1, scope_id=0, de
                          is_training=True,
                          use_se=False,
                          context_feature_length=None,
-                         outputs_collections=None):
+                         outputs_collections=None,
+                         enhance=False):
     spatial_mod_id = 0
     if use_se and context_feature_length is None:
         raise ValueError("`context_feature_length` must be specified when `use_se` is True")
@@ -188,6 +152,8 @@ def modulated_conv_block(self, net, repeat, channels, dilation=1, scope_id=0, de
                                       normalizer_params=norm_params)
                 if i != repeat - 1 and dropout:
                     net = slim.dropout(net, keep_prob=1 - dropout, is_training=is_training)
+                if enhance and after_affine:
+                    net = slim_nets.affine(net)
                 if density_modulation:
                     if use_se:
                         context_feature = tf.slice(density_modulation_params, [0, density_mod_id],
@@ -210,7 +176,7 @@ def modulated_conv_block(self, net, repeat, channels, dilation=1, scope_id=0, de
                                          name="sp_params")
                     net = tf.add(net, sp_params, name="guide")
                     spatial_mod_id += channels
-                if after_affine:
+                if not enhance and after_affine:
                     net = slim_nets.affine(net)
                 net = tf.nn.relu(net)
                 utils_lib.collect_named_outputs(outputs_collections, sc.name, net)
@@ -233,9 +199,7 @@ class GUNet(base.BaseNet):
         self.side_dropout = args.side_dropout
         self.dropout = args.dropout
         self.use_se = args.use_se
-        self.ct_conv = True if hasattr(args, "ct_conv") else False
-        if self.ct_conv:
-            tf.logging.info("Train: ////// Use conv context submodule")
+        self.enhance = args.enhance
 
     def _net_arg_scope(self, *args, **kwargs):
         default_w_regu, default_b_regu = self._get_regularizer()
@@ -275,22 +239,17 @@ class GUNet(base.BaseNet):
 
         with tf.variable_scope(self.name):
             if self.use_context_guide:
-                if self.ct_conv:
-                    self._inputs["context"].set_shape([self.bs, 32, 32, 3])
-                    context_nets = _context_subnets_conv
-                else:
-                    self._inputs["context"].set_shape([self.bs, None])
-                    context_nets = _context_subnets
-                context_params = context_nets(self._inputs["context"],
-                                              mod_layers,
-                                              context_fc_channels,
-                                              base_channels,
-                                              num_down_samples,
-                                              dropout=self.side_dropout,
-                                              is_training=self.is_training,
-                                              context_model=context_model,
-                                              context_conv_init_channels=context_conv_init_channels,
-                                              use_se=self.use_se)
+                self._inputs["context"].set_shape([self.bs, None])
+                context_params = _context_subnets(self._inputs["context"],
+                                                  mod_layers,
+                                                  context_fc_channels,
+                                                  base_channels,
+                                                  num_down_samples,
+                                                  dropout=self.side_dropout,
+                                                  is_training=self.is_training,
+                                                  context_model=context_model,
+                                                  context_conv_init_channels=context_conv_init_channels,
+                                                  use_se=self.use_se)
             else:
                 context_params = None
 
@@ -299,14 +258,19 @@ class GUNet(base.BaseNet):
                 norm_params = {"scale": True, "epsilon": 0.001}
                 if self.args.normalizer == "batch_norm":
                     norm_params.update({"decay": 0.99, "is_training": self.is_training})
-                sp_kwargs = {} if not self.args.fix else {"activation_fn": tf.nn.relu,
-                                                          "normalizer_fn": self._get_normalization()[0],
-                                                          "normalizer_params": norm_params}
+                # spatial_params = _spatial_subnets(self._inputs["sp_guide"],
+                #                                   base_channels=base_channels,
+                #                                   mod_layers=mod_layers,
+                #                                   num_down_samples=num_down_samples,
+                #                                   activation_fn=tf.nn.relu,
+                #                                   normalizer_fn=self._get_normalization()[0],
+                #                                   normalizer_params=norm_params,
+                #                                   enhance=self.enhance)
                 spatial_params = _spatial_subnets(self._inputs["sp_guide"],
                                                   base_channels=base_channels,
                                                   mod_layers=mod_layers,
                                                   num_down_samples=num_down_samples,
-                                                  **sp_kwargs)
+                                                  enhance=self.enhance)
             else:
                 spatial_params = [None] * (num_down_samples + 1)
 
@@ -332,11 +296,7 @@ class GUNet(base.BaseNet):
             # Encoder
             with tf.variable_scope("Encode"), slim.arg_scope(encoder_arg_scope()):
                 context_crop_id = 0
-                if hasattr(self.args, "img_grad") and self.args.img_grad:
-                    dy, dx = tf.image.image_gradients(self._inputs["images"])
-                    nets = [tf.concat((self._inputs["images"], dy, dx), axis=-1)]
-                else:
-                    nets = [self._inputs["images"]]
+                nets = [self._inputs["images"]]
                 for i in range(num_down_samples + 1):
                     net, context_crop_id = modulated_conv_block(
                         self, nets[-1], 2, base_channels * 2 ** i, scope_id=i + 1,
@@ -350,7 +310,8 @@ class GUNet(base.BaseNet):
                         is_training=self.is_training,
                         use_se=self.use_se,
                         context_feature_length=context_fc_channels[-1],
-                        outputs_collections=["EPts"])
+                        outputs_collections=["EPts"],
+                        enhance=self.enhance)
                     nets[-1] = net
                     if i < num_down_samples:
                         net = slim.max_pool2d(nets[-1], 2, scope="pool%d" % (i + 1))
@@ -445,23 +406,15 @@ class GUNet(base.BaseNet):
                     image2 = self._inputs["sp_guide"]
                     images.append(image2)
                 if self.use_context_guide:
-                    ct = self._inputs["context"]
-                    if not self.ct_conv:
-                        image3 = tf.expand_dims(ct, axis=-1)
-                        # Gaussian blur
-                        kernel = tf.exp(-tf.convert_to_tensor([1., 0., 1.]) / (2 * 1.5 * 1.5)) / (2 * 3.14159 * 1.5 * 1.5)
-                        kernel = tf.expand_dims(tf.expand_dims(kernel / tf.reduce_sum(kernel), axis=-1), axis=-1)
-                        image3 = tf.nn.conv1d(image3, kernel, 1, padding="SAME")
-                        image3 = tf.expand_dims(image3, axis=0)
-                        images.append(tf.image.resize_nearest_neighbor(
-                            image3, tf.concat(([self.bs * 10], tf.shape(self._inputs["context"])[1:]), axis=0),
-                            align_corners=True))
-                    else:
-                        a, b, c = tf.split(ct, 3, axis=-1)
-                        emp = tf.constant(1, shape=(self.bs, 32, 2, 1), dtype=ct.dtype) * \
-                              tf.reduce_max(ct, axis=(1, 2, 3), keepdims=True)
-                        image3 = tf.concat((a, emp, b, emp, c), axis=2, name="Context")
-                        images.append(image3)
+                    image3 = tf.expand_dims(self._inputs["context"], axis=-1)
+                    # Gaussian blur
+                    kernel = tf.exp(-tf.convert_to_tensor([1., 0., 1.]) / (2 * 1.5 * 1.5)) / (2 * 3.14159 * 1.5 * 1.5)
+                    kernel = tf.expand_dims(tf.expand_dims(kernel / tf.reduce_sum(kernel), axis=-1), axis=-1)
+                    image3 = tf.nn.conv1d(image3, kernel, 1, padding="SAME")
+                    image3 = tf.expand_dims(image3, axis=0)
+                    images.append(tf.image.resize_nearest_neighbor(
+                        image3, tf.concat(([self.bs * 10], tf.shape(self._inputs["context"])[1:]), axis=0),
+                        align_corners=True))
 
             for image in images:
                 tf.summary.image("{}/{}".format(self.args.tag, image.op.name), image,
@@ -499,8 +452,6 @@ class FOO(object):
     side_dropout = True
     dropout = 0
     use_se = False
-    enhance = False
-    fix = False
 
     def __init__(self, **kwargs):
         for k, v in kwargs.items():
@@ -587,26 +538,23 @@ def dump_gunet_for_nf(tag, checkpoint="checkpoint_best", out_feat=False, **kwarg
 
 
 def export_model(tag, export_model_dir, model_version=1, checkpoint="checkpoint_best", **kwargs):
-    args = FOO(tag=tag, im_height=-1, im_width=-1, **kwargs)
+    args = FOO(tag=tag, im_height=-1, im_width=-1, classes=["NF"], **kwargs)
 
     with tf.Session(graph=tf.Graph()) as sess:
         image_height_tensor = tf.placeholder(tf.int32)
         image_width_tensor = tf.placeholder(tf.int32)
         serialized_tf_example = tf.placeholder(tf.string, name="tf_example")
         feature_configs = {"x": tf.FixedLenFeature(shape=[], dtype=tf.float32),
-                           "g": tf.FixedLenFeature(shape=[], dtype=tf.float32),
-                           "c": tf.FixedLenFeature(shape=[], dtype=tf.float32)}
+                           "g": tf.FixedLenFeature(shape=[], dtype=tf.float32)}
         tf_example = tf.parse_example(serialized_tf_example, feature_configs)
 
         tf_example["x"] = tf.reshape(tf_example["x"], (1, image_height_tensor, image_width_tensor, 3))
         tf_example["g"] = tf.reshape(tf_example["g"], (1, image_height_tensor, image_width_tensor, 1))
-        tf_example["c"] = tf.reshape(tf_example["c"], (1, 96))
         image = tf.identity(tf_example["x"], name="image")
         guide = tf.identity(tf_example["g"], name="guide")
-        glcm = tf.identity(tf_example["c"], name="context")
 
         model = GUNet(args)
-        model({"images": image, "sp_guide": guide, "context": glcm}, mode="infer",
+        model({"images": image, "sp_guide": guide}, mode="infer",
               init_channels=64,
               num_down_samples=4,
               mod_layers=[1, 2, 3, 4],
@@ -614,17 +562,14 @@ def export_model(tag, export_model_dir, model_version=1, checkpoint="checkpoint_
               context_model="fc",
               context_conv_init_channels=2,
               norm_with_center=False,
-              norm_with_scale=False,
+              norm_with_scale=True,
               ret_prob=False,
-              ret_pred=False,
-              after_afine=True)
+              ret_pred=False)
         logits_tf = model._layers["logits"]
-        softmax = tf.nn.softmax(logits_tf)
-        predictions_tf = tf.argmax(softmax, axis=3)
+        predictions_tf = tf.argmax(logits_tf, axis=3)
 
         saver = tf.train.Saver()
         ckpt = tf.train.latest_checkpoint(Path(__file__).parent.parent / "model_dir" / args.tag, checkpoint)
-
         saver.restore(sess, ckpt)
         print("Model", tag, "restored.")
 
@@ -634,28 +579,21 @@ def export_model(tag, export_model_dir, model_version=1, checkpoint="checkpoint_
 
         tensor_info_image = tf.saved_model.utils.build_tensor_info(image)
         tensor_info_guide = tf.saved_model.utils.build_tensor_info(guide)
-        tensor_info_glcm = tf.saved_model.utils.build_tensor_info(glcm)
         tensor_info_height = tf.saved_model.utils.build_tensor_info(image_height_tensor)
         tensor_info_width = tf.saved_model.utils.build_tensor_info(image_width_tensor)
         tensor_info_output = tf.saved_model.utils.build_tensor_info(predictions_tf)
-        # tensor_info_output2 = tf.saved_model.utils.build_tensor_info(softmax[..., 1])
-        # tensor_info_output3 = tf.saved_model.utils.build_tensor_info(logits_tf)
 
-        # make sure keys ends with '_bytes' for images
         prediction_signature = (
             tf.saved_model.signature_def_utils.build_signature_def(
-                inputs={'images': tensor_info_image, 'guide': tensor_info_guide, 'context': tensor_info_glcm,
+                inputs={'images': tensor_info_image, 'guide': tensor_info_guide,
                         'height': tensor_info_height, 'width': tensor_info_width},
-                outputs={'out_pred': tensor_info_output,
-                         # 'out_prob': tensor_info_output2,
-                         # "out_logit": tensor_info_output3
-                         },
+                outputs={'segmentation_map': tensor_info_output},
                 method_name=tf.saved_model.signature_constants.PREDICT_METHOD_NAME))
 
         builder.add_meta_graph_and_variables(
             sess, [tf.saved_model.tag_constants.SERVING],
             signature_def_map={
-                'serving_default':
+                'predict_images':
                     prediction_signature,
             })
 
@@ -669,7 +607,4 @@ if __name__ == "__main__":
     from pathlib import Path
 
     # dump_gunet_for_nf("111_nf_sp_rand")
-    # export_model("112_nf_sp_fix", "export_path", model_version=1, checkpoint="checkpoint",
-    #              classes=["NF"])
-    export_model("115_nf_both1_v2", "export_path", model_version=1, checkpoint="checkpoint",
-                 classes=["NF"])
+    export_model("112_nf_sp_dp", "export_path", checkpoint="checkpoint")

@@ -23,12 +23,13 @@ from tensorflow.python import pywrap_tensorflow as pt
 
 from NetworksV2.UNet import UNet
 from NetworksV2.GUNet import GUNet
-from NetworksV2.DenseUNet import DenseUNet
+from NetworksV2.UNetInter import UNetInter
+# from NetworksV2.DenseUNet import DenseUNet
 
 ModeKeys = tfes.estimator.ModeKeys
 # Available models
 MODEL_ZOO = [
-    UNet, GUNet, DenseUNet
+    UNet, GUNet, UNetInter # , DenseUNet
 ]
 
 

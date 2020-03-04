@@ -63,8 +63,12 @@ def _get_arguments():
         global evaluator_lib, input_pipeline
         from DataLoader.NF import input_pipeline_g as input_pipeline
         from evaluators import evaluator_nf as evaluator_lib
+    elif argv[1] == "nf2":
+        global evaluator_lib, input_pipeline
+        from DataLoader.NF import input_pipeline_iin as input_pipeline
+        from evaluators import evaluator_nf as evaluator_lib
     elif argv[1] not in ["-h", "--help"]:
-        raise ValueError("First argument must be choose from [liver, nf], got {}".format(argv[1]))
+        raise ValueError("First argument must be choose from [liver, nf, nf2], got {}".format(argv[1]))
 
     input_pipeline.add_arguments(parser)
     evaluator_lib.add_arguments(parser)

@@ -42,7 +42,7 @@ def random_split_k_fold(list_, k, seed=None):
     return folds
 
 
-def read_or_create_k_folds(path, list_, k_split=None, seed=None):
+def read_or_create_k_folds(path, list_, k_split=None, seed=None, verbose=True):
     path = Path(path)
 
     if path.exists():
@@ -63,13 +63,14 @@ def read_or_create_k_folds(path, list_, k_split=None, seed=None):
                 write_str = " ".join([str(x) for x in fold])
                 f.write(write_str + "\n")
 
-    try:
-        # sort integers
-        for fold in k_folds:
-            print(",".join([str(x) for x in sorted([int(x) for x in fold])]))
-    except ValueError:
-        for fold in k_folds:
-            print(",".join(fold))
+    if verbose:
+        try:
+            # sort integers
+            for fold in k_folds:
+                print(",".join([str(x) for x in sorted([int(x) for x in fold])]))
+        except ValueError:
+            for fold in k_folds:
+                print(",".join(fold))
     return k_folds
 
 

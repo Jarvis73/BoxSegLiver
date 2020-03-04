@@ -14,6 +14,7 @@
 #
 # =================================================================================
 
+import cv2
 import json
 import shutil
 import numpy as np
@@ -467,6 +468,10 @@ class EvaluateVolume(EvaluateBase):
         return decouple_volume
 
     def run(self, input_fn, checkpoint_path=None, latest_filename=None, save=False):
+        nf2 = hasattr(self.config, "ct_conv")
+        if nf2 and self.config.mode == "infer":
+            self._infer_patch(input_fn, checkpoint_path, latest_filename)
+            return
         checkpoint_path = self.find_checkpoint_path(checkpoint_path, latest_filename)
         if not checkpoint_path:
             raise FileNotFoundError("Missing checkpoint file in {} with status_file {}".format(
@@ -478,23 +483,30 @@ class EvaluateVolume(EvaluateBase):
         use_spatial = hasattr(self.config, "use_spatial") and self.config.use_spatial
         # Parse context_list
         feat_length = 0
-        if use_context and self.config.context_list is not None:
+        if use_context and not nf2 and self.config.context_list is not None:
             if len(self.config.context_list) % 2 != 0:
                 raise ValueError("context_list is not paired!")
             for i in range(len(self.config.context_list) // 2):
                 feat_length += int(self.config.context_list[2 * i + 1])
 
+        bs, h, w, c = (self.config.batch_size,
+                       self.config.im_height if self.config.im_height > 0 else None,
+                       self.config.im_width if self.config.im_width > 0 else None,
+                       self.config.im_channel)
+        if nf2:
+            predict_fn = self._predict_case_v2
+            context_shape = (bs, 32, 32, 3)
+        else:
+            predict_fn = self._predict_case
+            context_shape = (bs, feat_length)
+
         def run_pred():
             with tf.Graph().as_default():
-                bs, h, w, c = (self.config.batch_size,
-                               self.config.im_height if self.config.im_height > 0 else None,
-                               self.config.im_width if self.config.im_width > 0 else None,
-                               self.config.im_channel)
                 images = tf.placeholder(tf.float32, shape=(bs, h, w, c))
 
                 context, sp_guide = None, None
                 if use_context:
-                    context = tf.placeholder(tf.float32, shape=(bs, feat_length))
+                    context = tf.placeholder(tf.float32, shape=context_shape)
                 if use_spatial:
                     sp_guide = tf.placeholder(tf.float32, shape=(bs, h, w, 1))
 
@@ -513,18 +525,18 @@ class EvaluateVolume(EvaluateBase):
                 sp_guides = []
                 for features, labels in input_fn(self.config.mode, self.params):
                     if features:
-                        feed_dict = {images: features.pop("images")}
+                        feed_dict = {images: features["images"]}
                         if use_context and "context" in features:
-                            feed_dict[context] = features.pop("context")
+                            feed_dict[context] = features["context"]
                         if use_spatial and "sp_guide" in features:
-                            feed_dict[sp_guide] = features.pop("sp_guide")
-                        if use_spatial and self.config.save_sp_guide and features["mirror"] == 0:
+                            feed_dict[sp_guide] = features["sp_guide"]
+                        if use_spatial and self.config.save_sp_guide and features["mirror"] == 0 and not nf2:
                             sp_guides.append(feed_dict[sp_guide])
                         preds_eval = sess.run(predictions, feed_dict)
                         preds_eval.update(features)
-                        yield preds_eval, None
+                        yield preds_eval, labels
                     else:
-                        if hasattr(self.config, "save_sp_guide") and self.config.save_sp_guide:
+                        if hasattr(self.config, "save_sp_guide") and self.config.save_sp_guide and not nf2:
                             segmentation, vol_path, pads, ori_shape, reshape_ori = labels
                             self._save_guide(sp_guides, ori_shape, vol_path)
                             sp_guides.clear()
@@ -535,7 +547,165 @@ class EvaluateVolume(EvaluateBase):
             return self._evaluate_patches(run_pred(), cases=self.config.eval_num, verbose=2, save=save)
         else:
             resize = self.config.im_height > 0 and self.config.im_width > 0
-            self._run_actual(self._predict_case, run_pred, save, resize=resize)
+            self._run_actual(predict_fn, run_pred, save, resize=resize)
+
+    def _infer_patch(self, input_fn, checkpoint_path=None, latest_filename=None, save=False):
+        checkpoint_path = self.find_checkpoint_path(checkpoint_path, latest_filename)
+        if not checkpoint_path:
+            raise FileNotFoundError("Missing checkpoint file in {} with status_file {}".format(
+                self.model_dir, latest_filename))
+        model_args = self.params.get("model_args", ())
+        model_kwargs = self.params.get("model_kwargs", {})
+
+        use_context = hasattr(self.config, "use_context") and self.config.use_context
+        use_spatial = hasattr(self.config, "use_spatial") and self.config.use_spatial
+
+        features, _ = input_fn(self.config.mode, self.params)
+        _, h, w, c = features["images"].shape
+
+        with tf.Graph().as_default():
+            images = tf.placeholder(tf.float32, shape=(1, h, w, c))
+
+            context, sp_guide = None, None
+            if use_context:
+                context = tf.placeholder(tf.float32, shape=(1, 32, 32, 3))
+            if use_spatial:
+                sp_guide = tf.placeholder(tf.float32, shape=(1, h, w, 1))
+
+            model_inputs = {"images": images, "context": context, "sp_guide": sp_guide}
+            model = self.params["model"](self.config)
+            self.params["model_instances"] = [model]
+            # build model
+            model(model_inputs, self.config.mode, *model_args, **model_kwargs)
+            saver = tf.train.Saver()
+            sess = tf.Session()
+            # load weights
+            sess.run(tf.global_variables_initializer())
+            saver.restore(sess, checkpoint_path)
+
+            feed_dict = {images: features["images"]}
+            if use_context and "context" in features:
+                feed_dict[context] = features["context"]
+            if use_spatial and "sp_guide" in features:
+                feed_dict[sp_guide] = features["sp_guide"]
+            prob = sess.run(model.probability, feed_dict)
+
+            save_path = Path(self.config.model_dir) / "infer"
+            save_path.mkdir(parents=True, exist_ok=True)
+            save_dict = {"prob": prob[0], "img": features["images"][0], "bb": np.array(features["bb"][0])}
+            if use_context and "context" in features:
+                save_dict["ct"] = features["context"][0]
+            if use_spatial and "sp_guide" in features:
+                save_dict["sp"] = features["sp_guide"][0]
+            save_name = "infer-volume-{}-Pos-{}-{}-{}.npz".format(features["names"], *self.config.pos)
+            np.savez_compressed(save_path / save_name, **save_dict)
+            tf.logging.info("Write to %s" % (save_path / save_name))
+
+
+    def _predict_case_v2(self, predicts, cases=-1, dtype="pred", resize=False, save_path=None):
+        logits3d = None
+        cur_case = None
+        if save_path:
+            save_path = Path(save_path)
+        counter = 0
+        case = None
+        temp = None
+        sid = None
+        bb = None
+        pads = 0
+        guide = None
+        guide3d = None
+        context = None
+
+        for predict, labels in predicts:
+            if predict is not None:
+                new_case = str(predict["names"])
+                cur_case = cur_case or new_case
+                assert cur_case == new_case, (cur_case, new_case)
+                # Append batch to collections
+                if "mirror" not in predict or predict["mirror"] == 0:
+                    if temp is not None:
+                        for i, (im, b, si) in enumerate(zip(temp, bb, sid)):
+                        # for i, (im, g, ct, b, si) in enumerate(zip(temp, guide, context, bb, sid)):
+                            y1, x1, y2, x2 = b
+                            ty, tx = im.shape[:2]
+                            if ty != y2 - y1 or tx != x2 - x1:
+                                im = cv2.resize(im, (x2 - x1, y2 - y1), interpolation=cv2.INTER_LINEAR)
+                                # g = cv2.resize(g, (x2 - x1, y2 - y1), interpolation=cv2.INTER_LINEAR)
+                            logits3d[si, y1:y2, x1:x2, 1] = np.maximum(logits3d[si, y1:y2, x1:x2, 1], im[:, :, 1])
+                            logits3d[si, y1:y2, x1:x2, 0] = np.minimum(logits3d[si, y1:y2, x1:x2, 0], im[:, :, 0])
+                            # print(si, [y1, x1, y2, x2], g.shape, guide.shape)
+                            # guide3d[si, y1:y2, x1:x2] = np.maximum(guide3d[si, y1:y2, x1:x2], g)
+                            # ct = ct.transpose((2, 0, 1))
+                            # import matplotlib
+                            # matplotlib.use("Qt5Agg")
+                            # import matplotlib.pyplot as plt
+                            # print([y1, x1, y2, x2], si)
+                            # # plt.subplot(231)
+                            # # plt.imshow(preds_eval["Prob"][i, :, :, 0], cmap="gray")
+                            # # plt.subplot(232)
+                            # # plt.imshow(preds_eval["Prob"][i, :, :, 1], cmap="gray")
+                            # plt.subplot(151)
+                            # plt.imshow(labels[si], cmap="gray")
+                            # plt.subplot(152)
+                            # plt.imshow(guide3d[si], cmap="gray")
+                            # plt.subplot(153)
+                            # plt.imshow(logits3d[si, :, :, 0], cmap="gray")
+                            # plt.subplot(154)
+                            # plt.imshow(logits3d[si, :, :, 1], cmap="gray")
+                            # plt.subplot(155)
+                            # plt.imshow(np.hstack((ct[0], ct[1], ct[2])), cmap="gray")
+                            # plt.show()
+                            # input()
+                    bb = predict["bb"]
+                    sid = predict["sid"]
+                    pads = predict["pad"]
+                    # guide = predict["sp_guide"][:, :, :, 0]
+                    # context = predict["context"]
+                    temp = predict["Prob"] / self.mirror_div
+                elif predict["mirror"] == 1:
+                    temp += np.flip(predict["Prob"], axis=2) / self.mirror_div
+                elif predict["mirror"] == 2:
+                    temp += np.flip(predict["Prob"], axis=1) / self.mirror_div
+                elif predict["mirror"] == 3:
+                    temp += np.flip(np.flip(predict["Prob"], axis=2), axis=1) / self.mirror_div
+            elif isinstance(labels, dict):
+                case = labels
+                logits3d = np.zeros(list(case["size"]) + [len(self.classes) + 1], dtype=np.float32)
+                logits3d[:, :, :, 0] = 1
+                # guide3d = np.zeros(logits3d.shape[:-1], dtype=np.float32)
+            elif isinstance(labels, np.ndarray):
+                volume = logits3d   # [d, h, w, c]
+                if temp is not None:
+                    if pads > 0:
+                        temp = temp[:-pads]
+                    for im, b, si in zip(temp, bb, sid):
+                        y1, x1, y2, x2 = b
+                        ty, tx = im.shape[:2]
+                        if ty != y2 - y1 or tx != x2 - x1:
+                            im = cv2.resize(im, (x2 - x1, y2 - y1), interpolation=cv2.INTER_LINEAR)
+                        logits3d[si, y1:y2, x1:x2, 1] = np.maximum(logits3d[si, y1:y2, x1:x2, 1], im[:, :, 1])
+                        logits3d[si, y1:y2, x1:x2, 0] = np.minimum(logits3d[si, y1:y2, x1:x2, 0], im[:, :, 0])
+                if dtype == "pred":
+                    volume = np.argmax(volume, axis=-1).astype(np.uint8)    # [d, h, w]
+                yield (cur_case, labels) + self.maybe_save_case(
+                    cur_case, case["vol_case"], volume, dtype, save_path)
+
+                logits3d = None
+                cur_case = None
+                case = None
+                temp = None
+                sid = None
+                bb = None
+                pad = 0
+                # guide = None
+                # guide3d = None
+                # context = None
+                counter += 1
+                if 0 < cases <= counter:
+                    break
+            else:
+                raise TypeError("Get type: {}".format(type(labels)))
 
     def _save_guide(self, sp_guides, ori_shape, vol_path):
         pid = int(Path(vol_path).name.split(".")[0].split("-")[-1])

@@ -189,8 +189,9 @@ def _get_datasets(test_fold=-1, filter_size=0, choices=None, exclude=None):
             if test_fold + 1 > len(k_folds):
                 raise ValueError("test_fold too large")
             if test_fold < 0:
-                raise ValueError("test_fold must be non-negative")
-            testset = k_folds[test_fold]
+                testset = []
+            else:
+                testset = k_folds[test_fold]
             trainset = []
             for i, folds in enumerate(k_folds):
                 if i != test_fold:
@@ -1172,7 +1173,7 @@ def get_dataset_for_infer(data_list,
                         tmp["sp_guide"] = np.flip(np.flip(tmp["sp_guide"], axis=2), axis=1)
                     tmp["mirror"] = 3
                     yield tmp, None
-        yield None, (segmentation, vol_path, pads, bbox)
+        yield None, (segmentation, vol_path, pads, bbox, resize)
 
 
 class EvalImage3DLoader(object):
