@@ -59,6 +59,16 @@ def ckpt_vars_rename(input_, output=None, replace_from=(), replace_to=(), add_pr
         saver.save(sess, output)
 
 
+def find_checkpoint(checkpoint_dir, latest_filename, cfg):
+    if not checkpoint_dir:
+        latest_path = tf.train.latest_checkpoint(cfg.model_dir, latest_filename)
+        if not latest_path:
+            raise FileNotFoundError("Missing checkpoint file in {} with status_file {}".format(
+                cfg.model_dir, cfg.load_status_file))
+        checkpoint_dir = latest_path
+    return checkpoint_dir
+
+
 def arg_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("command", type=str,

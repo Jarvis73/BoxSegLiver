@@ -103,3 +103,27 @@ def load_meta(dataset, find_path):
     with meta_file.open() as f:
         meta = json.load(f)
     return meta
+
+
+def img_crop(volume, pz, channel, center=None, shape=None):
+    depth, height, width = volume.shape
+    half_d = channel // 2
+    z1 = max(pz - half_d, 0)
+    z2 = min(pz + half_d + 1, depth)
+
+    if center is not None and shape is not None:
+        half_h, half_w = shape[0] // 2, shape[1] // 2
+        x1 = min(max(center[1] - half_w, 0), width - shape[1])
+        x2 = x1 + shape[1]
+        y1 = min(max(center[0] - half_h, 0), height - shape[0])
+        y2 = y1 + shape[0]
+        img = volume[z1:z2, y1:y2, x1:x2]
+        slices = (slice(y1, y2), slice(x1, x2))
+    else:
+        img = volume[z1:z2]
+        slices = None
+
+    z_pad = (z1 - (pz - half_d), (pz + half_d + 1) - z2)
+    if z_pad != (0, 0):
+        img = np.pad(img, (z_pad, (0, 0), (0, 0)), mode='constant')
+    return img, slices

@@ -519,8 +519,7 @@ def gen_train_batch(data_list,
             if spatial_guide:
                 if use_guide and ind >= 0:
                     centers = np.asarray(case["centers"][ind], dtype=np.float32)
-                    # stddevs = np.asarray(case["stddevs"][ind], dtype=np.float32)
-                    stddevs = np.array([[config.guide_scale, config.guide_scale]] * len(case["stddevs"][ind]),
+                    stddevs = np.array([[config.guide_scale] * 2] * len(case["stddevs"][ind]),
                                        dtype=np.float32)
                     num_of_tumors = centers.shape[0]
                     tumor_choose = list(range(num_of_tumors))

@@ -295,7 +295,7 @@ class GUNet(base.BaseNet):
                 context_params = None
 
             if self.use_spatial_guide:
-                self._inputs["sp_guide"].set_shape([self.bs, self.height, self.width, 1])
+                self._inputs["sp_guide"].set_shape([self.bs, self.height, self.width, self.args.guide_channel])
                 norm_params = {"scale": True, "epsilon": 0.001}
                 if self.args.normalizer == "batch_norm":
                     norm_params.update({"decay": 0.99, "is_training": self.is_training})
@@ -441,9 +441,8 @@ class GUNet(base.BaseNet):
                 elif self.args.im_channel == 3:
                     images = self._inputs["images"][..., 1:2]
                     images = [images - tf.reduce_min(images)]   # Random noise problem
-                if self.use_spatial_guide:
-                    image2 = self._inputs["sp_guide"]
-                    images.append(image2)
+                if self.use_spatial_guide and not self.args.local_enhance:
+                    images.extend(tf.split(self._inputs["sp_guide"], 2, axis=-1))
                 if self.use_context_guide:
                     ct = self._inputs["context"]
                     if not self.ct_conv:
@@ -468,9 +467,14 @@ class GUNet(base.BaseNet):
                                  max_outputs=1, collections=[self.DEFAULT])
 
             with tf.name_scope("SumLabel"):
-                labels = tf.expand_dims(self._inputs["labels"], axis=-1)
-                labels_uint8 = tf.cast(labels * 255 / len(self.args.classes), tf.uint8)
-            tf.summary.image("{}/{}".format(self.args.tag, labels.op.name), labels_uint8,
+                labels = tf.cast(tf.expand_dims(self._inputs["labels"], axis=-1), tf.float32)
+                if self.use_spatial_guide and self.args.local_enhance:
+                    if self.args.guide_channel == 2:
+                        fg, bg = tf.split(self._inputs["sp_guide"], 2, axis=-1)
+                        labels = labels + fg - bg + 1
+                    else:
+                        labels = labels + self._inputs["sp_guide"] + 1
+            tf.summary.image("{}/{}".format(self.args.tag, labels.op.name), labels,
                              max_outputs=1, collections=[self.DEFAULT])
 
             for key, value in self._image_summaries.items():

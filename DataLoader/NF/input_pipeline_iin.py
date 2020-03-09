@@ -96,7 +96,6 @@ def add_arguments(parser):
     group.add_argument("--case_id", type=int)
     group.add_argument("--pos", type=int, nargs="+")
     group.add_argument("--ct_base", type=int, default=[32], nargs="+", help="Context base size")
-    group.add_argument("--img_grad", action="store_true", help="Use image gradients")
 
 
 class Case(object):

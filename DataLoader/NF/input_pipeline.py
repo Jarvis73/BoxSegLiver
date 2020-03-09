@@ -63,7 +63,6 @@ def add_arguments(parser):
     group.add_argument("--eval_in_patches", action="store_true")
     group.add_argument("--eval_num_batches_per_epoch", type=int, default=100)
     group.add_argument("--eval_mirror", action="store_true")
-    group.add_argument("--img_grad", action="store_true", help="Use image gradients")
 
 
 def _get_datasets(test_fold=-1, filter_size=10, choices=None, exclude=None):
@@ -201,7 +200,7 @@ def input_fn(mode, params):
 
 
 def data_processing_train(im_files, seg_file, read_size, bbox, PID_ci,  img_clip, config,
-                          random_noise, random_flip_left_right, random_flip_up_down):
+                          random_noise, train):
     off_x, off_y, height, width = bbox[0], bbox[1], bbox[2], bbox[3]
 
     def parse_im(name):
@@ -234,12 +233,10 @@ def data_processing_train(im_files, seg_file, read_size, bbox, PID_ci,  img_clip
         # Remove noise in empty slice
         features["images"] *= tf.cast(tf.greater(tf.strings.length(im_files), 0), tf.float32)
         logging.info("Train: Add random noise, scale = {}".format(config.noise_scale))
-    if random_flip_left_right:
-        features["images"], labels = image_ops.random_flip_left_right(features["images"], labels)
-        logging.info("Train: Add random flip left <-> right")
-    if random_flip_up_down:
-        features["images"], labels = image_ops.random_flip_up_down(features["images"], labels)
-        logging.info("Train: Add random flip up <-> down")
+    if train and config.random_flip > 0:
+        features["images"], labels = image_ops.random_flip(features["images"], labels, flip=config.random_flip)
+        logging.info("Train: Add random flip " +
+                     "left <-> right " * (config.random_flip & 1 > 0) + "up <-> down" * (config.random_flip & 2 > 0))
 
     return features, labels
 
@@ -347,11 +344,7 @@ def get_dataset_for_train(data_list, tumor_percent=0., random_scale=(1., 1.), co
                                                              tf.TensorShape([]),
                                                              tf.TensorShape([2])))
                .apply(tf.data.experimental.map_and_batch(
-                        lambda *args_: data_processing_train(*args_,
-                                                             config=config,
-                                                             random_noise=True,
-                                                             random_flip_left_right=config.random_flip & 1 > 0,
-                                                             random_flip_up_down=config.random_flip & 2 > 0),
+                        lambda *args_: data_processing_train(*args_, config=config, random_noise=True, train=True),
                         batch_size, num_parallel_batches=1))
                .prefetch(buffer_size=contrib_data.AUTOTUNE))
 
@@ -375,11 +368,7 @@ def get_dataset_for_eval_online(data_list, tumor_percent=0., config=None):
                                                              tf.TensorShape([]),
                                                              tf.TensorShape([2])))
                .apply(tf.data.experimental.map_and_batch(
-                        lambda *args_: data_processing_train(*args_,
-                                                             config=config,
-                                                             random_noise=False,
-                                                             random_flip_left_right=False,
-                                                             random_flip_up_down=False),
+                        lambda *args_: data_processing_train(*args_, config=config, random_noise=False, train=False),
                         batch_size, num_parallel_batches=1))
                .prefetch(buffer_size=contrib_data.AUTOTUNE))
 

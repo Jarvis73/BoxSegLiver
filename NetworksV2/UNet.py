@@ -105,11 +105,11 @@ class UNet(base.BaseNet):
             self.ret_pred = kwargs.get("ret_pred", False)
             if self.ret_prob or self.ret_pred:
                 self.probability = slim.softmax(logits)
-                split = tf.split(self.probability, self.num_classes, axis=-1)
-                if self.ret_prob:
-                    for i in range(1, self.num_classes):
-                        self.predictions[self.classes[i] + "Prob"] = split[i]
+                # if self.ret_prob:
+                #     for i in range(1, self.num_classes):
+                #         self.predictions[self.classes[i] + "Prob"] = split[i]
                 if self.ret_pred:
+                    split = tf.split(self.probability, self.num_classes, axis=-1)
                     zeros = tf.zeros_like(split[0], dtype=tf.uint8)
                     ones = tf.ones_like(zeros, dtype=tf.uint8)
                     for i in range(1, self.num_classes):

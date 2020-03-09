@@ -21,6 +21,8 @@ import tensorflow as tf     # Tensorflow >= 1.13.0
 import tensorflow_estimator as tfes
 from pathlib import Path
 from tensorflow.python.platform import tf_logging as logging
+from multiprocessing import Pool, Manager
+import signal
 
 import config
 import loss_metrics
@@ -30,8 +32,6 @@ from core import solver
 from core import models
 from core import estimator as estimator_lib
 from core import hooks
-from DataLoader.Liver import input_pipeline_g
-from evaluators import evaluator_liver
 
 ModeKeys = tfes.estimator.ModeKeys
 input_pipeline = None
@@ -66,6 +66,10 @@ def _get_arguments():
     elif argv[1] == "nf2":
         global evaluator_lib, input_pipeline
         from DataLoader.NF import input_pipeline_iin as input_pipeline
+        from evaluators import evaluator_nf as evaluator_lib
+    elif argv[1] == "nf_inter":
+        global evaluator_lib, input_pipeline
+        from DataLoader.NF import input_pipeline_g_simply as input_pipeline
         from evaluators import evaluator_nf as evaluator_lib
     elif argv[1] not in ["-h", "--help"]:
         raise ValueError("First argument must be choose from [liver, nf, nf2], got {}".format(argv[1]))
@@ -106,6 +110,11 @@ def _custom_tf_logger(args):
         with_time = True
     logging._logger = create_logger(log_file=log_file, with_time=with_time, file_level=1,
                                     clear_exist_handlers=True, name="tensorflow")
+
+
+def initializer():
+    """Ignore SIGINT in child workers."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 
 def main():
@@ -184,18 +193,26 @@ def main():
 
         steps, max_steps = ((args.num_of_steps, None)
                             if args.num_of_steps > 0 else (None, args.num_of_total_steps))
-        estimator.train(input_pipeline.input_fn,
-                        hooks=train_hooks,
-                        steps=steps,
-                        max_steps=max_steps)
+
+        try:
+            args.pool = Pool(4, initializer=initializer)
+            args.queue = Manager().Queue(args.batch_size)
+            estimator.train(input_pipeline.input_fn,
+                            hooks=train_hooks,
+                            steps=steps,
+                            max_steps=max_steps)
+        except KeyboardInterrupt:
+            logging.info("Main process terminated by user.")
+        finally:
+            args.pool.close()
+            args.pool.join()
+            logging.info("Clean up!")
+        logging.info("Process end.")
 
     elif args.mode in [ModeKeys.EVAL, ModeKeys.PREDICT]:
         params = {"args": args}
         params.update(models.get_model_params(args))
-        evaluator = evaluator_lib.get_evaluator(args.evaluator,
-                                                model_dir=args.model_dir,
-                                                params=params,
-                                                use_sg_reduce_fp=True)
+        evaluator = evaluator_lib.get_evaluator(args.evaluator, model_dir=args.model_dir, params=params)
         if args.use_spatial and args.eval_no_sp or ("eval_no_p" in args and args.eval_no_p):
             evaluator.run(input_pipeline.input_fn,
                           checkpoint_path=args.ckpt_path,
@@ -209,4 +226,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

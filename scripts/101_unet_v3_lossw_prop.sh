@@ -27,7 +27,7 @@ if [[ "$TASK" == "train" ]]; then
         --primary_metric "NF/Dice" \
         --loss_weight_type proportion \
         --loss_proportion_decay 1000 \
-        --batches_per_epoch 600 \
+        --batches_per_epoch 1200 \
         --batch_size 16 \
         --weight_decay_rate 0.00001 \
         --learning_policy plateau \
@@ -40,7 +40,7 @@ if [[ "$TASK" == "train" ]]; then
         --eval_per_epoch \
         --evaluator Volume \
         --save_best \
-        --summary_prefix 101_unet_nf \
+        --summary_prefix nf \
         $@
 elif [[ "$TASK" == "eval" ]]; then
     PYTHONPATH="${PROJECT_DIR}" PYTHONNOUSERSITE=True CUDA_VISIBLE_DEVICES=${GPU_ID} eval ${NICE} $CONDA_PREFIX/bin/python ./entry/main.py nf \

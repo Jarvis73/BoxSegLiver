@@ -15,19 +15,20 @@ PROJECT_DIR=$(dirname $(dirname $(realpath $0)))
 BASE_NAME=$(basename $0)
 
 if [[ "$TASK" == "train" ]]; then
-   PYTHONPATH="${PROJECT_DIR}" PYTHONNOUSERSITE=True CUDA_VISIBLE_DEVICES=${GPU_ID} eval ${NICE} $CONDA_PREFIX/bin/python ./entry/main.py nf \
+   PYTHONPATH="${PROJECT_DIR}" PYTHONNOUSERSITE=True CUDA_VISIBLE_DEVICES=${GPU_ID} \
+        eval ${NICE} $CONDA_PREFIX/bin/python ./entry/main.py nf \
         --mode train \
         --tag ${BASE_NAME%".sh"} \
         --model UNet \
         --classes NF \
         --test_fold 0 \
         --im_height 256 --im_width 256 --im_channel 3 --filter_size 10 \
-        --noise_scale 0 --random_flip 1 \
+        --noise_scale 0 --random_flip 3 \
         --num_of_total_steps 999999 \
         --primary_metric "NF/Dice" \
         --loss_weight_type numerical \
         --loss_numeric_w 1 6 \
-        --batches_per_epoch 600 \
+        --batches_per_epoch 1200 \
         --batch_size 16 \
         --weight_decay_rate 0.00001 \
         --learning_policy plateau \
@@ -40,21 +41,20 @@ if [[ "$TASK" == "train" ]]; then
         --eval_per_epoch \
         --evaluator Volume \
         --save_best \
-        --summary_prefix 101_unet_nf \
+        --summary_prefix nf \
         $@
 elif [[ "$TASK" == "eval" ]]; then
-    PYTHONPATH="${PROJECT_DIR}" PYTHONNOUSERSITE=True CUDA_VISIBLE_DEVICES=${GPU_ID} eval ${NICE} $CONDA_PREFIX/bin/python ./entry/main.py nf \
+    PYTHONPATH="${PROJECT_DIR}" PYTHONNOUSERSITE=True CUDA_VISIBLE_DEVICES=${GPU_ID} \
+        eval ${NICE} $CONDA_PREFIX/bin/python ./entry/main_eval.py \
         --mode eval \
         --tag ${BASE_NAME%".sh"} \
         --model UNet \
         --classes NF \
         --test_fold 0 \
         --im_height 960 --im_width 320 --im_channel 3 \
-        --random_flip 1 \
-        --primary_metric "NF/Dice" \
-        --batch_size 4 \
+        --random_flip 3 \
+        --batch_size 1 \
         --normalizer instance_norm \
-        --evaluator Volume \
         --eval_mirror \
         --metrics_eval Dice VOE RVD \
         $@

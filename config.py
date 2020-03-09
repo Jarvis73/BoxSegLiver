@@ -73,6 +73,7 @@ def add_arguments(parser):
                        type=float,
                        default=0.,
                        required=False, help="Used for per_process_gpu_memory_fraction")
+    group.add_argument("--fix", action="store_true", help="Remove norm+relu in spatial guide module")
 
 
 def _try_to_find_ckpt(path, args):
@@ -100,12 +101,12 @@ def check_args(args, parser):
         if not args.loss_proportion_decay:
             raise parser.error("loss_weight_type==proportion need parameter: --loss_proportion_decay")
 
-    if args.primary_metric:
+    if hasattr(args, "primary_metric") and args.primary_metric:
         parts = args.primary_metric.split("/")
         if len(parts) == 2:
             if parts[0] not in args.classes or parts[1] not in args.metrics_eval:
                 raise ValueError("Wrong primary_metric: {}".format(args.primary_metric))
-    if args.secondary_metric:
+    if hasattr(args, "secondary_metric") and args.secondary_metric:
         parts = args.secondary_metric.split("/")
         if len(parts) == 2:
             if parts[0] not in args.classes or parts[1] not in args.metrics_eval:

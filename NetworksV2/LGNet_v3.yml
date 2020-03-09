@@ -1,0 +1,3 @@
+mod_layers: [[1], [2]]
+ret_prob: false
+ret_pred: true

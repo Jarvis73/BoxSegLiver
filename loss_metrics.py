@@ -424,7 +424,7 @@ def metric_3d(logits3d, labels3d, required=None, **kwargs):
         if "VOE" in required:
             metrics_3d["VOE"] = 1. - mtr.jc(logits3d, labels3d)
         if "RVD" in required:
-            metrics_3d["RVD"] = mtr.ravd(logits3d, labels3d)
+            metrics_3d["RVD"] = np.absolute(mtr.ravd(logits3d, labels3d))
 
     return metrics_3d
 

@@ -65,6 +65,10 @@ def _get_arguments():
         global evaluator_lib, input_pipeline
         from DataLoader.NF import input_pipeline
         from evaluators import evaluator_nf as evaluator_lib
+    elif argv[1] == "nf_inter":
+        global evaluator_lib, input_pipeline
+        from DataLoader.NF import input_pipeline_g_simply as input_pipeline
+        from evaluators import evaluator_nf as evaluator_lib
     elif argv[1] not in ["-h", "--help"]:
         raise ValueError("First argument must be choose from [only_liver, liver, nf], got {}".format(argv[1]))
 
@@ -174,10 +178,15 @@ def main():
 
         steps, max_steps = ((args.num_of_steps, None)
                             if args.num_of_steps > 0 else (None, args.num_of_total_steps))
-        estimator.train(input_pipeline.input_fn,
-                        hooks=train_hooks,
-                        steps=steps,
-                        max_steps=max_steps)
+        try:
+            estimator.train(input_pipeline.input_fn,
+                            hooks=train_hooks,
+                            steps=steps,
+                            max_steps=max_steps)
+        except KeyboardInterrupt:
+            logging.info("Main process terminated by user.")
+            logging.info("Clean up!")
+        logging.info("Process end.")
 
     elif args.mode in [ModeKeys.EVAL, ModeKeys.PREDICT]:
         params = {"args": args}
@@ -190,4 +199,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

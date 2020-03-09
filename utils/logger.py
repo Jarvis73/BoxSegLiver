@@ -2,6 +2,7 @@ import os
 import logging
 from time import time, strftime, localtime
 from datetime import datetime
+import traceback, functools
 
 levels = [logging.NOTSET,
           logging.DEBUG,

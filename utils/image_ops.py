@@ -245,7 +245,7 @@ def random_noise(image, scale, mask=None, seed=None, name=None, ntype="uniform")
         return new_image
 
 
-def random_flip(image, label=None, seed=None, direction="lr", name=None):
+def random_flip(image, label=None, seed=None, flip=1, name=None):
     """Randomly flip an image horizontally (left to right) or vertically (up to down).
 
     With a 1 in 2 chance, outputs the contents of `image` flipped along the
@@ -260,8 +260,9 @@ def random_flip(image, label=None, seed=None, direction="lr", name=None):
     seed: A Python integer. Used to create a random seed. See
         `tf.set_random_seed`
         for behavior.
-    direction: str
-        `lr` for left/right, `ud` for up/down
+    flip: int, flip & 1 > 0: left/right
+               flip & 2 > 0: up/down
+    name, str
 
     Returns
     -------
@@ -273,30 +274,33 @@ def random_flip(image, label=None, seed=None, direction="lr", name=None):
     """
     with tf.name_scope(name, "random_flip", [image, label]):
         if label is None:
-            if direction == "lr":
+            if flip & 1 > 0:
                 return tf.image.random_flip_left_right(image, seed)
-            elif direction == "ud":
+            if flip & 2 > 0:
                 return tf.image.random_flip_up_down(image, seed)
-            else:
-                raise ValueError("Wrong direction: %s" % direction)
         else:
-            label_new = tf.expand_dims(tf.cast(label, image.dtype), axis=-1)
-            combined = tf.concat((image, label_new), axis=-1)
-            if direction == "lr":
-                combined_flipped = tf.image.random_flip_left_right(combined, seed)
-            elif direction == "ud":
-                combined_flipped = tf.image.random_flip_up_down(combined, seed)
-            else:
-                raise ValueError("Wrong direction: %s" % direction)
-            return combined_flipped[..., :-1], tf.cast(combined_flipped[..., -1], dtype=label.dtype)
+            def lr_fn(img, lab):
+                img = tf.image.flip_left_right(img)
+                lab = tf.expand_dims(lab, axis=-1)
+                lab = tf.image.flip_left_right(lab)
+                lab = tf.squeeze(lab, axis=-1)
+                return img, lab
 
+            def ud_fn(img, lab):
+                img = tf.image.flip_up_down(img)
+                lab = tf.expand_dims(lab, axis=-1)
+                lab = tf.image.flip_up_down(lab)
+                lab = tf.squeeze(lab, axis=-1)
+                return img, lab
 
-def random_flip_left_right(image, label=None, seed=None):
-    return random_flip(image, label, seed, direction="lr", name="random_flip_left_right")
+            def false_fn():
+                return image, label
 
-
-def random_flip_up_down(image, label=None, seed=None):
-    return random_flip(image, label, seed, direction="ud", name="random_flip_up_down")
+            if flip & 1 > 0:
+                image, label = tf.cond(tf.random.uniform(()) >= 0.5, lambda: lr_fn(image, label), false_fn)
+            if flip & 2 > 0:
+                image, label = tf.cond(tf.random.uniform(()) >= 0.5, lambda: ud_fn(image, label), false_fn)
+            return image, label
 
 
 def random_zero_or_one(shape, dtype, seed=None):
@@ -376,18 +380,16 @@ def binary_dilation2d(inputs, connection=1, iterations=1, padding="SAME", name=N
     return outputs
 
 
-def create_spatial_guide_2d(shape, center, stddev):
+def create_spatial_guide_2d(shape, center, stddev=None, euclidean=False):
     """
     Tensorflow implementation of `create_gaussian_distribution()`
 
     Parameters
     ----------
-    shape: Tensor
-        two values
-    center: Tensor
-        Float tensor with shape [n, 2], 2 means (x, y)
-    stddev: Tensor
-        Float tensor with shape [n, 2], 2 means (x, y)
+    shape: tf.Tensor, two values
+    center: tf.Tensor, Float tensor with shape [n, 2], 2 means (x, y)
+    stddev: tf.Tensor, Float tensor with shape [n, 2], 2 means (x, y)
+    euclidean: bool, use Euclidean distance or exponential edt
 
     Returns
     -------
@@ -409,7 +411,11 @@ def create_spatial_guide_2d(shape, center, stddev):
         multiples=tf.concat((tf.shape(center)[:1], [1, 1, 1]), axis=0))     # [n, h, w, 2]
     coords = tf.cast(coords, tf.float32)
     center = tf.expand_dims(tf.expand_dims(center, axis=-2), axis=-2)       # [n, 1, 1, 2]
+    if euclidean:
+        d = tf.sqrt(tf.reduce_sum((coords - center) ** 2, axis=-1, keepdims=True))  # [n, h, w, 1]
+        return tf.reduce_min(d, axis=0)     # [h, w, 1]
+
     stddev = tf.expand_dims(tf.expand_dims(stddev, axis=-2), axis=-2)       # [n, 1, 1, 2]
     normalizer = 2. * stddev * stddev                                       # [n, 1, 1, 2]
-    d = tf.exp(-tf.reduce_sum((coords - center) ** 2 / normalizer, axis=-1, keepdims=True))    # [n, h, w]
+    d = tf.exp(-tf.reduce_sum((coords - center) ** 2 / normalizer, axis=-1, keepdims=True))  # [n, h, w, 1]
     return tf.reduce_max(d, axis=0)               # [h, w, 1]

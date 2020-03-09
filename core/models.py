@@ -24,12 +24,13 @@ from tensorflow.python import pywrap_tensorflow as pt
 from NetworksV2.UNet import UNet
 from NetworksV2.GUNet import GUNet
 from NetworksV2.UNetInter import UNetInter
+from NetworksV2.LGNet import LGNet
 # from NetworksV2.DenseUNet import DenseUNet
 
 ModeKeys = tfes.estimator.ModeKeys
 # Available models
 MODEL_ZOO = [
-    UNet, GUNet, UNetInter # , DenseUNet
+    UNet, GUNet, UNetInter, LGNet  # , DenseUNet
 ]
 
 
@@ -78,6 +79,7 @@ def add_arguments(parser):
     group.add_argument("--batches_per_epoch", type=int, default=2000, help="Number of batches per epoch")
     group.add_argument("--eval_per_epoch", action="store_true")
     group.add_argument("--dropout", type=float, help="Dropout for backbone networks")
+    group.add_argument("--img_grad", action="store_true", help="Use image gradients")
 
 
 def get_model_params(args, build_metrics=False, build_summaries=False):

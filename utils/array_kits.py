@@ -449,7 +449,8 @@ def create_gaussian_distribution(shape, center, stddev):
     return np.clip(d, 0, 1).astype(np.float32)
 
 
-def create_gaussian_distribution_v2(shape, centers, stddevs, indexing="ij", keepdims=False):
+def create_gaussian_distribution_v2(shape, centers, stddevs=None, indexing="ij", keepdims=False,
+                                    euclidean=False):
     """
     Parameters
     ----------
@@ -476,15 +477,18 @@ def create_gaussian_distribution_v2(shape, centers, stddevs, indexing="ij", keep
     -1s in center and stddev are padding value and almost don't affect spatial guide
     """
     centers = np.asarray(centers, np.float32)                                   # [n, 2]    if dimension=2
-    stddevs = np.asarray(stddevs, np.float32)                                   # [n, 2]
     assert centers.ndim == 2, centers.shape
-    assert centers.shape == stddevs.shape, (centers.shape, stddevs.shape)
     coords = [np.arange(0, s) for s in shape]
     coords = np.tile(
         np.stack(np.meshgrid(*coords, indexing=indexing), axis=-1)[None],
         reps=[centers.shape[0]] + [1] * (centers.shape[1] + 1))                 # [n, h, w, 2]
     coords = coords.astype(np.float32)
     centers = centers[..., None, None, :]                                       # [n, 1, 1, 2]
+    if euclidean:
+        d = np.sqrt(np.sum((coords - centers) ** 2, axis=-1, keepdims=keepdims))
+        return np.min(d, axis=0)
+
+    stddevs = np.asarray(stddevs, np.float32)                                   # [n, 2]
     stddevs = stddevs[..., None, None, :]                                       # [n, 1, 1, 2]
     normalizer = 2 * stddevs * stddevs                                          # [n, 1, 1, 2]
     d = np.exp(-np.sum((coords - centers) ** 2 / normalizer, axis=-1, keepdims=keepdims))   # [n, h, w, 1] / [n, h, w]
@@ -1239,27 +1243,10 @@ def glcm_features(image, distances, angles, levels=256,
 
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
-    a = np.zeros((6, 8, 8))
-    a[:3, 1, 1] = 1
-    a[1, :3, :3] = 1
-    a[2:5, 6, 6] = 1
-    a[3, 5:, 5:] = 1
-    gpl = guide_pixel_list(a, 1, "middle", tile_guide=True)
-    for x in gpl:
-        print(x[0])
-        print(x[1])
-        print(x[2], "\n")
-
-    plt.subplot(231)
-    plt.imshow(a[0], cmap="gray")
-    plt.subplot(232)
-    plt.imshow(a[1], cmap="gray")
-    plt.subplot(233)
-    plt.imshow(a[2], cmap="gray")
-    plt.subplot(234)
-    plt.imshow(a[3], cmap="gray")
-    plt.subplot(235)
-    plt.imshow(a[4], cmap="gray")
-    plt.subplot(236)
-    plt.imshow(a[5], cmap="gray")
-    plt.show()
+    a = np.zeros((20, 20))
+    a[8:16, 8:16] = 1
+    res = compute_robust_moments(a)
+    print(res)
+    a[7:16, 7:16] = 1
+    res = compute_robust_moments(a)
+    print(res)
