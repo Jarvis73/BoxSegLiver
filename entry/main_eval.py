@@ -58,6 +58,8 @@ def _get_arguments():
     group.add_argument("--save_path", type=str, default="prediction")
     group.add_argument("--inter_thresh", type=float, default=0.8, help="Threshold of the segmentation goal")
     group.add_argument("--max_iter", type=int, default=20, help="Maximum iters for each image in interaction")
+    group.add_argument("--infer_set", type=str, default="eval", help="Choice from [train, eval]")
+    group.add_argument("--save_subdir", type=str, default="prediction")
 
     args = parser.parse_args()
     config.check_args(args, parser)
@@ -100,7 +102,7 @@ def filter_tiny_nf(mask):
 
 def load_dataset(cfg, release_label=True):
     data = input_pipeline.load_data()
-    dataset = input_pipeline.load_split(cfg.test_fold, mode="eval")
+    dataset = input_pipeline.load_split(cfg.test_fold, mode=cfg.infer_set)
     dataset = dataset[[True if pid in data else False for pid in dataset.pid]]
     # dataset containing nf (remove benign scans)
     dataset['nf'] = [True if len(data[pid]['lab_rng']) > 1 else False for pid in dataset.pid]
@@ -129,7 +131,7 @@ def load_dataset(cfg, release_label=True):
             data[i].pop('lab')
 
     if cfg.save_predict:
-        save_path = Path(cfg.model_dir) / "prediction"
+        save_path = Path(cfg.model_dir) / cfg.save_subdir
         save_path.mkdir(parents=True, exist_ok=True)
     else:
         save_path = None
@@ -276,8 +278,8 @@ def main():
     shape = (cfg.im_width, cfg.im_height)
     total_inters = 0
     for _, sample in nf_set.iterrows():
-        if sample.pid != 133:
-            continue
+        # if sample.pid != 103:
+        #     continue
         volume, label = dataset[sample.pid]["img"], dataset[sample.pid]["slim"]
         _, height, width = volume.shape
         final_pred = np.zeros_like(label, dtype=np.uint8)
@@ -286,8 +288,8 @@ def main():
         case_inters = 0
         slice_containing_nf = np.where(np.max(label, axis=(1, 2)) > 0)[0]
         for i in slice_containing_nf:
-            if i != 14:
-                continue
+            # if i != 14:
+            #     continue
             img = misc.img_crop(volume, i, cfg.im_channel)[0].transpose(1, 2, 0).astype(np.float32)
             img = cv2.resize(img, shape, interpolation=cv2.INTER_LINEAR)
             msk = img > 0
@@ -313,8 +315,8 @@ def main():
                     pred = cv2.resize(pred[0], (width, height), interpolation=cv2.INTER_NEAREST)
                     dice = compute_dice(pred, label[i])
                     print("{:.3f} -> ".format(dice), end="", flush=True)
-                    with open("{}.pkl".format(num_iter), "wb") as f:
-                        pickle.dump((img, sp_guide, pred), f)
+                    # with open("{}.pkl".format(num_iter), "wb") as f:
+                    #     pickle.dump((img, sp_guide, pred), f)
                     if dice > cfg.inter_thresh or num_iter >= cfg.max_iter:
                         print(" Number iters: {}".format(num_iter))
                         case_inters += num_iter

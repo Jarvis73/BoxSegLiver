@@ -22,6 +22,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from scipy.ndimage.morphology import binary_erosion
+from scipy.ndimage import label as label_connected, generate_binary_structure, find_objects
 import tensorflow as tf
 import tensorflow_estimator as tfes
 from tensorflow.python.platform import tf_logging as logging
@@ -42,6 +43,7 @@ PROJ_ROOT = Path(__file__).parent.parent.parent
 RND_SCALE = (1.0, 1.25)
 
 data_cache = None
+neg_cache = None
 
 
 def add_arguments(parser):
@@ -100,6 +102,8 @@ def add_arguments(parser):
     group.add_argument("--real_sp", type=str, help="Path to real spatial guide.")
     group.add_argument("--guide_scale", type=float, default=5., help="Base scale of guides")
     group.add_argument("--guide_channel", type=int, default=2, help="1 or 2")
+    group.add_argument("--fp_sample", action="store_true", help="Negative clicks sampled from false positive areas")
+    group.add_argument("--sample_neg", type=float, default=0., help="Sample negative patches containing fp pixels")
 
 
 def load_data(debug=False):
@@ -146,6 +150,64 @@ def load_data(debug=False):
     return data_cache
 
 
+def load_neg(data, dim=2):
+    """ Load negative """
+    global neg_cache
+
+    if neg_cache is not None:
+        return neg_cache
+
+    neg_path = PROJ_ROOT / f"data/NF/neg_{dim}d.gz.pkl"
+
+    if neg_path.exists():
+        print(f"Loading negative cache from {neg_path}")
+        with neg_path.open("rb") as f:
+            neg_cache = pickle.loads(zlib.decompress(f.read()))
+        print("Finished!")
+        return neg_cache
+
+    pred_dir = PROJ_ROOT / "model_dir/102_gnet_v3_2/train1"
+    pred_list = list(pred_dir.glob("predict-*.nii.gz"))
+    neg_cache = {}
+    if dim == 3:
+        struct = generate_binary_structure(3, 1)
+        for path in tqdm.tqdm(pred_list):
+            pid = int(path.name.split(".")[0].split("-")[-1])
+            _, predict = nii_kits.read_nii(path)
+            label = data[pid]["lab"]
+            res, n_obj = label_connected(predict, struct)
+            slices = find_objects(res)
+            for i, sli in enumerate(slices):
+                cube = res[sli]
+                if ((cube == i + 1) * (label[sli] != 0)).sum() or (cube == i + 1).sum() <= 5:
+                    cube[cube == i + 1] = 0
+            neg_cache[pid] = np.clip(res, 0, 1).astype(np.uint8)
+    else:   # dim = 2
+        struct = generate_binary_structure(2, 1)
+        for path in tqdm.tqdm(pred_list):
+            pid = int(path.name.split(".")[0].split("-")[-1])
+            _, predict_3d = nii_kits.read_nii(path)
+            label_3d = data[pid]["lab"].copy()
+            result = np.zeros_like(predict_3d, dtype=np.uint8)
+            for s in np.where(predict_3d.max(axis=(1, 2)))[0]:
+                predict = predict_3d[s]
+                label = label_3d[s]
+                res, n_obj = label_connected(predict, struct)
+                slices = find_objects(res)
+                for i, sli in enumerate(slices):
+                    cube = res[sli]
+                    if ((cube == i + 1) * (label[sli] != 0)).sum() or (cube == i + 1).sum() <= 5:
+                        cube[cube == i + 1] = 0
+                result[s] = np.clip(res, 0, 1)
+            neg_cache[pid] = {"bin": result, "pos": np.stack(np.where(result > 0), axis=1)}
+
+    with neg_path.open("wb") as f:
+        print(f"Saving negative cache to {neg_path}")
+        f.write(zlib.compress(pickle.dumps(neg_cache, pickle.HIGHEST_PROTOCOL)))
+    print("Finished!")
+    return neg_cache
+
+
 def load_split(test_fold=0, mode="train"):
     fold_path = PROJ_ROOT / "DataLoader/NF/prepare/split.csv"
     folds = pd.read_csv(str(fold_path))
@@ -158,7 +220,8 @@ def load_split(test_fold=0, mode="train"):
     return train_split
 
 
-def inter_simulation(mask, margin=5, step=10, N=5, bg=False, d=40, strategy=0, ret_type=np.float32):
+def inter_simulation(mask, margin=5, step=10, N=5, bg=False, d=40, strategy=0, ret_type=np.float32,
+                     neg_patch=None):
     """
     Interaction simulation, including positive points and negative points
 
@@ -170,11 +233,13 @@ def inter_simulation(mask, margin=5, step=10, N=5, bg=False, d=40, strategy=0, r
     N:        int, maximum number of interctions
     bg:       bool, True for border_value=1, False for border_value=0 in binary erosion
     d:        int, band width outside the object
-    strategy: int, value in [0, 1, 3],
+    strategy: int, value in [0, 1, 3, 4],
                    0: random in whole bg
                    1: random in band
                    3: surround the object evenly
+                   4: random in false positive regions in `neg_patch`
     ret_type:
+    neg_patch: np.ndarray, a mask contains false positive regions.
 
     Returns
     -------
@@ -184,18 +249,21 @@ def inter_simulation(mask, margin=5, step=10, N=5, bg=False, d=40, strategy=0, r
     small = False
     first = True
     all_pts = []
-    G = binary_erosion(mask, iterations=margin, border_value=bg)
-    if bg and strategy != 0:
-        G = G ^ binary_erosion(G, iterations=d, border_value=bg)
-    if not G.max():    # too small tumor
-        G = mask.copy()
-        small = True
+    if neg_patch is not None and strategy == 4:
+        G = neg_patch.copy()
+    else:
+        G = binary_erosion(mask, iterations=margin, border_value=bg)
+        if bg and strategy != 0:
+            G = G ^ binary_erosion(G, iterations=d, border_value=bg)
+        if not G.max():    # too small tumor
+            G = mask.copy()
+            small = True
 
     height, width = mask.shape
     for n in range(np.random.randint(int(not bg), N)):
         cy, cx = np.where(G)
         if not small:
-            if first or strategy in [0, 1]:
+            if first or strategy in [0, 1, 4]:
                 i = np.random.choice(cy.shape[0])
             else:  # strategy == 3
                 dist = np.stack([cy, cx], axis=1).reshape(-1, 1, 2) - np.asarray(all_pts).reshape(1, -1, 2)
@@ -304,12 +372,41 @@ def data_processing(img, lab, *pts, train, cfg):
     return feat, lab
 
 
-def gen_kernel(nf, queue, img_patch, lab_patch):
-    fg_pts = inter_simulation(lab_patch, margin=3, step=10, N=5, bg=False, strategy=0) \
-        if nf else np.zeros((0, 2), dtype=np.float32)
-    bg_pts = inter_simulation(1 - lab_patch, margin=3, step=10, N=5, bg=True, d=40,
-                              strategy=1 if np.random.sample() >= 0.5 else 3)
-    queue.put((img_patch, lab_patch, fg_pts, bg_pts))
+def gen_kernel(nf, queue, img_patch, lab_patch, fp_sample):
+    """
+    Kernel for parallel processing
+
+    Parameters
+    ----------
+    nf:         bool, has NF or not
+    queue:      multiprocessing.Manager().Queue, store results
+    img_patch:  np.ndarray, image patch
+    lab_patch:  np.ndarray, label patch
+    fp_sample: bool, use false positive sampling or not
+    """
+    if fp_sample:
+        neg_patch = lab_patch // 10
+        lab_patch = lab_patch % 10
+    else:
+        neg_patch = None
+    if lab_patch.max() > 0:
+        fg_pts = inter_simulation(lab_patch, margin=3, step=10, N=5, bg=False, strategy=0) \
+            if nf else np.zeros((0, 2), dtype=np.float32)
+    else:
+        fg_pts = np.zeros((0, 2), dtype=np.float32)
+    if neg_patch is not None:
+        if neg_patch.max() > 0:
+            strategy = 4
+        elif np.random.sample() > 0.5:
+            strategy = 1
+        else:
+            strategy = 3
+        bg_pts = inter_simulation(1 - lab_patch, margin=3, step=10, N=5, bg=True, d=40,
+                                  strategy=strategy, neg_patch=neg_patch)
+    else:
+        bg_pts = inter_simulation(1 - lab_patch, margin=3, step=10, N=5, bg=True, d=40,
+                                  strategy=1 if np.random.sample() >= 0.5 else 3)
+    queue.put((img_patch.astype(np.float32), lab_patch.astype(np.int32), fg_pts, bg_pts))
 
 
 def gen_batch(dataset, batch_size, train, cfg):
@@ -325,11 +422,14 @@ def gen_batch(dataset, batch_size, train, cfg):
 
     """
     data = load_data()
+    if cfg.sample_neg or cfg.fp_sample:
+        neg_data = load_neg(data)
     dataset = dataset[[True if pid in data else False for pid in dataset.pid]]
     # dataset containing nf (remove benign scans)
     dataset['nf'] = [True if len(data[pid]['lab_rng']) > 1 else False for pid in dataset.pid]
     nf_set = dataset[dataset.nf]
     force_tumor = math.ceil(batch_size * cfg.tumor_percent)
+    force_fp = math.ceil(batch_size * cfg.sample_neg)
 
     target_size = np.array([cfg.im_height, cfg.im_width], dtype=np.float32)
     zoom = cfg.zoom_scale
@@ -339,17 +439,27 @@ def gen_batch(dataset, batch_size, train, cfg):
 
     while True:
         nf = nf_set.sample(n=force_tumor, replace=False, weights=None)
-        rem = dataset[~dataset.index.isin(nf.index)].sample(
-            n=batch_size - force_tumor, replace=False, weights=None)
-        batch = pd.concat([nf, rem])
+        nf['flag'] = [1] * len(nf.index)
+        if cfg.sample_neg:
+            fp = nf_set.sample(n=force_fp, replace=False, weights=None)
+            fp['flag'] = [2] * len(fp.index)
+            batch = pd.concat([nf, fp])
+        else:
+            rem = dataset[~dataset.index.isin(nf.index)].sample(
+                n=batch_size - force_tumor, replace=False, weights=None)
+            rem['flag'] = [0] * len(rem.index)
+            batch = pd.concat([nf, rem])
 
         # queue = []
         for i, sample in batch.iterrows():     # columns [split, pid, nf(bool)]
             crop_shape = (target_size * np.random.uniform(*zoom, size=2)).astype(np.int32)
             depth, height, width = data[sample.pid]['img'].shape  # volume shape
-            if sample.nf:
+            if sample.flag == 1:
                 i = np.random.choice(data[sample.pid]['pos'].shape[0])  # choice a foreground pixel
                 pz, py, px = data[sample.pid]['pos'][i]
+            elif train and sample.flag == 2 and neg_data[sample.pid]['pos'].shape[0] > 0:
+                i = np.random.choice(neg_data[sample.pid]['pos'].shape[0])
+                pz, py, px = neg_data[sample.pid]['pos'][i]
             else:
                 pz = np.random.randint(depth)
                 py = np.random.randint(height)
@@ -357,12 +467,17 @@ def gen_batch(dataset, batch_size, train, cfg):
             img_patch, slices = misc.img_crop(
                 data[sample.pid]['img'], pz, cfg.im_channel, (py, px), crop_shape)
             lab_patch = np.clip(data[sample.pid]['lab'][pz][slices], 0, 1)
+            if train and cfg.fp_sample:
+                neg_patch = neg_data[sample.pid]["bin"][pz][slices]
+                lab_patch = lab_patch + neg_patch * 10
 
-            img_patch = img_patch.transpose(1, 2, 0).astype(np.float32)
-            lab_patch = lab_patch.astype(np.int32)
+            img_patch = img_patch.transpose(1, 2, 0)
             if cfg.use_spatial:
-                cfg.pool.apply_async(gen_kernel, args=(sample.nf, cfg.queue, img_patch, lab_patch))
+                lab_patch = lab_patch.astype(np.int8)
+                cfg.pool.apply_async(gen_kernel, args=(sample.nf, cfg.queue, img_patch, lab_patch, cfg.fp_sample))
             else:
+                img_patch = img_patch.astype(np.float32)
+                lab_patch = lab_patch.astype(np.int32)
                 yield img_patch, lab_patch
 
         if cfg.use_spatial:
@@ -414,92 +529,3 @@ def get_val_loader(data_list, cfg):
                .prefetch(buffer_size=contrib_data.AUTOTUNE))
 
     return dataset
-
-
-def initializer():
-    """Ignore SIGINT in child workers."""
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
-
-
-if __name__ == "__main__":
-    from multiprocessing import Pool, Manager
-    import matplotlib.pyplot as plt
-    import signal
-
-
-    class Foo(object):
-        batch_size = 4
-        im_height = 256
-        im_width = 256
-        im_channel = 3
-        num_gpus = 1
-        noise_scale = 0.
-        random_flip = 0
-        test_fold = 0
-        zoom_scale = (1, 1)
-        eval_num_batches_per_epoch = 120
-        use_spatial = True
-        tumor_percent = 0.5
-        local_enhance = False
-        stddev = 3
-        guide_channel = 2
-
-        pool = Pool(2, initializer=initializer)
-        queue = Manager().Queue(batch_size)
-
-    args = Foo()
-    np.random.seed(1234)
-    tf.random.set_random_seed(1234)
-
-    # dataset = load_split(0, "train")
-    # gen = gen_batch(dataset, args.batch_size, True, args)
-    # try:
-    #     for a, b, c, d in gen:
-    #         fig, axes = plt.subplots(1, 2)
-    #         axes = axes.flat
-    #         axes[0].imshow(a[:, :, 1], cmap="gray")
-    #         axes[1].imshow(b, cmap="gray")
-    #         axes[1].plot(c[:, 1], c[:, 0], "r*")
-    #         axes[1].plot(d[:, 1], d[:, 0], "yo")
-    #         for ax in axes:
-    #             ax.axis("off")
-    #         plt.tight_layout()
-    #         plt.show()
-    gen = input_fn("train", {"args": args})
-    it = gen.make_initializable_iterator()
-    feature, labels = it.get_next()
-    try:
-        with tf.Session() as sess:
-            sess.run(it.initializer)
-            name = 1
-            while True:
-                feat, lab = sess.run([feature, labels])
-                fig, axes = plt.subplots(2, 4, figsize=(24, 12))
-                for i in range(2):
-                    axes[i][0].imshow(feat["images"][i, :, :, 1], cmap="gray")
-                    axes[i][1].imshow(lab[i], cmap="gray")
-                    axes[i][2].imshow(feat["sp_guide"][i, :, :, 0], cmap="gray")
-                    axes[i][3].imshow(feat["sp_guide"][i, :, :, 1], cmap="gray")
-                axes = axes.flat
-                for ax in axes:
-                    ax.axis("off")
-                plt.tight_layout()
-                plt.savefig(f"visual/{name}.png")
-                print(f"Save to ./visual/{name}.png")
-                plt.close()
-                name += 1
-                if name > 200:
-                    break
-
-    except KeyboardInterrupt:
-        print("User KeyboardInterrupt")
-
-    args.pool.close()
-    args.pool.join()
-
-    # a = np.zeros((512, 512), dtype=np.int32)
-    # a[150:350, 150:350] = 1
-    # fg = array_kits.create_gaussian_distribution_v2((512, 512), [[256, 256]], [[3, 3]])
-    # bg = array_kits.create_gaussian_distribution_v2((512, 512), [[400, 400]], [[3, 3]])
-    # plt.imshow(a + fg - bg)
-    # plt.show()
