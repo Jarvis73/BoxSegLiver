@@ -80,7 +80,7 @@ fs = 40
 # ----------------------------------------------------------------------------------------------
 # Plot tumor size
 #
-fig, ax = plt.subplots(1, 1, figsize=(25, 9))
+fig, ax = plt.subplots(1, 1, figsize=(12, 12))
 tumor_volume = curve(Path(__file__).parent)
 density = gaussian_kde(tumor_volume)
 density.covariance_factor = lambda: .25
@@ -88,18 +88,18 @@ density._compute_covariance()
 xs = np.logspace(0, 4, 100)
 ax.plot(xs, density(xs), linewidth=5)
 
-tumor_volume = curve(Path(__file__).parent.parent / "Liver")
-density = gaussian_kde(tumor_volume)
-density.covariance_factor = lambda: .25
-density._compute_covariance()
-xs = np.logspace(0, 3, 100)
-ax.plot(xs, density(xs), linewidth=5)
+# tumor_volume = curve(Path(__file__).parent.parent / "Liver")
+# density = gaussian_kde(tumor_volume)
+# density.covariance_factor = lambda: .25
+# density._compute_covariance()
+# xs = np.logspace(0, 3, 100)
+# ax.plot(xs, density(xs), linewidth=5)
 
 ax.set_xscale('log')
 ax.tick_params(axis='both', which='major', labelsize=fs)
 ax.set_xlabel('Tumor volume in log scale (cm$^3$)', fontsize=fs)
 ax.set_ylabel('Probability', fontsize=fs)
-ax.legend(["Neurofibroma", "Liver Tumor"], fontsize=fs)
+ax.legend(["Neurofibroma"], fontsize=fs)
 
 plt.tight_layout()
 plt.show()

@@ -56,7 +56,7 @@ def _get_arguments():
                        required=False, help="Given a specified checkpoint for evaluation. "
                                             "(default best checkpoint)")
     group.add_argument("--save_path", type=str, default="prediction")
-    group.add_argument("--inter_thresh", type=float, default=0.8, help="Threshold of the segmentation goal")
+    group.add_argument("--inter_thresh", type=float, default=0.9, help="Threshold of the segmentation goal")
     group.add_argument("--max_iter", type=int, default=20, help="Maximum iters for each image in interaction")
     group.add_argument("--infer_set", type=str, default="eval", help="Choice from [train, eval]")
     group.add_argument("--save_subdir", type=str, default="prediction")
@@ -103,7 +103,7 @@ def filter_tiny_nf(mask):
 def load_dataset(cfg, release_label=True):
     data = input_pipeline.load_data()
     dataset = input_pipeline.load_split(cfg.test_fold, mode=cfg.infer_set)
-    dataset = dataset[[True if pid in data else False for pid in dataset.pid]]
+    dataset = dataset[[True if item.pid in data and item.remove != 1 else False for _, item in dataset.iterrows()]]
     # dataset containing nf (remove benign scans)
     dataset['nf'] = [True if len(data[pid]['lab_rng']) > 1 else False for pid in dataset.pid]
     nf_set = dataset[dataset.nf]
@@ -157,6 +157,7 @@ def inter_simulation_test(pred, ref):
     Returns
     -------
     pos: np.ndarray, a list of two values (y, x)
+    fg: 0 for positive guide, 1 for negative
     """
     pred = pred.astype(np.bool)
     ref = ref.astype(np.bool)
@@ -193,7 +194,8 @@ def update_guide(pred, ref, guide, cfg, iteration):
         guide[:, :, fg] = update_op(guide[:, :, fg], cur_guide) if guide[:, :, fg].max() > 0 else cur_guide
     else:
         guide[fg][:, :, 0] = update_op(guide[fg][:, :, 0], cur_guide)
-    return guide, iteration + 1, pos.tolist()
+    iteration[fg] += 1
+    return guide, pos.tolist(), fg
 
 
 def compute_dice(pred, ref):
@@ -276,34 +278,35 @@ def main():
     accu = defaultdict(list)
     use_spatial = hasattr(cfg, "use_spatial") and cfg.use_spatial
     shape = (cfg.im_width, cfg.im_height)
-    total_inters = 0
+    total_inters = [0, 0]
     for _, sample in nf_set.iterrows():
-        # if sample.pid != 103:
+        # if sample.pid != 127:
         #     continue
         volume, label = dataset[sample.pid]["img"], dataset[sample.pid]["slim"]
         _, height, width = volume.shape
         final_pred = np.zeros_like(label, dtype=np.uint8)
 
         # Run inference
-        case_inters = 0
+        case_inters = [0, 0]
         slice_containing_nf = np.where(np.max(label, axis=(1, 2)) > 0)[0]
         for i in slice_containing_nf:
-            # if i != 14:
+            # if i != 19:
             #     continue
             img = misc.img_crop(volume, i, cfg.im_channel)[0].transpose(1, 2, 0).astype(np.float32)
             img = cv2.resize(img, shape, interpolation=cv2.INTER_LINEAR)
             msk = img > 0
             tmp = img[msk]
             img[msk] = (tmp - tmp.mean()) / (tmp.std() + 1e-8)
-            guide, pred, num_iter, pos = None, None, 0, None
+            guide, pred, num_iter, pos = None, None, [0, 0], None
             if use_spatial:
                 print("(Case {:3d} Slice {:2d}) Interacting: ".format(sample.pid, i), end="", flush=True)
                 feed_dict = {inputs["images"]: img[None]}
                 while True:
-                    guide, num_iter, new_pos = update_guide(pred, label[i], guide, cfg, num_iter)
+                    guide, new_pos, fg = update_guide(pred, label[i], guide, cfg, num_iter)
                     if new_pos == pos:
-                        print(" Number iters: {}".format(num_iter - 1))
-                        case_inters += num_iter
+                        print(" Number iters: {}/{}".format(num_iter[0], num_iter[1]))
+                        case_inters[0] += num_iter[0]
+                        case_inters[1] += num_iter[1]
                         break
                     pos = new_pos
                     sp_guide = guide if cfg.guide_channel == 2 else guide[0] - guide[1]
@@ -317,9 +320,10 @@ def main():
                     print("{:.3f} -> ".format(dice), end="", flush=True)
                     # with open("{}.pkl".format(num_iter), "wb") as f:
                     #     pickle.dump((img, sp_guide, pred), f)
-                    if dice > cfg.inter_thresh or num_iter >= cfg.max_iter:
-                        print(" Number iters: {}".format(num_iter))
-                        case_inters += num_iter
+                    if dice > cfg.inter_thresh or num_iter[0] + num_iter[1] >= cfg.max_iter:
+                        print(" Number iters: {}/{}".format(num_iter[0], num_iter[1]))
+                        case_inters[0] += num_iter[0]
+                        case_inters[1] += num_iter[1]
                         break
                     # if num_iter > 4:
                     #     break
@@ -336,7 +340,8 @@ def main():
         case_metrics.update({"fn": conf.fn, "fp": conf.fp, "tp": conf.tp})
         for key, value in case_metrics.items():
             accu[key].append(value)
-        total_inters += case_inters
+        total_inters[0] += case_inters[0]
+        total_inters[1] += case_inters[1]
 
         # Save prediction
         if cfg.save_predict:
@@ -349,10 +354,12 @@ def main():
     tp, fp, fn = sum(accu.pop("tp")), sum(accu.pop("fp")), sum(accu.pop("fn"))
     accu = {k: np.mean(v) for k, v in accu.items()}
     accu["G_Dice"] = 2 * tp / (2 * tp + fn + fp)
+    test_num = len(nf_set.index)
     logging.info(
         f"---Infer {len(nf_set.index)} cases" +
         "".join([" - {}: {:.3f}".format(k, v) for k, v in accu.items()]) +
-        f" (Average inters: {total_inters / len(nf_set.index)})" * cfg.use_spatial
+        " (Average inters: {:.1f}/{:.1f})".format(
+            total_inters[0] / test_num, total_inters[1] / test_num) * cfg.use_spatial
     )
 
 

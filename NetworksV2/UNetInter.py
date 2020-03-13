@@ -76,7 +76,12 @@ class UNetInter(base.BaseNet):
         # Tensorflow can not infer input tensor shape when constructing graph
         self._inputs["images"].set_shape([self.bs, self.height, self.width, self.channel])
         self._inputs["sp_guide"].set_shape([self.bs, self.height, self.width, 2])
-        image = tf.concat((self._inputs["images"], self._inputs["sp_guide"]), axis=-1)
+        if hasattr(self.args, "img_grad") and self.args.img_grad:
+            dy, dx = tf.image.image_gradients(self._inputs["images"])
+            image = tf.concat((self._inputs["images"], self._inputs["sp_guide"], dy, dx), axis=-1)
+            tf.logging.info("Enable image gradient features.")
+        else:
+            image = tf.concat((self._inputs["images"], self._inputs["sp_guide"]), axis=-1)
 
         base_channels = kwargs.get("init_channels", 64)
         num_down_samples = kwargs.get("num_down_samples", 4)

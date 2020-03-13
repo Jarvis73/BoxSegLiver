@@ -127,3 +127,17 @@ def img_crop(volume, pz, channel, center=None, shape=None):
     if z_pad != (0, 0):
         img = np.pad(img, (z_pad, (0, 0), (0, 0)), mode='constant')
     return img, slices
+
+
+def volume_crop(volume, center, shape):
+    depth, height, width = volume.shape
+    half_d, half_h, half_w = shape[0] // 2, shape[1] // 2, shape[2] // 2
+    z1 = min(max(center[0] - half_d, 0), depth - shape[0])
+    z2 = z1 + shape[0]
+    y1 = min(max(center[1] - half_h, 0), height - shape[1])
+    y2 = y1 + shape[1]
+    x1 = min(max(center[2] - half_w, 0), width - shape[2])
+    x2 = x1 + shape[2]
+    img = volume[z1:z2, y1:y2, x1:x2]
+    slices = (slice(z1, z2), slice(y1, y2), slice(x1, x2))
+    return img, slices

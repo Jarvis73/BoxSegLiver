@@ -28,7 +28,6 @@ import tensorflow_estimator as tfes
 from tensorflow.python.platform import tf_logging as logging
 from tensorflow.contrib import data as contrib_data
 from tensorflow.python.util import deprecation
-import GeodisTK
 
 from utils import image_ops
 from utils import distribution_utils
@@ -50,58 +49,27 @@ neg_cache = None
 def add_arguments(parser):
     group = parser.add_argument_group(title="Input Pipeline Arguments")
     group.add_argument("--test_fold", type=int, default=2)
+    group.add_argument("--im_depth", type=int, default=10)
     group.add_argument("--im_height", type=int, default=256)
     group.add_argument("--im_width", type=int, default=256)
-    group.add_argument("--im_channel", type=int, default=3)
-    group.add_argument("--noise_scale", type=float, default=0.1)
+    group.add_argument("--im_channel", type=int, default=1)
     group.add_argument("--zoom_scale", type=float, nargs=2, default=RND_SCALE)
     group.add_argument("--random_flip", type=int, default=1,
-                       help="Random flip while training. 0 for no flip, 1 for flip only left/right, "
-                            "2 for only up/down, 3 for left/right and up/down")
+                       help="Random flip while training. 0 for no flip, 1 for flip left/right, "
+                            "2 for up/down, 4 for slices.")
     group.add_argument("--eval_in_patches", action="store_true")
     group.add_argument("--eval_num_batches_per_epoch", type=int, default=100)
     group.add_argument("--eval_mirror", action="store_true")
     group.add_argument("--tumor_percent", type=float, default=0.5)
 
-    group = parser.add_argument_group(title="G-Net Arguments")
-    group.add_argument("--side_dropout", type=float, default=0.5, help="Dropout used in G-Net sub-networks")
-    group.add_argument("--use_context", action="store_true")
-    group.add_argument("--context_list", type=str, nargs="+",
-                       help="Paired context information: (feature name, feature length). "
-                            "For example: hist, 200")
-    group.add_argument("--hist_noise", action="store_true",
-                       help="Augment histogram dataset with random noise")
-    group.add_argument("--hist_noise_scale", type=float, default=0.002,
-                       help="Random noise scale for histogram (default: %(default)f)")
-    group.add_argument("--hist_scale", type=float, default=20,
-                       help="A coefficient multiplied to histogram values")
-    group.add_argument("--glcm", action="store_true",
-                       help="Use glcm texture features")
-    group.add_argument("--glcm_noise", action="store_true")
-    group.add_argument("--use_zscore", action="store_true", help="If use z-score, window/level will be disabled")
-    group.add_argument("--use_gamma", action="store_true", help="Apply gamma transform for data augmentation")
-
+    group = parser.add_argument_group(title="UNet3D Arguments")
     group.add_argument("--use_spatial", action="store_true")
     group.add_argument("--local_enhance", action="store_true")
-    group.add_argument("--geodesic", action="store_true")
-    group.add_argument("--spatial_random", type=float, default=1.,
-                       help="Probability of adding spatial guide to current slice with tumors "
-                            "when use_spatial is on")
-    group.add_argument("--spatial_inner_random", action="store_true",
-                       help="Random choice tumors to give spatial guide inside a slice with tumors")
-    group.add_argument("--center_random_ratio", type=float, default=0.2,
-                       help="Random perturbation scale of the spatial guide centers")
-    group.add_argument("--stddev_random_ratio", type=float, default=0.4,
-                       help="Random perturbation scale of the spatial guide stddevs")
     group.add_argument("--eval_no_sp", action="store_true", help="No spatial guide in evaluation")
-    group.add_argument("--stddev", type=float, default=3.,
+    group.add_argument("--stddev", type=float, nargs="+", default=[1, 3., 3.],
                        help="Average stddev for spatial guide")
     group.add_argument("--save_sp_guide", action="store_true", help="Save spatial guide")
-    group.add_argument("--use_se", action="store_true", help="Use SE-Block in G-Nets context guide module")
-    group.add_argument("--eval_discount", type=float, default=0.85)
     group.add_argument("--eval_no_p", action="store_true", help="Evaluate with no propagation")
-    group.add_argument("--real_sp", type=str, help="Path to real spatial guide.")
-    group.add_argument("--guide_scale", type=float, default=5., help="Base scale of guides")
     group.add_argument("--guide_channel", type=int, default=2, help="1 or 2")
     group.add_argument("--fp_sample", action="store_true", help="Negative clicks sampled from false positive areas")
     group.add_argument("--sample_neg", type=float, default=0., help="Sample negative patches containing fp pixels")
@@ -151,7 +119,7 @@ def load_data(debug=False):
     return data_cache
 
 
-def load_neg(data, dim=2):
+def load_neg(data, dim=3):
     """ Load negative """
     global neg_cache
 
@@ -182,7 +150,8 @@ def load_neg(data, dim=2):
                 cube = res[sli]
                 if ((cube == i + 1) * (label[sli] != 0)).sum() or (cube == i + 1).sum() <= 5:
                     cube[cube == i + 1] = 0
-            neg_cache[pid] = np.clip(res, 0, 1).astype(np.uint8)
+            result = np.clip(res, 0, 1).astype(np.uint8)
+            neg_cache[pid] = {"bin": result, "pos": np.stack(np.where(result > 0), axis=1)}
     else:   # dim = 2
         struct = generate_binary_structure(2, 1)
         for path in tqdm.tqdm(pred_list):
@@ -222,7 +191,7 @@ def load_split(test_fold=0, mode="train"):
 
 
 def inter_simulation(mask, margin=5, step=10, N=5, bg=False, d=40, strategy=0, ret_type=np.float32,
-                     neg_patch=None, random=True):
+                     neg_patch=None):
     """
     Interaction simulation, including positive points and negative points
 
@@ -241,12 +210,11 @@ def inter_simulation(mask, margin=5, step=10, N=5, bg=False, d=40, strategy=0, r
                    4: random in false positive regions in `neg_patch`
     ret_type:
     neg_patch: np.ndarray, a mask contains false positive regions.
-    random:   bool, random number of interactions
 
     Returns
     -------
-    fg_pts: np.ndarray, shape [m, 2], corrdinates of the positive points
-    bg_pts: np.ndarray, shape [n, 2], corrdinates of the negative points
+    fg_pts: np.ndarray, shape [m, 3], corrdinates of the positive points
+    bg_pts: np.ndarray, shape [n, 3], corrdinates of the negative points
     """
     small = False
     first = True
@@ -254,40 +222,41 @@ def inter_simulation(mask, margin=5, step=10, N=5, bg=False, d=40, strategy=0, r
     if neg_patch is not None and strategy == 4:
         G = neg_patch.copy()
     else:
-        G = binary_erosion(mask, iterations=margin, border_value=bg)
+        struct = np.zeros((3, 3, 3), dtype=np.bool)
+        struct[1] = True
+        G = binary_erosion(mask, struct, iterations=margin, border_value=bg)
         if bg and strategy != 0:
-            G = G ^ binary_erosion(G, iterations=d, border_value=bg)
+            G = G ^ binary_erosion(G, struct, iterations=d, border_value=bg)
         if not G.max():    # too small tumor
             G = mask.copy()
             small = True
 
-    height, width = mask.shape
-    inter_num = np.random.randint(int(not bg), N) if random else N
-    for n in range(inter_num):
-        cy, cx = np.where(G)
+    depth, height, width = mask.shape
+    for n in range(np.random.randint(int(not bg), N)):
+        ctr = np.stack(np.where(G), axis=1)
         if not small:
             if first or strategy in [0, 1, 4]:
-                i = np.random.choice(cy.shape[0])
+                i = np.random.choice(ctr.shape[0])
             else:  # strategy == 3
-                dist = np.stack([cy, cx], axis=1).reshape(-1, 1, 2) - np.asarray(all_pts).reshape(1, -1, 2)
+                dist = ctr.reshape(-1, 1, 3) - np.asarray(all_pts).reshape(1, -1, 3)
                 i = np.argmax(np.sum(dist ** 2, axis=-1).min(axis=1))
-            cy, cx = cy[i], cx[i]   # center x, y
+            ctr = ctr[i]   # center z, y, x
         else:
-            cy, cx = int(cy.mean()), int(cx.mean())
+            ctr = ctr.mean()
         first = False
-        all_pts.append((cy, cx))
-        y1 = max(cy - step, 0)
-        y2 = min(cy + step + 1, height)
-        x1 = max(cx - step, 0)
-        x2 = min(cx + step + 1, width)
-        rcy, rcx, rh, rw = cy - y1, cx - x1, y2 - y1, x2 - x1   # relative center x, y, relative height, width
+        all_pts.append(ctr)
+        y1 = max(ctr[-2] - step, 0)
+        y2 = min(ctr[-2] + step + 1, height)
+        x1 = max(ctr[-1] - step, 0)
+        x2 = min(ctr[-1] + step + 1, width)
+        rcy, rcx, rh, rw = ctr[-2] - y1, ctr[-1] - x1, y2 - y1, x2 - x1   # relative center y, x, relative height, width
         Y, X = np.meshgrid(np.arange(rh), np.arange(rw), indexing="ij", sparse=True)
         circle = (X - rcx) ** 2 + (Y - rcy) ** 2 > step ** 2
-        G[y1:y2, x1:x2] *= circle
+        G[ctr[0], y1:y2, x1:x2] *= circle   # Only operate on single slice
         if small or not G.max():  # Cannot add more points
             break
 
-    return np.asarray(all_pts, dtype=ret_type).reshape(-1, 2)
+    return np.asarray(all_pts, dtype=ret_type).reshape(-1, 3)
 
 
 def input_fn(mode, params):
@@ -305,7 +274,7 @@ def input_fn(mode, params):
 
 #####################################
 #
-#   G-Net input pipeline
+#   UNet input pipeline
 #
 #####################################
 
@@ -322,17 +291,15 @@ def data_processing(img, lab, *pts, train, cfg):
     logging.info(f"{flag}: Add z-score preprocessing")
     logging.info(f"{flag}: {'Enable' if cfg.local_enhance else 'Disable'} local enhance of the guides")
 
-    if cfg.use_spatial and not cfg.geodesic:
+    if cfg.use_spatial:
         fg_pts, bg_pts = pts
 
         def true_fn(ctr):
-            if cfg.local_enhance:
-                stddev = tf.ones(tf.shape(ctr), tf.float32) * cfg.stddev
-                gd = image_ops.create_spatial_guide_2d(tf.shape(img)[:-1], ctr, stddev, euclidean=False)
-            else:
-                gd = image_ops.create_spatial_guide_2d(tf.shape(img)[:-1], ctr, euclidean=True)
-            # if not cfg.local_enhance and not cfg.geodesic:
-            #     gd = gd / (cfg.im_height * math.sqrt(2) * 0.8)  # normalization
+            stddev = tf.ones(tf.shape(ctr), tf.float32) * cfg.stddev
+            gd = image_ops.create_spatial_guide_3d(
+                tf.shape(img)[:-1], ctr, stddev, euclidean=not cfg.local_enhance)
+            if not cfg.local_enhance:
+                gd = gd / (cfg.im_height * math.sqrt(2) * 0.8)  # normalization
             return tf.cast(gd, tf.float32)
 
         def false_fn():
@@ -341,42 +308,14 @@ def data_processing(img, lab, *pts, train, cfg):
         fg_guide = tf.cond(tf.shape(fg_pts)[0] > 0, lambda: true_fn(fg_pts), false_fn)
         bg_guide = tf.cond(tf.shape(bg_pts)[0] > 0, lambda: true_fn(bg_pts), false_fn)
         img = tf.concat([img, fg_guide, bg_guide], axis=-1)
-    old_shape = tf.shape(img)
-    img = tf.expand_dims(img, axis=0)
     img = tf.image.resize_bilinear(img, (cfg.im_height, cfg.im_width), align_corners=True)
-    img = tf.squeeze(img, axis=0)
-
-    if cfg.use_spatial and cfg.geodesic:
-        fg_pts, bg_pts = pts
-        old_shape = tf.cast(old_shape[:-1], tf.float32)
-        new_shape = tf.constant([cfg.im_height, cfg.im_width], tf.float32)
-
-        def geodesic_distance(image, ctr):
-            S = np.zeros_like(image, dtype=np.uint8)
-            S[ctr[:, 0], ctr[:, 1]] = 1
-            dist = GeodisTK.geodesic2d_fast_marching(image, S)
-            return dist[..., None]
-
-        def true_fn(ctr):
-            ctr_int = tf.cast(ctr / old_shape * new_shape / 2, tf.int32)
-            downsample = img[::2, ::2, cfg.im_channel // 2]  # Downsample to speed up.
-            gd = tf.py_func(geodesic_distance, [downsample, ctr_int], tf.float32)
-            gd = tf.expand_dims(gd, axis=0)
-            gd = tf.image.resize_bilinear(gd, img.shape[:-1], align_corners=True)
-            gd = tf.squeeze(gd, axis=0)
-            return tf.cast(gd, tf.float32)
-
-        def false_fn():
-            return tf.zeros(tf.concat([tf.shape(img)[:-1], [1]], axis=0), tf.float32)
-
-        fg_guide = tf.cond(tf.shape(fg_pts)[0] > 0, lambda: true_fn(fg_pts), false_fn)
-        bg_guide = tf.cond(tf.shape(bg_pts)[0] > 0, lambda: true_fn(bg_pts), false_fn)
-        img = tf.concat([img, fg_guide, bg_guide], axis=-1)
 
     if train and cfg.random_flip > 0:
         img, lab = image_ops.random_flip(img, lab, flip=cfg.random_flip)
         logging.info("Train: Add random flip " +
-                     "left <-> right " * (cfg.random_flip & 1 > 0) + "up <-> down" * (cfg.random_flip & 2 > 0))
+                     "left <-> right " * (cfg.random_flip & 1 > 0) +
+                     "up <-> down" * (cfg.random_flip & 2 > 0) +
+                     "front <-> back" * (cfg.random_flip & 4 > 0))
 
     if cfg.use_spatial:
         if cfg.guide_channel == 2:
@@ -388,20 +327,14 @@ def data_processing(img, lab, *pts, train, cfg):
     else:
         feat = {"images": img}
 
-    lab = tf.expand_dims(tf.expand_dims(lab, axis=-1), axis=0)
+    lab = tf.expand_dims(lab, axis=-1)
     lab = tf.image.resize_nearest_neighbor(lab, (cfg.im_height, cfg.im_width), align_corners=True)
-    lab = tf.squeeze(tf.squeeze(lab, axis=-1), axis=0)
+    lab = tf.squeeze(lab, axis=-1)
 
     if train:
         feat["images"] = image_ops.augment_gamma(feat["images"], gamma_range=(0.7, 1.5), retain_stats=True,
                                                  p_per_sample=0.3)
         logging.info("Train: Add gamma transform, scale=(0.7, 1.5), retain_stats=True, p_per_sample=0.3")
-        if cfg.noise_scale > 0:
-            feat["images"] = image_ops.random_noise(feat["images"], cfg.noise_scale)
-            # Remove noise in empty slice
-            feat["images"] *= tf.cast(tf.greater(tf.reduce_max(feat["images"], axis=(0, 1)), 0), tf.float32)
-            logging.info(f"Train: Add random noise, scale = {cfg.noise_scale}")
-
     return feat, lab
 
 
@@ -417,26 +350,29 @@ def gen_kernel(nf, queue, img_patch, lab_patch, fp_sample):
     lab_patch:  np.ndarray, label patch
     fp_sample: bool, use false positive sampling or not
     """
-    if fp_sample:
-        neg_patch = lab_patch // 10
-        lab_patch = lab_patch % 10
-    else:
-        neg_patch = None
-    if lab_patch.max() > 0:
-        fg_pts = inter_simulation(lab_patch, margin=3, step=10, N=5, bg=False, strategy=0) \
-            if nf else np.zeros((0, 2), dtype=np.float32)
-    else:
-        fg_pts = np.zeros((0, 2), dtype=np.float32)
+    try:
+        if fp_sample:
+            neg_patch = lab_patch // 10
+            lab_patch = lab_patch % 10
+        else:
+            neg_patch = None
+        if lab_patch.max() > 0:     # Sample positive clicks
+            fg_pts = inter_simulation(lab_patch, margin=3, step=10, N=5, bg=False, strategy=0) \
+                if nf else np.zeros((0, 2), dtype=np.float32)
+        else:   # No objects
+            fg_pts = np.zeros((0, 3), dtype=np.float32)
 
-    if neg_patch is not None and neg_patch.max() > 0:
-        strategy = 4
-    elif np.random.sample() > 0.5:
-        strategy = 1
-    else:
-        strategy = 3
-    bg_pts = inter_simulation(1 - lab_patch, margin=3, step=10, N=5, bg=True, d=40,
-                              strategy=strategy, neg_patch=neg_patch)
-    queue.put((img_patch.astype(np.float32), lab_patch.astype(np.int32), fg_pts, bg_pts))
+        if neg_patch is not None and neg_patch.max() > 0:
+            strategy = 4
+        elif np.random.sample() > 0.5:
+            strategy = 1
+        else:
+            strategy = 3
+        bg_pts = inter_simulation(1 - lab_patch, margin=3, step=10, N=5, bg=True, d=40,
+                                  strategy=strategy, neg_patch=neg_patch)
+        queue.put((img_patch.astype(np.float32), lab_patch.astype(np.int32), fg_pts, bg_pts))
+    except (KeyboardInterrupt, FileNotFoundError, EOFError):
+        logging.info("Subprocess terminated.")
 
 
 def gen_batch(dataset, batch_size, train, cfg):
@@ -452,6 +388,8 @@ def gen_batch(dataset, batch_size, train, cfg):
 
     """
     data = load_data()
+    for k, v in data.items():
+        np.clip(v["lab"], 0, 1, v["lab"])
     if cfg.sample_neg or cfg.fp_sample:
         neg_data = load_neg(data)
     dataset = dataset[[True if pid in data else False for pid in dataset.pid]]
@@ -461,7 +399,7 @@ def gen_batch(dataset, batch_size, train, cfg):
     force_tumor = math.ceil(batch_size * cfg.tumor_percent)
     force_fp = math.ceil(batch_size * cfg.sample_neg)
 
-    target_size = np.array([cfg.im_height, cfg.im_width], dtype=np.float32)
+    target_size = np.array([cfg.im_depth, cfg.im_height, cfg.im_width], dtype=np.float32)
     zoom = cfg.zoom_scale
     if not train:
         np.random.seed(1234)    # fix validation batches
@@ -482,7 +420,7 @@ def gen_batch(dataset, batch_size, train, cfg):
 
         # queue = []
         for i, sample in batch.iterrows():     # columns [split, pid, nf(bool)]
-            crop_shape = (target_size * np.random.uniform(*zoom, size=2)).astype(np.int32)
+            crop_shape = (target_size * ([1] + np.random.uniform(*zoom, size=2).tolist())).astype(np.int32)
             depth, height, width = data[sample.pid]['img'].shape  # volume shape
             if sample.flag == 1:
                 i = np.random.choice(data[sample.pid]['pos'].shape[0])  # choice a foreground pixel
@@ -494,14 +432,13 @@ def gen_batch(dataset, batch_size, train, cfg):
                 pz = np.random.randint(depth)
                 py = np.random.randint(height)
                 px = np.random.randint(width)
-            img_patch, slices = misc.img_crop(
-                data[sample.pid]['img'], pz, cfg.im_channel, (py, px), crop_shape)
-            lab_patch = np.clip(data[sample.pid]['lab'][pz][slices], 0, 1)
+            img_patch, slices = misc.volume_crop(data[sample.pid]['img'], (pz, py, px), crop_shape)
+            lab_patch = data[sample.pid]['lab'][slices]
             if train and cfg.fp_sample:
-                neg_patch = neg_data[sample.pid]["bin"][pz][slices]
+                neg_patch = neg_data[sample.pid]["bin"][slices]
                 lab_patch = lab_patch + neg_patch * 10
 
-            img_patch = img_patch.transpose(1, 2, 0)
+            img_patch = img_patch[..., None]
             if cfg.use_spatial:
                 lab_patch = lab_patch.astype(np.int8)
                 cfg.pool.apply_async(gen_kernel, args=(sample.nf, cfg.queue, img_patch, lab_patch, cfg.fp_sample))
@@ -524,10 +461,10 @@ def get_train_loader(data_list, cfg):
         return gen_batch(data_list, batch_size, train=True, cfg=cfg)
 
     output_types = (tf.float32, tf.int32)
-    output_shapes = (tf.TensorShape([None, None, 3]), tf.TensorShape([None, None]))
+    output_shapes = (tf.TensorShape([None, None, None, 1]), tf.TensorShape([None, None, None]))
     if cfg.use_spatial:
         output_types = output_types + (tf.float32, tf.float32)
-        output_shapes = output_shapes + (tf.TensorShape([None, 2]), tf.TensorShape([None, 2]))
+        output_shapes = output_shapes + (tf.TensorShape([None, 3]), tf.TensorShape([None, 3]))
 
     dataset = (tf.data.Dataset.from_generator(train_gen, output_types, output_shapes)
                .apply(tf.data.experimental.map_and_batch(
@@ -547,10 +484,10 @@ def get_val_loader(data_list, cfg):
             yield next(infinity_generator)
 
     output_types = (tf.float32, tf.int32)
-    output_shapes = (tf.TensorShape([None, None, 3]), tf.TensorShape([None, None]))
+    output_shapes = (tf.TensorShape([None, None, None, 1]), tf.TensorShape([None, None, None]))
     if cfg.use_spatial:
         output_types = output_types + (tf.float32, tf.float32)
-        output_shapes = output_shapes + (tf.TensorShape([None, 2]), tf.TensorShape([None, 2]))
+        output_shapes = output_shapes + (tf.TensorShape([None, 3]), tf.TensorShape([None, 3]))
 
     dataset = (tf.data.Dataset.from_generator(eval_gen, output_types, output_shapes)
                .apply(tf.data.experimental.map_and_batch(

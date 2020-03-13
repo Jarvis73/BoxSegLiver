@@ -52,6 +52,7 @@ def add_arguments(parser):
                             "to experiment tag.")
     group.add_argument("--save_best", action="store_true", help="Save best checkpoint")
     group.add_argument("--save_interval", type=int, default=0, help="Save best checkpoint in each interval")
+    group.add_argument("--log_step", type=int, default=500, help="Log running information per `log_step`")
 
     group = parser.add_argument_group(title="Device Arguments")
     group.add_argument("--distribution_strategy",

@@ -18,6 +18,7 @@ import numpy as np
 import tensorflow as tf
 from utils import array_kits
 from medpy import metric as mtr     # pip install medpy
+from scipy.ndimage.morphology import distance_transform_edt
 
 METRICS = "metrics"
 
@@ -39,7 +40,7 @@ def add_arguments(parser):
     group.add_argument("--loss_weight_type",
                        type=str,
                        default="none",
-                       choices=["none", "numerical", "proportion"],
+                       choices=["none", "numerical", "proportion", "boundary"],
                        required=False, help="Weights used in loss function for alleviating class imbalance problem "
                                             "(default %(default)s)")
     group.add_argument("--loss_numeric_w",
@@ -116,6 +117,7 @@ def _compute_weights(w_type, one_hot_labels, name=None, **kwargs):
     # num_cls = one_hot_labels.shape[-1]
     bs = one_hot_labels.shape[0]
     size = tf.cast(tf.shape(one_hot_labels), tf.float32)
+    ndim = len(one_hot_labels.shape)
 
     with tf.name_scope(name, "_compute_weights"):
         if w_type == "none":
@@ -125,20 +127,41 @@ def _compute_weights(w_type, one_hot_labels, name=None, **kwargs):
                 raise KeyError("w_type `numerical` need keyword argument `numeric_w`")
             numeric_w = kwargs["numeric_w"]
             w = tf.constant([numeric_w for _ in range(bs)], dtype=tf.float32)
-            w = tf.reduce_sum(w[:, None, None, :] * one_hot_labels, axis=-1)  # [bs, h, w]
+            if ndim == 4:
+                w = tf.reduce_sum(w[:, None, None, :] * one_hot_labels, axis=-1)  # [bs, h, w]
+            else:   # ndim == 5
+                w = tf.reduce_sum(w[:, None, None, None, :] * one_hot_labels, axis=-1)  # [bs, d, h, w]
         elif w_type == "proportion":
-            num_labels = tf.reduce_sum(one_hot_labels, axis=[1, 2])
+            num_labels = tf.reduce_sum(one_hot_labels, axis=list(range(1, ndim - 1)))
             if "proportion_decay" in kwargs:
                 num_labels += kwargs["proportion_decay"]
             proportions = 1.0 / num_labels
             w = proportions / tf.reduce_sum(proportions, axis=1, keepdims=True)
-            w = tf.reduce_sum(w[:, None, None, :] * one_hot_labels, axis=-1)  # [bs, h, w]
+            if ndim == 4:
+                w = tf.reduce_sum(w[:, None, None, :] * one_hot_labels, axis=-1)  # [bs, h, w]
+            else:   # ndim == 5
+                w = tf.reduce_sum(w[:, None, None, None, :] * one_hot_labels, axis=-1)  # [bs, d, h, w]
         elif w_type == "examples":
-            w = kwargs["examples_w"][:, None, None]
+            if ndim == 4:
+                w = kwargs["examples_w"][:, None, None]
+            else:   # ndim == 5
+                w = kwargs["examples_w"][:, None, None, None]
+        elif w_type == "boundary":
+            shp = one_hot_labels.shape
+            reshaped = tf.reshape(tf.transpose(one_hot_labels, (0, 3, 1, 2)), [shp[0] * shp[3], shp[1], shp[2], 1])
+            kernel = tf.ones((3, 3, 1, 1), dtype=tf.float32)
+            dilated = tf.clip_by_value(tf.nn.conv2d(reshaped, kernel, [1] * 4, "SAME"), 0, 1) - reshaped
+            seperated = tf.reshape(dilated, [shp[0], shp[3], shp[1], shp[2]])
+            weight = tf.logical_not(tf.cast(tf.reduce_sum(seperated, axis=1), tf.bool))
+            weight = tf.map_fn(lambda x: tf.py_func(
+                lambda y: distance_transform_edt(y).astype(np.float32), [x], tf.float32), weight, tf.float32)
+            w = tf.exp(-weight / 25) + 1
+            tf.summary.image(f"{kwargs['tag']}/Weight", tf.expand_dims(w, axis=-1), max_outputs=1)
         else:
             raise ValueError("Not supported weight type: " + w_type)
         # norm
-        w = w / tf.reduce_sum(w, axis=(1, 2), keepdims=True) * (size[1] * size[2])
+        w = w / tf.reduce_sum(w, axis=list(range(1, ndim - 1)), keepdims=True) * \
+            (size[1] * size[2] if ndim == 4 else size[1] * size[2] * size[3])
         return w
 
 

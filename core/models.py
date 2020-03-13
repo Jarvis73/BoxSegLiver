@@ -25,12 +25,13 @@ from NetworksV2.UNet import UNet
 from NetworksV2.GUNet import GUNet
 from NetworksV2.UNetInter import UNetInter
 from NetworksV2.LGNet import LGNet
+from NetworksV2.UNet3D import UNet3D
 # from NetworksV2.DenseUNet import DenseUNet
 
 ModeKeys = tfes.estimator.ModeKeys
 # Available models
 MODEL_ZOO = [
-    UNet, GUNet, UNetInter, LGNet  # , DenseUNet
+    UNet, GUNet, UNetInter, LGNet, UNet3D  # , DenseUNet
 ]
 
 

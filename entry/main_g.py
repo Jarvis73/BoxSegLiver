@@ -39,8 +39,6 @@ evaluator_lib = None
 
 # Some global hyper parameters that have no effect on training
 TF_RANDOM_SEED = None
-SAVE_SUMMARY_STEPS = 500
-LOG_STEP_COUNT_STEPS = 500
 KEEP_CHECKPOINT_MAX = 1
 
 
@@ -137,17 +135,17 @@ def main():
         run_config = tfes.estimator.RunConfig(
             train_distribute=distribution_strategy,
             tf_random_seed=TF_RANDOM_SEED,
-            save_summary_steps=SAVE_SUMMARY_STEPS,
+            save_summary_steps=args.log_step,
             save_checkpoints_steps=5000,
             session_config=session_config,
             keep_checkpoint_max=KEEP_CHECKPOINT_MAX,
-            log_step_count_steps=LOG_STEP_COUNT_STEPS,
+            log_step_count_steps=args.log_step,
         )
 
         params = {"args": args, "save_best_ckpt": args.save_best}
         params.update(models.get_model_params(args,
                                               build_metrics=True,
-                                              build_summaries=bool(SAVE_SUMMARY_STEPS)))
+                                              build_summaries=bool(args.log_step)))
         params.update(solver.get_solver_params(args,
                                                warm_up=args.lr_warm_up,
                                                slow_start_step=args.slow_start_step,
@@ -159,7 +157,7 @@ def main():
         estimator = estimator_lib.CustomEstimator(models.model_fn, args.model_dir, run_config, params,
                                                   args.warm_start_from)
         train_hooks = [hooks.LogLearningRateHook(prefix=args.summary_prefix,
-                                                 every_n_steps=LOG_STEP_COUNT_STEPS,
+                                                 every_n_steps=args.log_step,
                                                  output_dir=args.model_dir,
                                                  do_logging=False)]
         if args.learning_policy == "plateau":
@@ -195,7 +193,7 @@ def main():
                             if args.num_of_steps > 0 else (None, args.num_of_total_steps))
 
         try:
-            args.pool = Pool(4, initializer=initializer)
+            args.pool = Pool(2, initializer=initializer)
             args.queue = Manager().Queue(args.batch_size)
             estimator.train(input_pipeline.input_fn,
                             hooks=train_hooks,

@@ -169,12 +169,13 @@ class BaseNet(object):
         return normalizer, normalizer_params
 
     def _get_weights_params(self):
+        w_params = {"tag": self.args.tag}
         if self.args.loss_weight_type == "numerical":
-            return {"numeric_w": self.args.loss_numeric_w}
+            w_params["numeric_w"] = self.args.loss_numeric_w
         elif self.args.loss_weight_type == "proportion":
             if self.args.loss_proportion_decay > 0:
-                return {"proportion_decay": self.args.loss_proportion_decay}
-        return {}
+                w_params["proportion_decay"] = self.args.loss_proportion_decay
+        return w_params
 
     def __call__(self, inputs, mode, *args, **kwargs):
         self._inputs = inputs

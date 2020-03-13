@@ -212,22 +212,15 @@ def random_noise(image, scale, mask=None, seed=None, name=None, ntype="uniform")
 
     Parameters
     ----------
-    image: Tensor
-        N-D image
-    scale: Scalar
-        noise scale.
-        Notice that we use random_uniform to generate noise tensor.
-    mask: Tensor
-        noise mask
-    seed: Scalar
-        random seed
-    name: str
-        operation name
+    image: Tensor, N-D image
+    scale: float, noise scale. Notice that we use random_uniform to generate noise tensor.
+    mask: Tensor, noise mask
+    seed: int, random seed
+    name: str, operation name
 
     Returns
     -------
     A new tensor of the same shape as `image` with some noise
-
     """
     with tf.name_scope(name, "random_noise", [image, scale]):
         shape = tf.shape(image)
@@ -246,22 +239,24 @@ def random_noise(image, scale, mask=None, seed=None, name=None, ntype="uniform")
 
 
 def random_flip(image, label=None, seed=None, flip=1, name=None):
-    """Randomly flip an image horizontally (left to right) or vertically (up to down).
+    """Randomly flip an image horizontally (left to right), vertically (up to down)
+    or (front to back).
 
     With a 1 in 2 chance, outputs the contents of `image` flipped along the
     specified dimension.  Otherwise output the image as-is.
 
     Parameters
     ----------
-    image: 4-D Tensor of shape `[batch, height, width, channels]` or
+    image: 4-D Tensor of shape `[depth, height, width, channels]` or
            3-D Tensor of shape `[height, width, channels]`.
-    label: 3-D Tensor of shape `[batch, height, width]` or
+    label: 3-D Tensor of shape `[depth, height, width]` or
            2-D Tensor of shape `[height, width]`.
     seed: A Python integer. Used to create a random seed. See
         `tf.set_random_seed`
         for behavior.
     flip: int, flip & 1 > 0: left/right
                flip & 2 > 0: up/down
+               flip & 4 > 0: front/back
     name, str
 
     Returns
@@ -275,9 +270,19 @@ def random_flip(image, label=None, seed=None, flip=1, name=None):
     with tf.name_scope(name, "random_flip", [image, label]):
         if label is None:
             if flip & 1 > 0:
-                return tf.image.random_flip_left_right(image, seed)
+                image = tf.image.random_flip_left_right(image)
             if flip & 2 > 0:
-                return tf.image.random_flip_up_down(image, seed)
+                image = tf.image.random_flip_up_down(image)
+            if flip & 4 > 0:
+                def flip_sli_true(img):
+                    img = tf.reverse(img, axis=[0])
+                    return img
+
+                def flip_sli_false():
+                    return image
+
+                image = tf.cond(tf.random.uniform(()) >= 0.5, lambda: flip_sli_true(image), flip_sli_false)
+            return image
         else:
             def lr_fn(img, lab):
                 img = tf.image.flip_left_right(img)
@@ -293,6 +298,11 @@ def random_flip(image, label=None, seed=None, flip=1, name=None):
                 lab = tf.squeeze(lab, axis=-1)
                 return img, lab
 
+            def fb_fn(img, lab):
+                img = tf.reverse(img, axis=[0])
+                lab = tf.reverse(lab, axis=[0])
+                return img, lab
+
             def false_fn():
                 return image, label
 
@@ -300,6 +310,8 @@ def random_flip(image, label=None, seed=None, flip=1, name=None):
                 image, label = tf.cond(tf.random.uniform(()) >= 0.5, lambda: lr_fn(image, label), false_fn)
             if flip & 2 > 0:
                 image, label = tf.cond(tf.random.uniform(()) >= 0.5, lambda: ud_fn(image, label), false_fn)
+            if flip & 4 > 0:
+                image, label = tf.cond(tf.random.uniform(()) >= 0.5, lambda: fb_fn(image, label), false_fn)
             return image, label
 
 
@@ -325,8 +337,9 @@ def random_zero_or_one(shape, dtype, seed=None):
 
 
 def augment_gamma(image, gamma_range, retain_stats=False, p_per_sample=1, epsilon=1e-7):
+    axes = list(range(len(image.shape)))
     if retain_stats:
-        mn, variance = tf.nn.moments(image, axes=(0, 1, 2))
+        mn, variance = tf.nn.moments(image, axes=axes)
         sd = tf.math.sqrt(variance)
     gamma = tf.cond(tf.random_uniform((), 0, 1, dtype=tf.float32) < p_per_sample,
                     lambda: tf.random_uniform((), gamma_range[0], 1),
@@ -335,7 +348,7 @@ def augment_gamma(image, gamma_range, retain_stats=False, p_per_sample=1, epsilo
     rnge = tf.reduce_max(image) - minm
     new_image = tf.math.pow((image - minm) / (rnge + epsilon), gamma) * rnge + minm
     if retain_stats:
-        new_mn, new_variance = tf.nn.moments(new_image, axes=(0, 1, 2))
+        new_mn, new_variance = tf.nn.moments(new_image, axes=axes)
         new_image = new_image - new_mn + mn
         new_image = new_image / (tf.math.sqrt(new_variance) + 1e-8) * sd
     return new_image
@@ -387,8 +400,8 @@ def create_spatial_guide_2d(shape, center, stddev=None, euclidean=False):
     Parameters
     ----------
     shape: tf.Tensor, two values
-    center: tf.Tensor, Float tensor with shape [n, 2], 2 means (x, y)
-    stddev: tf.Tensor, Float tensor with shape [n, 2], 2 means (x, y)
+    center: tf.Tensor, Float tensor with shape [n, 2], 2 means (y, x)
+    stddev: tf.Tensor, Float tensor with shape [n, 2], 2 means (y, x)
     euclidean: bool, use Euclidean distance or exponential edt
 
     Returns
@@ -419,3 +432,41 @@ def create_spatial_guide_2d(shape, center, stddev=None, euclidean=False):
     normalizer = 2. * stddev * stddev                                       # [n, 1, 1, 2]
     d = tf.exp(-tf.reduce_sum((coords - center) ** 2 / normalizer, axis=-1, keepdims=True))  # [n, h, w, 1]
     return tf.reduce_max(d, axis=0)               # [h, w, 1]
+
+
+def create_spatial_guide_3d(shape, center, stddev=None, euclidean=False):
+    """
+    Tensorflow implementation of `create_gaussian_distribution()`
+
+    Parameters
+    ----------
+    shape: tf.Tensor, two values
+    center: tf.Tensor, Float tensor with shape [n, 3], 3 means (z, y, x)
+    stddev: tf.Tensor, Float tensor with shape [n, 3], 3 means (z, y, x)
+    euclidean: bool, use Euclidean distance or exponential edt
+
+    Returns
+    -------
+    A batch of spatial guide image
+
+    Warnings
+    --------
+    User must make sure stddev doesn't contain zero.
+    """
+    z = tf.range(shape[0])
+    y = tf.range(shape[1])
+    x = tf.range(shape[2])
+    # Let n the number of tumors in current slice
+    coords = tf.tile(tf.expand_dims(
+        tf.stack(tf.meshgrid(z, y, x, indexing="ij"), axis=-1), axis=0),
+        multiples=tf.concat((tf.shape(center)[:1], [1, 1, 1, 1]), axis=0))  # [n, d, h, w, 3]
+    coords = tf.cast(coords, tf.float32)
+    center = tf.expand_dims(tf.expand_dims(tf.expand_dims(center, axis=-2), axis=-2), axis=-2)  # [n, 1, 1, 1, 3]
+    if euclidean:
+        d = tf.sqrt(tf.reduce_sum((coords - center) ** 2, axis=-1, keepdims=True))  # [n, d, h, w, 1]
+        return tf.reduce_min(d, axis=0)     # [d, h, w, 1]
+
+    stddev = tf.expand_dims(tf.expand_dims(tf.expand_dims(stddev, axis=-2), axis=-2), axis=-2)  # [n, 1, 1, 1, 2]
+    normalizer = 2. * stddev * stddev                                       # [n, 1, 1, 2]
+    d = tf.exp(-tf.reduce_sum((coords - center) ** 2 / normalizer, axis=-1, keepdims=True))  # [n, d, h, w, 1]
+    return tf.reduce_max(d, axis=0)               # [d, h, w, 1]

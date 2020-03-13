@@ -97,18 +97,7 @@ class EvaluateVolume(EvaluateBase):
         self.params = params or estimator.params
         self.config = self.params["args"]
         self._timer = timer.Timer()
-        # Load meta.json
-        meta_file = Path(__file__).parent.parent / "DataLoader/NF/prepare/meta.json"
-        if not meta_file.exists():
-            src_meta = Path(__file__).parent.parent / "data/NF/png/meta.json"
-            if not src_meta.exists():
-                raise FileNotFoundError(str(src_meta))
-            meta_file.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(str(src_meta), str(meta_file))
-        with meta_file.open() as f:
-            meta = json.load(f)
 
-        self.meta = {x["PID"]: x for x in meta}
         if hasattr(self.config, "eval_in_patches"):
             self.eval_in_patches = self.config.eval_in_patches
         else:
@@ -155,129 +144,6 @@ class EvaluateVolume(EvaluateBase):
         return checkpoint_dir
 
     def run_with_session(self, session=None):
-        # TODO(zjw) Maybe add eval with mirror here
-        if self.config.eval_3d:
-            raise NotImplementedError
-            # return self._run_with_session_actual_3d(session)
-        else:
-            return self._run_with_session_actual_2d(session)
-
-    # def _run_with_session_actual_3d(self, session=None):
-    #     data_list = input_pipeline_g._collect_datasets(
-    #         self.config.test_fold, "eval_online",
-    #         filter_tumor_size=self.config.filter_size,
-    #         filter_only_liver_in_val=self.params.get("filter_only_liver_in_val", True))
-    #     data_dict = {str(case["PID"]): case for case in data_list}
-    #     # We just use model_instances[0] to get prediction name.
-    #     # Its value will still be collected from multi-gpus
-    #     predicts = ["labels", "names"] + list(self.params["model_instances"][0].predictions)
-    #     predict_gen = self.estimator.evaluate_online(session, predicts, yield_single_examples=False)
-    #     cur_case = None
-    #     self._timer.reset()
-    #     self.clear_metrics()
-    #
-    #     if not self.config.use_global_dice:
-    #         tf.logging.info("Begin evaluating 3d at epoch end ...")
-    #         self._timer.tic()
-    #         volume_collection = defaultdict(list)
-    #         for x in predict_gen:
-    #             new_case = str(x["names"][0])
-    #             cur_case = cur_case or new_case
-    #             if cur_case == new_case:    # Append batch to collections
-    #                 for cls in self.classes:
-    #                     volume_collection[cls].append(np.squeeze(x[cls + "Pred"], axis=-1))
-    #                 volume_collection["labels"].append(x["labels"])
-    #             else:
-    #                 volume_collection = {k: np.concatenate(v, axis=0) for k, v in volume_collection.items()}
-    #                 z1, y1, x1, z2, y2, x2 = data_dict[cur_case]["bbox"]
-    #                 pads = (self.config.batch_size - ((z2 - z1) % self.config.batch_size)) % self.config.batch_size
-    #                 if pads > 0:
-    #                     volume_collection = {k: v[:-pads] for k, v in volume_collection.items()}
-    #                 volume = volume_collection
-    #                 labels = volume_collection["labels"]
-    #                 # Here we omit postprocess for saving training time
-    #                 # volume = self._postprocess(volume, ori_shape=[y2 - y1, x2 - x1])
-    #                 # labels = self._postprocess(labels, is_label=True, ori_shape=[y2 - y1, x2 - x1])
-    #                 results = {}
-    #                 for c, cls in enumerate(self.classes):
-    #                     pairs = metric_ops.metric_3d(volume[cls], labels[cls], required=self.metrics_str)
-    #                     for met, value in pairs.items():
-    #                         results["{}/{}".format(cls, met)] = value
-    #                 self.append_metrics(results)
-    #                 volume_collection.clear()
-    #                 for cls in self.classes:
-    #                     volume_collection[cls].append(np.squeeze(x[cls + "Pred"], axis=-1))
-    #                 volume_collection["labels"].append(x["labels"])
-    #                 cur_case = new_case
-    #             self._timer.toc()
-    #             self._timer.tic()
-    #
-    #         volume_collection = {k: np.concatenate(v, axis=0) for k, v in volume_collection.items()}
-    #         z1, y1, x1, z2, y2, x2 = data_dict[cur_case]["bbox"]
-    #         pads = (self.config.batch_size - ((z2 - z1) % self.config.batch_size)) % self.config.batch_size
-    #         if pads > 0:
-    #             volume_collection = {k: v[:-pads] for k, v in volume_collection.items()}
-    #         volume = volume_collection
-    #         labels = volume["labels"]
-    #         results = {}
-    #         for c, cls in enumerate(self.classes):
-    #             pairs = metric_ops.metric_3d(volume[cls], labels[cls], required=self.metrics_str)
-    #             for met, value in pairs.items():
-    #                 results["{}/{}".format(cls, met)] = value
-    #         self.append_metrics(results)
-    #
-    #         display_str = "----Evaluate {} batches ".format(self._timer.calls)
-    #         results = {key: np.mean(values) for key, values in self._metric_values.items()}
-    #     else:
-    #         tf.logging.info("Begin evaluating 3d at epoch end(global dice) ...")
-    #         accumulator = defaultdict(int)
-    #         self._timer.tic()
-    #         volume_collection = defaultdict(list)
-    #         for x in predict_gen:
-    #             new_case = str(x["names"][0])
-    #             cur_case = cur_case or new_case
-    #             if cur_case == new_case:  # Append batch to collections
-    #                 for cls in self.classes:
-    #                     volume_collection[cls].append(np.squeeze(x[cls + "Pred"], axis=-1))
-    #                 volume_collection["labels"].append(x["labels"])
-    #             else:
-    #                 volume_collection = {k: np.concatenate(v, axis=0) for k, v in volume_collection.items()}
-    #                 z1, y1, x1, z2, y2, x2 = data_dict[cur_case]["bbox"]
-    #                 pads = (self.config.batch_size - ((z2 - z1) % self.config.batch_size)) % self.config.batch_size
-    #                 if pads > 0:
-    #                     volume_collection = {k: v[:-pads] for k, v in volume_collection.items()}
-    #                 volume = volume_collection
-    #                 labels = volume_collection["labels"]
-    #                 # Here we omit postprocess for saving training time
-    #                 # volume = self._postprocess(volume_collection, ori_shape=[y2 - y1, x2 - x1])
-    #                 # labels = self._postprocess(volume_collection["labels"], is_label=True,
-    #                 #                            ori_shape=[y2 - y1, x2 - x1])
-    #                 for i, cls in enumerate(self.classes):
-    #                     conf = metric_ops.ConfusionMatrix(volume[cls].astype(int), (labels == i + 1).astype(int))
-    #                     conf.compute()
-    #                     accumulator[cls + "_fn"] += conf.fn
-    #                     accumulator[cls + "_fp"] += conf.fp
-    #                     accumulator[cls + "_tp"] += conf.tp
-    #                 volume_collection = defaultdict(list)
-    #                 for cls in self.classes:
-    #                     volume_collection[cls].append(np.squeeze(x[cls + "Pred"], axis=-1))
-    #                 volume_collection["labels"].append(x["labels"])
-    #                 cur_case = new_case
-    #
-    #             self._timer.toc()
-    #             self._timer.tic()
-    #
-    #         display_str = "----Evaluate {} batches ".format(self._timer.calls)
-    #         results = {cls + "/Dice": 2 * accumulator[cls + "_tp"] / (
-    #                 2 * accumulator[cls + "_tp"] + accumulator[cls + "_fn"] + accumulator[cls + "_fp"])
-    #                    for cls in self.classes}
-    #
-    #     for key, value in results.items():
-    #         display_str += "- {}: {:.3f} ".format(key, value)
-    #     tf.logging.info(display_str + "({:.3f} secs)".format(self._timer.total_time))
-    #     return results
-
-    def _run_with_session_actual_2d(self, session=None):
         if not self.config.use_global_dice:
             accumulator = defaultdict(list)
             predicts = list(self.params["model_instances"][0].metrics_dict)
@@ -600,7 +466,6 @@ class EvaluateVolume(EvaluateBase):
             save_name = "infer-volume-{}-Pos-{}-{}-{}.npz".format(features["names"], *self.config.pos)
             np.savez_compressed(save_path / save_name, **save_dict)
             tf.logging.info("Write to %s" % (save_path / save_name))
-
 
     def _predict_case_v2(self, predicts, cases=-1, dtype="pred", resize=False, save_path=None):
         logits3d = None

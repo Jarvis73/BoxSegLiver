@@ -335,6 +335,7 @@ class GUNet(base.BaseNet):
                 if hasattr(self.args, "img_grad") and self.args.img_grad:
                     dy, dx = tf.image.image_gradients(self._inputs["images"])
                     nets = [tf.concat((self._inputs["images"], dy, dx), axis=-1)]
+                    tf.logging.info("Enable image gradient features.")
                 else:
                     nets = [self._inputs["images"]]
                 for i in range(num_down_samples + 1):

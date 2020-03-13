@@ -331,67 +331,6 @@ class CustomEstimator(object):
                         for i in range(self._extract_batch_length(preds_evaluated)):
                             yield {key: value[i] for key, value in six.iteritems(preds_evaluated)}
 
-    # def predict_with_guide(self,
-    #                        input_fn,
-    #                        predict_keys=None,
-    #                        hooks=None,
-    #                        checkpoint_path=None,
-    #                        latest_filename=None,
-    #                        yield_single_examples=True):
-    #     hooks = estimator_lib._check_hooks_type(hooks)
-    #
-    #     checkpoint_path = self._checkpoint_path(checkpoint_path, latest_filename)
-    #
-    #     with ops.Graph().as_default() as g:
-    #         random_seed.set_random_seed(self._config.tf_random_seed)
-    #         self._create_and_assert_global_step(g)
-    #         features, labels, input_hooks = self._get_features_and_labels_from_input_fn(
-    #             input_fn, model_fn_lib.ModeKeys.EVAL)
-    #
-    #         features_ph = {key: array_ops.placeholder(value.dtype, value.shape, name=key)
-    #                        for key, value in features.items()}
-    #         labels_ph = array_ops.placeholder(labels.dtype, labels.shape, name="labels")
-    #         feed_guide_hook = FeedGuideHook(features_ph, labels_ph, features, labels,
-    #                                         self.model_dir, self._params["args"])
-    #
-    #         estimator_spec = self._call_model_fn(
-    #             features_ph, labels_ph, model_fn_lib.ModeKeys.EVAL, self.config)
-    #
-    #         if isinstance(predict_keys, list):
-    #             predict_keys += list(self.params["model_instances"][0].metrics_dict.keys())
-    #         elif predict_keys is None:
-    #             # Evaluating volume don't need metrics in model, we use XXXPred to generate 3D predict
-    #             predict_keys = [x for x in estimator_spec.predictions
-    #                             if x not in self.params["model_instances"][0].metrics_dict]
-    #             predict_keys.extend(list(self.params["model_instances"][0].metrics_eval))
-    #         else:
-    #             raise TypeError("predict_keys must be None(for 3d eval) or a list(for 2d eval, "
-    #                             "for example [\"Names\", \"Indices\"])")
-    #         predictions = self._extract_keys(estimator_spec.predictions, predict_keys)
-    #         feed_guide_hook.predictions = predictions
-    #
-    #         all_hooks = list(input_hooks) + [feed_guide_hook]
-    #         all_hooks.extend(hooks)
-    #         all_hooks.extend(list(estimator_spec.prediction_hooks or []))
-    #
-    #         with training.MonitoredSession(
-    #                 session_creator=training.ChiefSessionCreator(
-    #                     checkpoint_filename_with_path=checkpoint_path,
-    #                     master=self._config.master,
-    #                     scaffold=estimator_spec.scaffold,
-    #                     config=self._session_config),
-    #                 hooks=all_hooks) as mon_sess:
-    #             while not mon_sess.should_stop():
-    #                 preds_evaluated = mon_sess.run(predictions)
-    #                 if not yield_single_examples:
-    #                     yield preds_evaluated
-    #                 elif not isinstance(predictions, dict):
-    #                     for pred in preds_evaluated:
-    #                         yield pred
-    #                 else:
-    #                     for i in range(self._extract_batch_length(preds_evaluated)):
-    #                         yield {key: value[i] for key, value in six.iteritems(preds_evaluated)}
-
     def evaluate_online(self, session, predict_keys=None, steps=None, yield_single_examples=False):
         """ Used for evaluating at epoch end during training """
         predictions = self._extract_keys(self.predictions, predict_keys)
