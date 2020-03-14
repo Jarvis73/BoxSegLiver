@@ -46,14 +46,14 @@ if [[ "$TASK" == "train" ]]; then
         $@
 elif [[ "$TASK" == "eval" ]]; then
     PYTHONPATH="${PROJECT_DIR}" PYTHONNOUSERSITE=True CUDA_VISIBLE_DEVICES=${GPU_ID} \
-        eval ${NICE} $CONDA_PREFIX/bin/python ./entry/main_eval.py \
+        eval ${NICE} $CONDA_PREFIX/bin/python ./entry/main_eval_3d.py \
         --mode eval \
         --tag ${BASE_NAME%".sh"} \
-        --model UNet \
+        --model UNet3D \
         --classes NF \
         --test_fold 0 \
-        --im_depth 10 --im_height 960 --im_width 320 --im_channel 1 \
-        --random_flip 1 \
+        --im_depth -1 --im_height 960 --im_width 320 --im_channel 1 \
+        --random_flip 7 \
         --batch_size 1 \
         --normalizer instance_norm \
         --eval_mirror \

@@ -161,7 +161,7 @@ def main():
             lr_hook = hooks.ReduceLROnPlateauHook(args.model_dir,
                                                   lr_patience=args.lr_patience,
                                                   tr_patience=50,
-                                                  min_delta=1e-5,
+                                                  min_delta=1e-4,
                                                   every_n_steps=args.batches_per_epoch)
             train_hooks.append(lr_hook)
 

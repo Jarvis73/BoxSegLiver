@@ -454,45 +454,36 @@ def create_gaussian_distribution_v2(shape, centers, stddevs=None, indexing="ij",
     """
     Parameters
     ----------
-    shape: list
-        two values
-    centers: ndarray
-        Float ndarray with shape [n, d], d means (x, y, ...)
-    stddevs: ndarray
-        Float ndarray with shape [n, d], d means (x, y, ...)
-    indexing: {'xy', 'ij'}, optional
-        Cartesian ('xy') or matrix ('ij', default) indexing of output.
-        See Notes for more details.
-    keepdims: bool
-        Keep final dimension
-
-    TODO(zjw) Warning: indexing='xy' need test
+    shape: list, two values
+    centers: ndarray, Float ndarray with shape [n, d], d means (x, y, ...)
+    stddevs: ndarray, Float ndarray with shape [n, d], d means (x, y, ...)
+    indexing: {'xy', 'ij'}, optional, Cartesian ('xy') or matrix ('ij', default) indexing of output.
+    keepdims: bool, Keep final dimension
+    euclidean: bool, return euclidean distance or exponential distance
 
     Returns
     -------
     A batch of spatial guide image with shape [h, w, 1] for 2D and [d, h, w, 1] for 3D
 
-    Notes
-    -----
-    -1s in center and stddev are padding value and almost don't affect spatial guide
     """
-    centers = np.asarray(centers, np.float32)                                   # [n, 2]    if dimension=2
+    centers = np.asarray(centers, np.float32)                                   # [n, 2] / [n, 3]
     assert centers.ndim == 2, centers.shape
     coords = [np.arange(0, s) for s in shape]
     coords = np.tile(
         np.stack(np.meshgrid(*coords, indexing=indexing), axis=-1)[None],
-        reps=[centers.shape[0]] + [1] * (centers.shape[1] + 1))                 # [n, h, w, 2]
+        reps=[centers.shape[0]] + [1] * (centers.shape[1] + 1))                 # [n, h, w, 2] / [n, d, h, w, 3]
     coords = coords.astype(np.float32)
-    centers = centers[..., None, None, :]                                       # [n, 1, 1, 2]
+    c_sh = centers.shape
+    centers = centers.reshape(c_sh[:1] + (1,) * c_sh[-1] + c_sh[-1:])           # [n, 1, 1, 2] / [n, 1, 1, 1, 3]
     if euclidean:
         d = np.sqrt(np.sum((coords - centers) ** 2, axis=-1, keepdims=keepdims))
         return np.min(d, axis=0)
 
-    stddevs = np.asarray(stddevs, np.float32)                                   # [n, 2]
-    stddevs = stddevs[..., None, None, :]                                       # [n, 1, 1, 2]
-    normalizer = 2 * stddevs * stddevs                                          # [n, 1, 1, 2]
-    d = np.exp(-np.sum((coords - centers) ** 2 / normalizer, axis=-1, keepdims=keepdims))   # [n, h, w, 1] / [n, h, w]
-    return np.max(d, axis=0)                                                    # [h, w, 1] / [h, w]
+    stddevs = np.asarray(stddevs, np.float32)                                   # [n, 2] / [n, 3]
+    stddevs = stddevs.reshape(c_sh[:1] + (1,) * c_sh[-1] + c_sh[-1:])           # [n, 1, 1, 2] / [n, 1, 1, 1, 3]
+    normalizer = 2 * stddevs * stddevs                                          # [n, 1, 1, 2] / [n, 1, 1, 1, 3]
+    d = np.exp(-np.sum((coords - centers) ** 2 / normalizer, axis=-1, keepdims=keepdims))   # [n, h, w, 1] / [n, d, h, w, 1]
+    return np.max(d, axis=0)                                                    # [h, w, 1] / [d, h, w, 1]
 
 
 def get_gd_image_single_obj(labels, center_perturb=0.2, stddev_perturb=0.4, blank_prob=0,
