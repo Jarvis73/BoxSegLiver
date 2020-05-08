@@ -1,0 +1,4 @@
+init_channel_factor: 0.75
+num_pool_layers: 3
+ret_prob: false
+ret_pred: true

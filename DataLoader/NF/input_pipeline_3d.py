@@ -28,6 +28,8 @@ import tensorflow_estimator as tfes
 from tensorflow.python.platform import tf_logging as logging
 from tensorflow.contrib import data as contrib_data
 from tensorflow.python.util import deprecation
+from skimage.segmentation import find_boundaries
+from scipy.ndimage.morphology import distance_transform_edt
 
 from utils import image_ops
 from utils import distribution_utils
@@ -35,6 +37,7 @@ from DataLoader import misc
 # noinspection PyUnresolvedReferences
 from DataLoader import feature_ops
 from DataLoader.Liver import nii_kits
+from entry import infer_2d
 
 deprecation._PRINT_DEPRECATION_WARNINGS = False
 ModeKeys = tfes.estimator.ModeKeys
@@ -44,6 +47,7 @@ RND_SCALE = (1.0, 1.25)
 
 data_cache = None
 neg_cache = None
+infer2d = None
 
 
 def add_arguments(parser):
@@ -73,9 +77,68 @@ def add_arguments(parser):
     group.add_argument("--guide_channel", type=int, default=2, help="1 or 2")
     group.add_argument("--fp_sample", action="store_true", help="Negative clicks sampled from false positive areas")
     group.add_argument("--sample_neg", type=float, default=0., help="Sample negative patches containing fp pixels")
+    group.add_argument("--use_cascade", action="store_true", help="Enable cascade UNet(add extra channel with"
+                                                                  " one labeled slice).")
+    group.add_argument("--cascade_binary", action="store_true")
+    group.add_argument("--use_2d", action="store_true", help="Use 2d model to generate prior")
+    group.add_argument("-ds", "--downsampling", action="store_true", help="Use downsampled data for experiments")
+
+    group = parser.add_argument_group(title="Net2D Arguments")
+    group.add_argument("--model_2d", type=str)
+    group.add_argument("--model_2d_config", type=str)
+    group.add_argument("--ckpt_2d", type=str)
 
 
-def load_data(debug=False):
+def load_data(debug=False, sub_dir="nii_NF", img_pattern="volume*", cache="cache"):
+    global data_cache
+
+    if data_cache is not None:
+        return data_cache
+
+    data_dir = PROJ_ROOT / "data/NF" / sub_dir
+    path_list = list(data_dir.glob(img_pattern))
+
+    if debug:
+        path_list = path_list[:10]
+        print(f"Loading data ({len(path_list)} examples, for debug) ...")
+    else:
+        print(f"Loading data ({len(path_list)} examples) ...")
+
+    cache_path = PROJ_ROOT / f"data/NF/{cache}.gz.pkl"
+    if cache_path.exists():
+        print(f"Loading data cache from {cache_path}")
+        with cache_path.open("rb") as f:
+            data = zlib.decompress(f.read())
+            data_cache = pickle.loads(data)
+        print("Finished!")
+        return data_cache
+
+    data_cache = {}
+    for path in tqdm.tqdm(path_list):
+        pid = (path.name.split(".")[0].split("-")[-1] if sub_dir == "nii_NF" else
+               path.name.split("-")[0])
+        header, volume = nii_kits.read_nii(path)
+        la_path = path.parent / path.name.replace("volume", "segmentation").replace("img", "mask")
+        _, label = nii_kits.read_nii(la_path)
+        if sub_dir == "test_NF":
+            volume = volume.transpose(1, 0, 2)
+            label = label.transpose(1, 0, 2)
+        assert volume.shape == label.shape
+        data_cache[int(pid)] = {"im_path": path.absolute(), "la_path": la_path.absolute(),
+                                "img": volume,
+                                "lab": label.astype(np.uint8),
+                                "pos": np.stack(np.where(label > 0), axis=1),
+                                "meta": header, "lab_rng": np.unique(label)}
+    with cache_path.open("wb") as f:
+        print(f"Saving data cache to {cache_path}")
+        cache_s = pickle.dumps(data_cache, pickle.HIGHEST_PROTOCOL)
+        f.write(zlib.compress(cache_s))
+    print("Finished!")
+    return data_cache
+
+
+def load_data_ds(debug=False):
+    """ Load data downsampling (for accelerating) """
     global data_cache
 
     if data_cache is not None:
@@ -90,7 +153,7 @@ def load_data(debug=False):
     else:
         print(f"Loading data ({len(path_list)} examples) ...")
 
-    cache_path = PROJ_ROOT / "data/NF/cache.gz.pkl"
+    cache_path = PROJ_ROOT / "data/NF/cache_ds.gz.pkl"
     if cache_path.exists():
         print(f"Loading data cache from {cache_path}")
         with cache_path.open("rb") as f:
@@ -106,6 +169,8 @@ def load_data(debug=False):
         la_path = path.parent / path.name.replace("volume", "segmentation")
         _, label = nii_kits.read_nii(la_path)
         assert volume.shape == label.shape
+        volume = volume[:, ::2, ::2]
+        label = label[:, ::2, ::2]
         data_cache[int(pid)] = {"im_path": path.absolute(), "la_path": la_path.absolute(),
                                 "img": volume,
                                 "lab": label.astype(np.uint8),
@@ -178,8 +243,8 @@ def load_neg(data, dim=3):
     return neg_cache
 
 
-def load_split(test_fold=0, mode="train"):
-    fold_path = PROJ_ROOT / "DataLoader/NF/prepare/split.csv"
+def load_split(test_fold=0, mode="train", filename="split.csv"):
+    fold_path = PROJ_ROOT / "DataLoader/NF/prepare" / filename
     folds = pd.read_csv(str(fold_path))
     val_split = folds.loc[folds.split == test_fold]
     if mode != "train":
@@ -242,7 +307,7 @@ def inter_simulation(mask, margin=5, step=10, N=5, bg=False, d=40, strategy=0, r
                 i = np.argmax(np.sum(dist ** 2, axis=-1).min(axis=1))
             ctr = ctr[i]   # center z, y, x
         else:
-            ctr = ctr.mean()
+            ctr = ctr.mean(axis=0).round().astype(np.int32)
         first = False
         all_pts.append(ctr)
         y1 = max(ctr[-2] - step, 0)
@@ -262,8 +327,13 @@ def inter_simulation(mask, margin=5, step=10, N=5, bg=False, d=40, strategy=0, r
 def input_fn(mode, params):
     if "args" not in params:
         raise KeyError("params of input_fn need an \"args\" key")
-
     args = params["args"]
+
+    global infer2d
+    if args.use_2d and infer2d is None:
+        infer2d = infer_2d.InferenceWithGuide2D(args)
+        logging.info(f"===== 2d model loaded from {args.ckpt_2d}")
+
     dataset = load_split(args.test_fold, mode)
 
     with tf.variable_scope("InputPipeline"):
@@ -338,20 +408,82 @@ def data_processing(img, lab, *pts, train, cfg):
     return feat, lab
 
 
-def gen_kernel(nf, queue, img_patch, lab_patch, fp_sample):
+def data_processing_2c(img, lab, *pts, train, cfg):
+    """ img has two channels: [img, res2d] """
+    img, res2d = tf.split(img, 2, axis=-1)
+    # z_score
+    nonzero_region = img > 0
+    flatten_img = tf.reshape(img, [-1])
+    flatten_mask = tf.reshape(nonzero_region, [-1])
+    mean, variance = tf.nn.moments(tf.boolean_mask(flatten_img, flatten_mask), axes=(0,))
+    float_region = tf.cast(nonzero_region, img.dtype)
+    img = (img - float_region * mean) / (float_region * tf.math.sqrt(variance) + 1e-8)
+    img = tf.concat((img, res2d), axis=-1)
+    flag = 'Train' if train else 'Val'
+    logging.info(f"{flag}: Add z-score preprocessing")
+    logging.info(f"{flag}: {'Enable' if cfg.local_enhance else 'Disable'} local enhance of the guides")
+
+    if cfg.use_spatial:
+        fg_pts, bg_pts = pts
+
+        def true_fn(ctr):
+            stddev = tf.ones(tf.shape(ctr), tf.float32) * cfg.stddev
+            gd = image_ops.create_spatial_guide_3d(
+                tf.shape(img)[:-1], ctr, stddev, euclidean=not cfg.local_enhance)
+            if not cfg.local_enhance:
+                gd = gd / (cfg.im_height * math.sqrt(2) * 0.8)  # normalization
+            return tf.cast(gd, tf.float32)
+
+        def false_fn():
+            return tf.zeros(tf.concat([tf.shape(img)[:-1], [1]], axis=0), tf.float32)
+
+        fg_guide = tf.cond(tf.shape(fg_pts)[0] > 0, lambda: true_fn(fg_pts), false_fn)
+        bg_guide = tf.cond(tf.shape(bg_pts)[0] > 0, lambda: true_fn(bg_pts), false_fn)
+        img = tf.concat([img, fg_guide, bg_guide], axis=-1)
+    img = tf.image.resize_bilinear(img, (cfg.im_height, cfg.im_width), align_corners=True)
+
+    if train and cfg.random_flip > 0:
+        img, lab = image_ops.random_flip(img, lab, flip=cfg.random_flip)
+        logging.info("Train: Add random flip " +
+                     "left <-> right " * (cfg.random_flip & 1 > 0) +
+                     "up <-> down" * (cfg.random_flip & 2 > 0) +
+                     "front <-> back" * (cfg.random_flip & 4 > 0))
+
+    if cfg.use_spatial:
+        if cfg.guide_channel == 2:
+            img, res2d, sp_guide = tf.split(img, [cfg.im_channel - 1, 1, 2], axis=-1)
+        else:
+            img, res2d, fg_guide, bg_guide = tf.split(img, [cfg.im_channel - 1, 1, 1, 1], axis=-1)
+            sp_guide = fg_guide - bg_guide
+        feat = {"images": img, "sp_guide": sp_guide}
+    else:
+        feat = {"images": img}
+
+    lab = tf.expand_dims(lab, axis=-1)
+    lab = tf.image.resize_nearest_neighbor(lab, (cfg.im_height, cfg.im_width), align_corners=True)
+    lab = tf.squeeze(lab, axis=-1)
+
+    if train:
+        feat["images"] = image_ops.augment_gamma(feat["images"], gamma_range=(0.7, 1.5), retain_stats=True,
+                                                 p_per_sample=0.3)
+        logging.info("Train: Add gamma transform, scale=(0.7, 1.5), retain_stats=True, p_per_sample=0.3")
+    feat["images"] = tf.concat((feat["images"], res2d), axis=-1)
+    return feat, lab
+
+
+def gen_kernel(nf, img_patch, lab_patch, cfg):
     """
     Kernel for parallel processing
 
     Parameters
     ----------
     nf:         bool, has NF or not
-    queue:      multiprocessing.Manager().Queue, store results
     img_patch:  np.ndarray, image patch
     lab_patch:  np.ndarray, label patch
-    fp_sample: bool, use false positive sampling or not
+    cfg:
     """
     try:
-        if fp_sample:
+        if cfg.fp_sample:
             neg_patch = lab_patch // 10
             lab_patch = lab_patch % 10
         else:
@@ -370,7 +502,41 @@ def gen_kernel(nf, queue, img_patch, lab_patch, fp_sample):
             strategy = 3
         bg_pts = inter_simulation(1 - lab_patch, margin=3, step=10, N=5, bg=True, d=40,
                                   strategy=strategy, neg_patch=neg_patch)
-        queue.put((img_patch.astype(np.float32), lab_patch.astype(np.int32), fg_pts, bg_pts))
+        if cfg.use_cascade:
+            if fg_pts.size == 0:
+                exp_dist = np.zeros_like(img_patch, np.float32)
+            else:
+                if cfg.use_2d:
+                    prior, all_z = infer2d.get_pred_2d(img_patch[..., 0], fg_pts, bg_pts)
+                    # prior2 = prior.copy()
+                    if not cfg.cascade_binary:
+                        for z in all_z:
+                            z = int(z)
+                            prior[z] = find_boundaries(prior[z], mode='inner')
+                        dist = distance_transform_edt(np.bitwise_not(prior.astype(np.bool)))
+                        exp_dist = np.exp(-dist / 25)[..., None]
+                    else:
+                        exp_dist = prior[..., None]
+                else:
+                    z = int(fg_pts[0, 0])
+                    prior = lab_patch[z]
+                    if not cfg.cascade_binary:
+                        boundaries = find_boundaries(prior, mode='inner')
+                        lab_patch_from_2d = np.zeros_like(lab_patch, np.bool)
+                        lab_patch_from_2d[z] = boundaries
+                        dist = distance_transform_edt(np.bitwise_not(lab_patch_from_2d))
+                        exp_dist = np.exp(-dist / 25)[..., None]
+                    else:
+                        lab_patch_from_2d = np.zeros_like(lab_patch, np.float32)
+                        lab_patch_from_2d[z] = prior
+                        exp_dist = lab_patch_from_2d
+            img_patch = np.concatenate((img_patch.astype(np.float32), exp_dist), axis=-1)
+            # with open("data.pkl", "wb") as f:
+            #     pickle.dump((img_patch, prior2, fg_pts, bg_pts), f)
+            #     exit()
+        else:
+            img_patch = img_patch.astype(np.float32)
+        return img_patch, lab_patch.astype(np.int32), fg_pts, bg_pts
     except (KeyboardInterrupt, FileNotFoundError, EOFError):
         logging.info("Subprocess terminated.")
 
@@ -387,7 +553,7 @@ def gen_batch(dataset, batch_size, train, cfg):
     cfg: global config var
 
     """
-    data = load_data()
+    data = load_data() if not cfg.downsampling else load_data_ds()
     for k, v in data.items():
         np.clip(v["lab"], 0, 1, v["lab"])
     if cfg.sample_neg or cfg.fp_sample:
@@ -441,15 +607,11 @@ def gen_batch(dataset, batch_size, train, cfg):
             img_patch = img_patch[..., None]
             if cfg.use_spatial:
                 lab_patch = lab_patch.astype(np.int8)
-                cfg.pool.apply_async(gen_kernel, args=(sample.nf, cfg.queue, img_patch, lab_patch, cfg.fp_sample))
+                yield gen_kernel(sample.nf, img_patch, lab_patch, cfg)
             else:
                 img_patch = img_patch.astype(np.float32)
                 lab_patch = lab_patch.astype(np.int32)
                 yield img_patch, lab_patch
-
-        if cfg.use_spatial:
-            for j, _ in enumerate(batch.iterrows()):
-                yield cfg.queue.get()
 
 
 def get_train_loader(data_list, cfg):
@@ -461,14 +623,15 @@ def get_train_loader(data_list, cfg):
         return gen_batch(data_list, batch_size, train=True, cfg=cfg)
 
     output_types = (tf.float32, tf.int32)
-    output_shapes = (tf.TensorShape([None, None, None, 1]), tf.TensorShape([None, None, None]))
+    output_shapes = (tf.TensorShape([None, None, None, cfg.im_channel]), tf.TensorShape([None, None, None]))
     if cfg.use_spatial:
         output_types = output_types + (tf.float32, tf.float32)
         output_shapes = output_shapes + (tf.TensorShape([None, 3]), tf.TensorShape([None, 3]))
 
+    processing = data_processing if not cfg.use_cascade else data_processing_2c
     dataset = (tf.data.Dataset.from_generator(train_gen, output_types, output_shapes)
                .apply(tf.data.experimental.map_and_batch(
-                        lambda *args: data_processing(*args, train=True, cfg=cfg),
+                        lambda *args: processing(*args, train=True, cfg=cfg),
                         batch_size, num_parallel_batches=1))
                .prefetch(buffer_size=contrib_data.AUTOTUNE))
 
@@ -484,14 +647,15 @@ def get_val_loader(data_list, cfg):
             yield next(infinity_generator)
 
     output_types = (tf.float32, tf.int32)
-    output_shapes = (tf.TensorShape([None, None, None, 1]), tf.TensorShape([None, None, None]))
+    output_shapes = (tf.TensorShape([None, None, None, cfg.im_channel]), tf.TensorShape([None, None, None]))
     if cfg.use_spatial:
         output_types = output_types + (tf.float32, tf.float32)
         output_shapes = output_shapes + (tf.TensorShape([None, 3]), tf.TensorShape([None, 3]))
 
+    processing = data_processing if not cfg.use_cascade else data_processing_2c
     dataset = (tf.data.Dataset.from_generator(eval_gen, output_types, output_shapes)
                .apply(tf.data.experimental.map_and_batch(
-                        lambda *args: data_processing(*args, train=False, cfg=cfg),
+                        lambda *args: processing(*args, train=False, cfg=cfg),
                         batch_size, num_parallel_batches=1))
                .prefetch(buffer_size=contrib_data.AUTOTUNE))
 

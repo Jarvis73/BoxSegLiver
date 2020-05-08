@@ -120,7 +120,7 @@ class SegViewerAdapter(object):
             new_image[masked[0], masked[1]] = \
                 (1 - alpha) * new_image[masked[0], masked[1]] + \
                 alpha * np.array(color)
-
+`
         return new_image
 
     @staticmethod

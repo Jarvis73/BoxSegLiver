@@ -27,7 +27,7 @@ def add_arguments(parser):
     group = parser.add_argument_group(title="Global Arguments")
     group.add_argument("--mode",
                        type=str,
-                       choices=["train", "eval", "infer"],
+                       choices=["train", "eval", "infer", "export"],
                        required=True, help="Model mode for train/val/test")
     group.add_argument("--tag",
                        type=str,
@@ -53,6 +53,7 @@ def add_arguments(parser):
     group.add_argument("--save_best", action="store_true", help="Save best checkpoint")
     group.add_argument("--save_interval", type=int, default=0, help="Save best checkpoint in each interval")
     group.add_argument("--log_step", type=int, default=500, help="Log running information per `log_step`")
+    group.add_argument("--min_delta", type=float, default=5e-4, help="min_delta for pleatau lr strategy")
 
     group = parser.add_argument_group(title="Device Arguments")
     group.add_argument("--distribution_strategy",
@@ -93,14 +94,15 @@ def _try_to_find_ckpt(path, args):
 
 
 def check_args(args, parser):
-    if args.loss_weight_type == "numerical":
-        if not args.loss_numeric_w:
-            raise parser.error("loss_weight_type==numerical need parameter: --loss_numeric_w")
-        if len(args.loss_numeric_w) != len(args.classes) + 1:
-            raise parser.error("Asserting len(args.loss_numeric_w) = len(args.classes) + 1 failed!")
-    elif args.loss_weight_type == "proportion":
-        if not args.loss_proportion_decay:
-            raise parser.error("loss_weight_type==proportion need parameter: --loss_proportion_decay")
+    if hasattr(args, "loss_weight_type"):
+        if args.loss_weight_type == "numerical":
+            if not args.loss_numeric_w:
+                raise parser.error("loss_weight_type==numerical need parameter: --loss_numeric_w")
+            if len(args.loss_numeric_w) != len(args.classes) + 1:
+                raise parser.error("Asserting len(args.loss_numeric_w) = len(args.classes) + 1 failed!")
+        elif args.loss_weight_type == "proportion":
+            if not args.loss_proportion_decay:
+                raise parser.error("loss_weight_type==proportion need parameter: --loss_proportion_decay")
 
     if hasattr(args, "primary_metric") and args.primary_metric:
         parts = args.primary_metric.split("/")

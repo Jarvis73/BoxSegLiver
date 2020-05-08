@@ -21,6 +21,8 @@ import tensorflow as tf     # Tensorflow >= 1.13.0
 import tensorflow_estimator as tfes
 from pathlib import Path
 from tensorflow.python.platform import tf_logging as logging
+from multiprocessing import Pool, Manager
+import signal
 
 import config
 import loss_metrics
@@ -112,6 +114,11 @@ def _custom_tf_logger(args):
                                     clear_exist_handlers=True, name="tensorflow")
 
 
+def initializer():
+    """Ignore SIGINT in child workers."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
 def main():
     args, subcommand = _get_arguments()
     _custom_tf_logger(args)
@@ -187,6 +194,7 @@ def main():
                             max_steps=max_steps)
         except KeyboardInterrupt:
             logging.info("Main process terminated by user.")
+        finally:
             logging.info("Clean up!")
         logging.info("Process end.")
 

@@ -119,6 +119,25 @@ You can copy and modify provided template bash file in `./run_scripts/template/0
 
 Then add execution permission for your bash file & begin train/evaluate model the same as UNet.
 
+### 4. Deployment
+
+* Use CPU
+
+```bash
+docker run -t --rm -p 8501:8501 -v "D:/Library/Documents/0WorkSpace/MedicalImageSegmentation/export_path/112_nf_sp_dp:/models/112_nf_sp_dp" -e MODEL_NAME=112_nf_sp_dp tensorflow/serving &
+```
+
+* Use GPU (require docker `nvidia/cuda`)
+```bash
+docker run --runtime=nvidia -t --rm -p 8500:8500 -p 8501:8501 -v "/media/Data/Library/Documents/0WorkSpace/MedicalImageSegmentation/export_path/115_nf_both1_v2:/models/115_nf_both1_v2" -e MODEL_NAME=115_nf_both1_v2 tensorflow/serving:latest-gpu &
+```
+
+*   Use GPU (with custom driver installation)
+
+```bash
+docker run --runtime=nvidia -t --rm  -p 8500:8500 -p 8501:8501 -v "/usr/lib/nvidia-396:/custom/nvidia-396" -v "/home/mgh3dqi/zjw/MIS/export_path/112_nf_sp_fix:/models/112_nf_sp_fix" -e LD_LIBRARY_PATH=/custom/nvidia-396 -e NVIDIA_VISIBLE_DEVICES=1 -e MODEL_NAME=112_nf_sp_fix tensorflow/serving:latest-gpu-cuda9.0
+```
+
 
 
 ## Need implemented

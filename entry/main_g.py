@@ -163,7 +163,7 @@ def main():
         if args.learning_policy == "plateau":
             lr_hook = hooks.ReduceLROnPlateauHook(args.model_dir,
                                                   lr_patience=args.lr_patience,
-                                                  min_delta=5e-4,
+                                                  min_delta=args.min_delta,
                                                   every_n_steps=args.batches_per_epoch)
             train_hooks.append(lr_hook)
 
@@ -202,6 +202,10 @@ def main():
         except KeyboardInterrupt:
             logging.info("Main process terminated by user.")
         finally:
+            while True:
+                if args.queue.empty():
+                    break
+                args.queue.get()
             args.pool.close()
             args.pool.join()
             logging.info("Clean up!")

@@ -103,6 +103,7 @@ class UNet3D(base.BaseNet):
         self.height = args.im_height
         self.width = args.im_width
         self.channel = args.im_channel
+        self.use_spatial = args.use_spatial
 
     def _net_arg_scope(self, *args, **kwargs):
         default_w_regu, default_b_regu = self._get_regularizer()
@@ -124,6 +125,8 @@ class UNet3D(base.BaseNet):
         self.height = base._check_size_type(self.height)
         self.width = base._check_size_type(self.width)
         self._inputs["images"].set_shape([self.bs, self.depth, self.height, self.width, self.channel])
+        if self.use_spatial:
+            self._inputs["sp_guide"].set_shape([self.bs, self.depth, self.height, self.width, self.args.guide_channel])
 
         init_channels = kwargs.get("init_channels", 30)
         num_pool_layers = kwargs.get("num_pool_layers", 4)
@@ -137,6 +140,8 @@ class UNet3D(base.BaseNet):
                 inputs = tf.concat((self._inputs["images"], dz, dy, dx), axis=-1)
             else:
                 inputs = self._inputs["images"]
+            if self.use_spatial:
+                inputs = tf.concat((self._inputs["images"], self._inputs["sp_guide"]), axis=-1)
 
             x = inputs
             c = init_channels
@@ -220,8 +225,12 @@ class UNet3D(base.BaseNet):
         if self.mode == ModeKeys.TRAIN:
             # Make sure all the elements are positive
             with tf.name_scope("SumImage"):
-                image = self._inputs["images"][:, self.depth // 2]
-                images = [image - tf.reduce_min(image)]
+                if self.args.im_channel == 1:
+                    image = self._inputs["images"][:, self.depth // 2]
+                    images = [image - tf.reduce_min(image)]
+                elif self.args.im_channel == 2:
+                    image, res2d = tf.split(self._inputs["images"][:, self.depth // 2], 2, axis=-1)
+                    images = [image - tf.reduce_min(image), res2d]
 
             for i, image in enumerate(images):
                 tf.summary.image("{}/Image{}".format(self.args.tag, i), image,

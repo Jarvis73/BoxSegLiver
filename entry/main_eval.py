@@ -27,6 +27,7 @@ import scipy.ndimage as ndi
 from skimage.morphology import skeletonize
 import tensorflow as tf     # Tensorflow >= 1.13.0
 from tensorflow.python.platform import tf_logging as logging
+import GeodisTK
 
 import config
 import loss_metrics
@@ -60,6 +61,7 @@ def _get_arguments():
     group.add_argument("--max_iter", type=int, default=20, help="Maximum iters for each image in interaction")
     group.add_argument("--infer_set", type=str, default="eval", help="Choice from [train, eval]")
     group.add_argument("--save_subdir", type=str, default="prediction")
+    group.add_argument("--test", action="store_true")
 
     args = parser.parse_args()
     config.check_args(args, parser)
@@ -101,34 +103,39 @@ def filter_tiny_nf(mask):
 
 
 def load_dataset(cfg, release_label=True):
-    data = input_pipeline.load_data()
-    dataset = input_pipeline.load_split(cfg.test_fold, mode=cfg.infer_set)
-    dataset = dataset[[True if item.pid in data and item.remove != 1 else False for _, item in dataset.iterrows()]]
-    # dataset containing nf (remove benign scans)
-    dataset['nf'] = [True if len(data[pid]['lab_rng']) > 1 else False for pid in dataset.pid]
-    nf_set = dataset[dataset.nf]
+    if not cfg.test:
+        data = input_pipeline.load_data() if not cfg.downsampling else input_pipeline.load_data_ds()
+        dataset = input_pipeline.load_split(cfg.test_fold, mode=cfg.infer_set)
+        dataset = dataset[[True if item.pid in data and item.remove != 1 else False for _, item in dataset.iterrows()]]
+        # dataset containing nf (remove benign scans)
+        dataset['nf'] = [True if len(data[pid]['lab_rng']) > 1 else False for pid in dataset.pid]
+        nf_set = dataset[dataset.nf]
+        slim_labels_path = Path(__file__).parent.parent / "data/NF/slim_labels.gz.pkl"
+        if slim_labels_path.exists():
+            print(f"Loading slimed label cache from {slim_labels_path}")
+            with slim_labels_path.open("rb") as f:
+                slim_labels = pickle.loads(zlib.decompress(f.read()))
+            for i in data:
+                data[i]['slim'] = slim_labels[i]
+            print("Finished!")
+        else:
+            slim_labels = {}
+            print(f"Saving slimed label cache to {slim_labels_path}")
+            for i, item in data.items():
+                slim_labels[i] = filter_tiny_nf(np.clip(item['lab'], 0, 1).copy())
+                data[i]['slim'] = slim_labels[i]
+            with slim_labels_path.open("wb") as f:
+                f.write(zlib.compress(pickle.dumps(slim_labels)))
+            print("Finished!")
 
-    slim_labels_path = Path(__file__).parent.parent / "data/NF/slim_labels.gz.pkl"
-    if slim_labels_path.exists():
-        print(f"Loading slimed label cache from {slim_labels_path}")
-        with slim_labels_path.open("rb") as f:
-            slim_labels = pickle.loads(zlib.decompress(f.read()))
-        for i in data:
-            data[i]['slim'] = slim_labels[i]
-        print("Finished!")
+        if release_label:
+            for i in data:
+                data[i].pop('lab')
     else:
-        slim_labels = {}
-        print(f"Saving slimed label cache to {slim_labels_path}")
-        for i, item in data.items():
-            slim_labels[i] = filter_tiny_nf(np.clip(item['lab'], 0, 1).copy())
-            data[i]['slim'] = slim_labels[i]
-        with slim_labels_path.open("wb") as f:
-            f.write(zlib.compress(pickle.dumps(slim_labels)))
-        print("Finished!")
-
-    if release_label:
-        for i in data:
-            data[i].pop('lab')
+        data = input_pipeline.load_data(sub_dir="test_NF", img_pattern="*img.nii.gz", cache="test_data")
+        dataset = input_pipeline.load_split(test_fold=0, mode="test", filename="split_test.csv")
+        dataset['nf'] = [True if len(data[pid]['lab_rng']) > 1 else False for pid in dataset.pid]
+        nf_set = dataset[dataset.nf]
 
     if cfg.save_predict:
         save_path = Path(cfg.model_dir) / cfg.save_subdir
@@ -176,26 +183,43 @@ def inter_simulation_test(pred, ref):
     return pos, fg
 
 
-def update_guide(pred, ref, guide, cfg, iteration):
+def update_guide(pred, ref, guide, cfg, iteration, image, pos_col):
     if pred is None:
         pred = np.zeros_like(ref, dtype=np.uint8)
     pos, fg = inter_simulation_test(pred, ref)
-    # print(pos, pred.sum(), end=" ")
-    cur_guide = create_gaussian_distribution_v2(
-        ref.shape, [pos], [[cfg.stddev] * 2], euclidean=not cfg.local_enhance)
-    if guide is None:
+    pos_col[fg].append(pos)
+    if not cfg.geodesic:
+        cur_guide = create_gaussian_distribution_v2(
+            ref.shape, [pos], [[cfg.stddev] * 2], euclidean=not cfg.local_enhance)
+        if guide is None:
+            if cfg.guide_channel == 2:
+                guide = np.zeros(ref.shape + (2,), dtype=np.float32)
+            else:
+                guide = (np.zeros(ref.shape + (1,), dtype=np.float32),
+                         np.zeros(ref.shape + (1,), dtype=np.float32))
+        update_op = np.maximum if cfg.local_enhance else np.minimum
         if cfg.guide_channel == 2:
-            guide = np.zeros(ref.shape + (2,), dtype=np.float32)
+            guide[:, :, fg] = update_op(guide[:, :, fg], cur_guide) if guide[:, :, fg].max() > 0 else cur_guide
         else:
-            guide = (np.zeros(ref.shape + (1,), dtype=np.float32),
-                     np.zeros(ref.shape + (1,), dtype=np.float32))
-    update_op = np.maximum if cfg.local_enhance else np.minimum
-    if cfg.guide_channel == 2:
-        guide[:, :, fg] = update_op(guide[:, :, fg], cur_guide) if guide[:, :, fg].max() > 0 else cur_guide
+            guide[fg][:, :, 0] = update_op(guide[fg][:, :, 0], cur_guide)
     else:
-        guide[fg][:, :, 0] = update_op(guide[fg][:, :, 0], cur_guide)
+        shape = image.shape[:-1]
+        downsample = image[::2, ::2, cfg.im_channel // 2]
+        S = np.zeros_like(downsample, np.uint8)
+        arr_pos = (np.array(pos_col[0]) / np.array(ref.shape) * shape / 2).astype(np.int32)
+        S[arr_pos[:, 0], arr_pos[:, 1]] = 1
+        fg_guide = GeodisTK.geodesic2d_fast_marching(downsample, S)
+        if len(pos_col[1]) > 0:
+            S = np.zeros_like(downsample, np.uint8)
+            arr_pos = (np.array(pos_col[1]) / np.array(ref.shape) * shape / 2).astype(np.int32)
+            S[arr_pos[:, 0], arr_pos[:, 1]] = 1
+            bg_guide = GeodisTK.geodesic2d_fast_marching(downsample, S)
+        else:
+            bg_guide = np.zeros_like(fg_guide, dtype=np.float32)
+        guide = np.stack((fg_guide, bg_guide), axis=-1)
+        guide = cv2.resize(guide, shape[::-1], cv2.INTER_LINEAR)
     iteration[fg] += 1
-    return guide, pos.tolist(), fg
+    return guide, pos.tolist(), fg, pos_col
 
 
 def compute_dice(pred, ref):
@@ -280,9 +304,15 @@ def main():
     shape = (cfg.im_width, cfg.im_height)
     total_inters = [0, 0]
     for _, sample in nf_set.iterrows():
-        # if sample.pid != 127:
+        # if sample.pid != 10:
         #     continue
-        volume, label = dataset[sample.pid]["img"], dataset[sample.pid]["slim"]
+        volume = dataset[sample.pid]["img"]
+        if "slim" in dataset[sample.pid]:
+            label = dataset[sample.pid]["slim"]
+        else:
+            label = dataset[sample.pid]["lab"]
+            label = np.clip(label, 0, 1)
+
         _, height, width = volume.shape
         final_pred = np.zeros_like(label, dtype=np.uint8)
 
@@ -290,7 +320,7 @@ def main():
         case_inters = [0, 0]
         slice_containing_nf = np.where(np.max(label, axis=(1, 2)) > 0)[0]
         for i in slice_containing_nf:
-            # if i != 19:
+            # if i != 3:
             #     continue
             img = misc.img_crop(volume, i, cfg.im_channel)[0].transpose(1, 2, 0).astype(np.float32)
             img = cv2.resize(img, shape, interpolation=cv2.INTER_LINEAR)
@@ -301,8 +331,9 @@ def main():
             if use_spatial:
                 print("(Case {:3d} Slice {:2d}) Interacting: ".format(sample.pid, i), end="", flush=True)
                 feed_dict = {inputs["images"]: img[None]}
+                pos_col = [[], []]
                 while True:
-                    guide, new_pos, fg = update_guide(pred, label[i], guide, cfg, num_iter)
+                    guide, new_pos, fg, pos_col = update_guide(pred, label[i], guide, cfg, num_iter, img, pos_col)
                     if new_pos == pos:
                         print(" Number iters: {}/{}".format(num_iter[0], num_iter[1]))
                         case_inters[0] += num_iter[0]
@@ -311,22 +342,20 @@ def main():
                     pos = new_pos
                     sp_guide = guide if cfg.guide_channel == 2 else guide[0] - guide[1]
                     sp_guide = cv2.resize(sp_guide, shape, interpolation=cv2.INTER_LINEAR)
-                    sp_guide = sp_guide if cfg.local_enhance else \
-                        (sp_guide / (256 * math.sqrt(2) * 0.8))
+                    if cfg.guide_channel == 1:
+                        sp_guide = sp_guide[..., None]
                     feed_dict[inputs["sp_guide"]] = sp_guide[None]
                     pred = run_TTA(sess, model, cfg, feed_dict)
                     pred = cv2.resize(pred[0], (width, height), interpolation=cv2.INTER_NEAREST)
                     dice = compute_dice(pred, label[i])
                     print("{:.3f} -> ".format(dice), end="", flush=True)
-                    # with open("{}.pkl".format(num_iter), "wb") as f:
+                    # with open("{}.pkl".format(num_iter[0] + num_iter[1]), "wb") as f:
                     #     pickle.dump((img, sp_guide, pred), f)
                     if dice > cfg.inter_thresh or num_iter[0] + num_iter[1] >= cfg.max_iter:
                         print(" Number iters: {}/{}".format(num_iter[0], num_iter[1]))
                         case_inters[0] += num_iter[0]
                         case_inters[1] += num_iter[1]
                         break
-                    # if num_iter > 4:
-                    #     break
             else:
                 feed_dict = {inputs["images"]: img[None]}
                 pred = run_TTA(sess, model, cfg, feed_dict)

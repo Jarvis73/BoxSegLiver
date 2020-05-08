@@ -28,16 +28,6 @@ ModeKeys = tfes.estimator.ModeKeys
 metrics = losses
 
 
-def modulated_conv_block(net, repeat, channels, dilation=1, scope_id=0,
-                         outputs_collections=None):
-    with tf.variable_scope("down_conv{}".format(scope_id)):
-        for i in range(repeat):
-            with tf.variable_scope("mod_conv{}".format(i + 1)) as sc:
-                net = slim.conv2d(net, channels, 3, rate=dilation)
-                utils_lib.collect_named_outputs(outputs_collections, sc.name, net)
-        return net
-
-
 class UNetInter(base.BaseNet):
     def __init__(self, args, name=None):
         """ Don't create ops/tensors in __init__() """
@@ -70,18 +60,34 @@ class UNetInter(base.BaseNet):
                                     normalizer_params=params) as scope2:
                     return scope2
 
+    def modulated_conv_block(self, net, repeat, channels, dilation=1, scope_id=0,
+                             outputs_collections=None):
+        with tf.variable_scope("down_conv{}".format(scope_id)):
+            for i in range(repeat):
+                with tf.variable_scope("mod_conv{}".format(i + 1)) as sc:
+                    net = slim.conv2d(net, channels, 3, rate=dilation)
+                    utils_lib.collect_named_outputs(outputs_collections, sc.name, net)
+            return net
+
     def _build_network(self, *args, **kwargs):
         self.height = base._check_size_type(self.height)
         self.width = base._check_size_type(self.width)
         # Tensorflow can not infer input tensor shape when constructing graph
-        self._inputs["images"].set_shape([self.bs, self.height, self.width, self.channel])
-        self._inputs["sp_guide"].set_shape([self.bs, self.height, self.width, 2])
-        if hasattr(self.args, "img_grad") and self.args.img_grad:
-            dy, dx = tf.image.image_gradients(self._inputs["images"])
-            image = tf.concat((self._inputs["images"], self._inputs["sp_guide"], dy, dx), axis=-1)
-            tf.logging.info("Enable image gradient features.")
+        if hasattr(self.args, "use_2d") and self.args.use_2d:
+            self._inputs["images"].set_shape([1, self.height, self.width, 3])
+            self._inputs["sp_guide"].set_shape([1, self.height, self.width, self.args.guide_channel])
         else:
+            self._inputs["images"].set_shape([self.bs, self.height, self.width, self.channel])
+            self._inputs["sp_guide"].set_shape([self.bs, self.height, self.width, self.args.guide_channel])
+        if hasattr(self.args, "img_grad") and self.args.img_grad:
+            self.dy, self.dx = tf.image.image_gradients(self._inputs["images"])
+            # image = tf.concat((self._inputs["images"], self._inputs["sp_guide"], dy, dx), axis=-1)
+            tf.logging.info("Enable image gradient features.")
+        # else:
+        if not self.args.mid_cat:
             image = tf.concat((self._inputs["images"], self._inputs["sp_guide"]), axis=-1)
+        else:
+            image = self._inputs["images"]
 
         base_channels = kwargs.get("init_channels", 64)
         num_down_samples = kwargs.get("num_down_samples", 4)
@@ -111,12 +117,16 @@ class UNetInter(base.BaseNet):
             with tf.variable_scope("Encode"), slim.arg_scope(encoder_arg_scope()):
                 nets = [image]
                 for i in range(num_down_samples + 1):
-                    net = modulated_conv_block(
+                    net = self.modulated_conv_block(
                         nets[-1], 2, base_channels * 2 ** i, scope_id=i + 1,
                         outputs_collections=["EPts"])
                     nets[-1] = net
+                    if self.args.mid_cat and i == 0:
+                        x = tf.concat((nets[-1], self._inputs["sp_guide"]), axis=-1)
+                    else:
+                        x = nets[-1]
                     if i < num_down_samples:
-                        net = slim.max_pool2d(nets[-1], 2, scope="pool%d" % (i + 1))
+                        net = slim.max_pool2d(x, 2, scope="pool%d" % (i + 1))
                         nets.append(net)
 
             # decoder

@@ -33,6 +33,7 @@ from scipy.ndimage.morphology import distance_transform_edt
 import config
 import loss_metrics
 from core import models
+from core import solver
 from DataLoader.NF import input_pipeline_3d as input_pipeline
 from DataLoader import misc
 from DataLoader.Liver import nii_kits
@@ -46,23 +47,13 @@ def _get_arguments():
 
     config.add_arguments(parser)
     models.add_arguments(parser)
+    solver.add_arguments(parser)
     loss_metrics.add_arguments(parser)
     input_pipeline.add_arguments(parser)
-    group = parser.add_argument_group(title="Evaluation Arguments")
-    group.add_argument("--eval_final",
-                       action="store_true",
-                       required=False, help="Evaluate with final checkpoint. If not set, then evaluate "
-                                            "with best checkpoint(default).")
-    group.add_argument("--ckpt_path",
-                       type=str,
-                       required=False, help="Given a specified checkpoint for evaluation. "
-                                            "(default best checkpoint)")
-    group.add_argument("--save_path", type=str, default="prediction")
-    group.add_argument("--inter_thresh", type=float, default=0.9, help="Threshold of the segmentation goal")
-    group.add_argument("--max_iter", type=int, default=20, help="Maximum iters for each image in interaction")
-    group.add_argument("--infer_set", type=str, default="eval", help="Choice from [train, eval]")
-    group.add_argument("--save_subdir", type=str, default="prediction")
-    group.add_argument("--test", action="store_true")
+
+    group = parser.add_argument_group(title="Hybrid Training Arguments")
+    group.add_argument("--ckpt_2d", type=str)
+    group.add_argument("--ckpt_3d", type=str)
 
     args = parser.parse_args()
     config.check_args(args, parser)
@@ -104,41 +95,34 @@ def filter_tiny_nf(mask):
 
 
 def load_dataset(cfg, release_label=True):
-    if not cfg.test:
-        data = input_pipeline.load_data() if not cfg.downsampling else input_pipeline.load_data_ds()
-        dataset = input_pipeline.load_split(cfg.test_fold, mode=cfg.infer_set)
-        dataset = dataset[[True if item.pid in data and item.remove != 1 else False for _, item in dataset.iterrows()]]
-        # dataset containing nf (remove benign scans)
-        dataset['nf'] = [True if len(data[pid]['lab_rng']) > 1 else False for pid in dataset.pid]
-        nf_set = dataset[dataset.nf]
+    data = input_pipeline.load_data() if not cfg.downsampling else input_pipeline.load_data_ds()
+    dataset = input_pipeline.load_split(cfg.test_fold, mode=cfg.infer_set)
+    dataset = dataset[[True if item.pid in data and item.remove != 1 else False for _, item in dataset.iterrows()]]
+    # dataset containing nf (remove benign scans)
+    dataset['nf'] = [True if len(data[pid]['lab_rng']) > 1 else False for pid in dataset.pid]
+    nf_set = dataset[dataset.nf]
 
-        slim_labels_path = Path(__file__).parent.parent / "data/NF" / \
-            ("slim_labels.gz.pkl" if not cfg.downsampling else "slim_labels_ds.gz.pkl")
-        if slim_labels_path.exists():
-            print(f"Loading slimed label cache from {slim_labels_path}")
-            with slim_labels_path.open("rb") as f:
-                slim_labels = pickle.loads(zlib.decompress(f.read()))
-            for i in data:
-                data[i]['slim'] = slim_labels[i]
-            print("Finished!")
-        else:
-            slim_labels = {}
-            print(f"Saving slimed label cache to {slim_labels_path}")
-            for i, item in data.items():
-                slim_labels[i] = filter_tiny_nf(np.clip(item['lab'], 0, 1).copy())
-                data[i]['slim'] = slim_labels[i]
-            with slim_labels_path.open("wb") as f:
-                f.write(zlib.compress(pickle.dumps(slim_labels)))
-            print("Finished!")
-
-        if release_label:
-            for i in data:
-                data[i].pop('lab')
+    slim_labels_path = Path(__file__).parent.parent / "data/NF/slim_labels.gz.pkl"
+    if slim_labels_path.exists():
+        print(f"Loading slimed label cache from {slim_labels_path}")
+        with slim_labels_path.open("rb") as f:
+            slim_labels = pickle.loads(zlib.decompress(f.read()))
+        for i in data:
+            data[i]['slim'] = slim_labels[i]
+        print("Finished!")
     else:
-        data = input_pipeline.load_data(sub_dir="test_NF", img_pattern="*img.nii.gz", cache="test_data")
-        dataset = input_pipeline.load_split(test_fold=0, mode="test", filename="split_test.csv")
-        dataset['nf'] = [True if len(data[pid]['lab_rng']) > 1 else False for pid in dataset.pid]
-        nf_set = dataset[dataset.nf]
+        slim_labels = {}
+        print(f"Saving slimed label cache to {slim_labels_path}")
+        for i, item in data.items():
+            slim_labels[i] = filter_tiny_nf(np.clip(item['lab'], 0, 1).copy())
+            data[i]['slim'] = slim_labels[i]
+        with slim_labels_path.open("wb") as f:
+            f.write(zlib.compress(pickle.dumps(slim_labels)))
+        print("Finished!")
+
+    if release_label:
+        for i in data:
+            data[i].pop('lab')
 
     if cfg.save_predict:
         save_path = Path(cfg.model_dir) / cfg.save_subdir
@@ -183,34 +167,6 @@ def inter_simulation_test(pred, ref):
         pos = ske[min_i]
     fg = 0 if ref[pos[0], pos[1], pos[2]] else 1
     return pos, fg
-
-
-def update_guide(pred, ref, guide, cfg, iteration, pos_col):
-    if pred is None:
-        pred = np.zeros_like(ref, dtype=np.uint8)
-    pos, fg = inter_simulation_test(pred, ref)
-    pos_col[fg].append(pos)
-    cur_guide = create_gaussian_distribution_v2(
-        ref.shape, [pos], np.ones((1, 3), np.float32) * cfg.stddev, euclidean=not cfg.local_enhance)
-    if guide is None:
-        if cfg.guide_channel == 2:
-            guide = np.zeros(ref.shape + (2,), dtype=np.float32)
-        else:
-            guide = (np.zeros(ref.shape + (1,), dtype=np.float32),
-                     np.zeros(ref.shape + (1,), dtype=np.float32))
-    update_op = np.maximum if cfg.local_enhance else np.minimum
-    if cfg.guide_channel == 2:
-        guide[..., fg] = update_op(guide[..., fg], cur_guide) if guide[..., fg].max() > 0 else cur_guide
-    else:
-        guide[fg][..., 0] = update_op(guide[fg][..., 0], cur_guide)
-    iteration[fg] += 1
-    return guide, pos.tolist(), fg, pos_col
-
-
-def compute_dice(pred, ref):
-    inter = np.count_nonzero(pred * ref)
-    union = np.count_nonzero(pred) + np.count_nonzero(ref)
-    return (2 * inter + 1e-8) / (union + 1e-8)
 
 
 def _get_session_config(args):
@@ -312,12 +268,7 @@ def main():
     for _, sample in nf_set.iterrows():
         # if sample.pid != 127:
         #     continue
-        volume = dataset[sample.pid]["img"]
-        if "slim" in dataset[sample.pid]:
-            label = dataset[sample.pid]["slim"]
-        else:
-            label = dataset[sample.pid]["lab"]
-            label = np.clip(label, 0, 1)
+        volume, label = dataset[sample.pid]["img"], dataset[sample.pid]["slim"]
         label_bool = label.astype(np.bool)
         if label.shape[0] % 2 != 0:
             label_bool = np.pad(label_bool, ((0, 1), (0, 0), (0, 0)), mode="constant", constant_values=0)
@@ -332,61 +283,9 @@ def main():
         msk = img > 0
         tmp = img[msk]
         img[msk] = (tmp - tmp.mean()) / (tmp.std() + 1e-8)
-        guide, pred, num_iter, pos = None, None, [0, 0], None
-        if use_spatial:
-            print("(Case {:3d}) Interacting: ".format(sample.pid), end="", flush=True)
-            feed_dict = {inputs["images"]: img[None, ..., None]}
-            pos_col = [[], []]
-            pred_2d_added = False
-            while True:
-                guide, new_pos, fg, pos_col = update_guide(pred, label_bool, guide, cfg, num_iter, pos_col)
-                if new_pos == pos:
-                    print(" Number iters: {}/{}".format(num_iter[0], num_iter[1]))
-                    case_inters[0] += num_iter[0]
-                    case_inters[1] += num_iter[1]
-                    break
-                if cfg.use_cascade and not pred_2d_added:
-                    pred_2d_added = True
-                    if len(pos_col[0]) == 0:
-                        exp_dist = np.zeros_like(feed_dict[inputs["images"]], np.float32)
-                    elif not cfg.cascade_binary:
-                        z = int(pos_col[0][0][0])
-                        label_batch = ndi.zoom(label_bool[z], zoom_scale[1:], order=0)
-                        boundaries = find_boundaries(label_batch, mode='inner')
-                        lab_patch_from_2d = np.zeros(
-                            (label_bool.shape[0], cfg.im_height, cfg.im_width), np.bool)
-                        lab_patch_from_2d[z] = boundaries
-                        dist = distance_transform_edt(np.bitwise_not(lab_patch_from_2d))
-                        exp_dist = np.exp(-dist / 25)[None, ..., None]
-                    else:
-                        z = int(pos_col[0][0][0])
-                        label_batch = ndi.zoom(label_bool[z], zoom_scale[1:], order=0)
-                        lab_patch_from_2d = np.zeros(
-                            (label_bool.shape[0], cfg.im_height, cfg.im_width), np.float32)
-                        lab_patch_from_2d[z] = label_batch
-                        exp_dist = lab_patch_from_2d
-                    feed_dict[inputs["images"]] = np.concatenate(
-                        (feed_dict[inputs["images"]], exp_dist), axis=-1)
-                pos = new_pos
-                sp_guide = guide if cfg.guide_channel == 2 else guide[0] - guide[1]
-                sp_guide = ndi.zoom(sp_guide, np.concatenate((zoom_scale, [1]), axis=0), order=1)
-                feed_dict[inputs["sp_guide"]] = sp_guide[None]
-                pred = run_TTA(sess, model, cfg, feed_dict)
-                pred = ndi.zoom(pred[0], 1 / zoom_scale, order=0)
-                dice = compute_dice(pred, label_bool)
-                print("{:.3f} -> ".format(dice), end="", flush=True)
-                # with open("{}.pkl".format(num_iter[0] + num_iter[1]), "wb") as f:
-                #     pickle.dump((img, sp_guide, pred), f)
-                if dice > cfg.inter_thresh or num_iter[0] + num_iter[1] >= cfg.max_iter:
-                    print(" Number iters: {}/{}".format(num_iter[0], num_iter[1]))
-                    case_inters[0] += num_iter[0]
-                    case_inters[1] += num_iter[1]
-                    break
-            final_pred = pred
-        else:
-            feed_dict = {inputs["images"]: img[None, ..., None]}
-            pred = run_TTA(sess, model, cfg, feed_dict)
-            final_pred = ndi.zoom(pred[0], 1 / zoom_scale, order=1)
+        feed_dict = {inputs["images"]: img[None, ..., None]}
+        pred = run_TTA(sess, model, cfg, feed_dict)
+        final_pred = ndi.zoom(pred[0], 1 / zoom_scale, order=1)
         if label.shape[0] % 2 != 0:
             final_pred = final_pred[:-1]
 
@@ -399,25 +298,6 @@ def main():
             accu[key].append(value)
         total_inters[0] += case_inters[0]
         total_inters[1] += case_inters[1]
-
-        # Save prediction
-        if cfg.save_predict:
-            save_file = save_dir / f"predict-{sample.pid}.nii.gz"
-            nii_kits.write_nii(final_pred, dataset[sample.pid]["meta"], save_file)
-        logging.info(
-            f"Evaluate-{sample.pid}" + "".join([" {}: {:.3f}".format(k, v) for k, v in case_metrics.items()]) +
-            f" (Num inters: {case_inters})" * cfg.use_spatial + " (Saved)" * cfg.save_predict + "\n" * cfg.use_spatial)
-
-    tp, fp, fn = sum(accu.pop("tp")), sum(accu.pop("fp")), sum(accu.pop("fn"))
-    accu = {k: np.mean(v) for k, v in accu.items()}
-    accu["G_Dice"] = 2 * tp / (2 * tp + fn + fp)
-    test_num = len(nf_set.index)
-    logging.info(
-        f"---Infer {len(nf_set.index)} cases" +
-        "".join([" - {}: {:.3f}".format(k, v) for k, v in accu.items()]) +
-        " (Average inters: {:.1f}/{:.1f})".format(
-            total_inters[0] / test_num, total_inters[1] / test_num) * cfg.use_spatial
-    )
 
 
 if __name__ == "__main__":

@@ -1,0 +1,5 @@
+init_channels: 30
+max_channels: 320
+num_pool_layers: 5
+ret_prob: false
+ret_pred: true

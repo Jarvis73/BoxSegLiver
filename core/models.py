@@ -26,12 +26,15 @@ from NetworksV2.GUNet import GUNet
 from NetworksV2.UNetInter import UNetInter
 from NetworksV2.LGNet import LGNet
 from NetworksV2.UNet3D import UNet3D
+from NetworksV2.SmallUNet import SmallUNet
+from NetworksV2.InterUNet import InterUNet
 # from NetworksV2.DenseUNet import DenseUNet
+from entry import infer_2d
 
 ModeKeys = tfes.estimator.ModeKeys
 # Available models
 MODEL_ZOO = [
-    UNet, GUNet, UNetInter, LGNet, UNet3D  # , DenseUNet
+    UNet, GUNet, UNetInter, LGNet, UNet3D, SmallUNet, InterUNet  # , DenseUNet
 ]
 
 
@@ -67,8 +70,10 @@ def add_arguments(parser):
                        required=False, help="Classify branch")
     group.add_argument("--load_weights",
                        type=str,
-                       required=False, help="Initialize some of the model parameters from this given "
-                                            "ckpt file.")
+                       required=False, help="Initialize model parameters from this given ckpt file.")
+    group.add_argument("--load_weights_version",
+                       type=str,
+                       default="checkpoint", help="Used for latest_filename")
     group.add_argument("--weights_scope",
                        type=str,
                        required=False, help="Network scope of the weights in the given ckpt file, which "
@@ -81,6 +86,7 @@ def add_arguments(parser):
     group.add_argument("--eval_per_epoch", action="store_true")
     group.add_argument("--dropout", type=float, help="Dropout for backbone networks")
     group.add_argument("--img_grad", action="store_true", help="Use image gradients")
+    group.add_argument("--mid_cat", action="store_true", help="Concat guide to middle layers")
 
 
 def get_model_params(args, build_metrics=False, build_summaries=False):
@@ -112,6 +118,36 @@ def get_model_params(args, build_metrics=False, build_summaries=False):
     return params
 
 
+def get_model_2d_params(args):
+    params = dict()
+    params["model"] = eval(args.model_2d)
+
+    tf.logging.info("Use {} for learning.".format(args.model))
+
+    if not args.model_2d_config:
+        args.model_2d_config = args.model_2d + ".yml"
+
+    # Try to find model config file in NetworksV2/ and NetworksV2/ext_config/ directories
+    model_config_path = Path(__file__).parent.parent / "NetworksV2" / args.model_2d_config
+    if not model_config_path.exists():
+        model_config_path = model_config_path.parent / "ext_config" / args.model_2d_config
+        if not model_config_path.exists():
+            tf.logging.info("Cannot find model config file %s" % args.model_config)
+            model_config_path = None
+
+    if model_config_path:
+        with model_config_path.open() as f:
+            params["model_kwargs"] = yaml.load(f, Loader=yaml.Loader)
+            tf.logging.info("Load model configuration from %s" % str(model_config_path))
+    else:
+        params["model_kwargs"] = {}
+
+    params["model_kwargs"]["build_metrics"] = False
+    params["model_kwargs"]["build_summaries"] = False
+
+    return params
+
+
 def _find_root_scope(ckpt_filename):
     reader = pt.NewCheckpointReader(ckpt_filename)
     variables = list(reader.get_variable_to_shape_map())
@@ -121,14 +157,14 @@ def _find_root_scope(ckpt_filename):
         continue
 
 
-def init_partial_model(model, args):
+def init_model(model, args):
     if not args.load_weights:
         return None
 
     weights_dir = Path(args.model_dir).parent / args.load_weights
     ckpt_filename = args.load_weights
     if weights_dir.is_dir():
-        ckpt = tf.train.get_checkpoint_state(str(weights_dir), latest_filename="checkpoint_best")
+        ckpt = tf.train.get_checkpoint_state(str(weights_dir), latest_filename=args.load_weights_version)
         if ckpt and ckpt.model_checkpoint_path:
             ckpt_filename = ckpt.model_checkpoint_path
 
@@ -136,7 +172,7 @@ def init_partial_model(model, args):
         raise FileNotFoundError("ckpt_filename {} doesn't exist".format(ckpt_filename))
 
     root_scope = args.weights_scope or _find_root_scope(ckpt_filename)
-    model_vars = tf.global_variables(".*?{}/(?!BboxLayer)".format(model.name))
+    model_vars = tf.global_variables(model.name)
     var_list = {var.op.name.replace(model.name, root_scope): var for var in model_vars}
     # This is an one-off Saver. Do not add it to GraphKeys.SAVERS collection.
     saver = tf.train.Saver(var_list=var_list)
@@ -236,6 +272,10 @@ def model_fn(features, labels, mode, params, config):
     # init_fn = init_partial_model(model, args)
     if args.model == "DenseUNet":
         init_fn = init_dense_model()
+        kwargs["scaffold"] = tf.train.Scaffold(init_fn=init_fn)
+
+    if args.load_weights is not None:
+        init_fn = init_model(model, args)
         kwargs["scaffold"] = tf.train.Scaffold(init_fn=init_fn)
 
     return tfes.estimator.EstimatorSpec(mode=mode, **kwargs)

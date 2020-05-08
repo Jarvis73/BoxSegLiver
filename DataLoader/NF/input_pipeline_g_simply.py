@@ -62,6 +62,7 @@ def add_arguments(parser):
     group.add_argument("--eval_num_batches_per_epoch", type=int, default=100)
     group.add_argument("--eval_mirror", action="store_true")
     group.add_argument("--tumor_percent", type=float, default=0.5)
+    group.add_argument("-ds", "--downsampling", action="store_true", help="Use downsampled data for experiments")
 
     group = parser.add_argument_group(title="G-Net Arguments")
     group.add_argument("--side_dropout", type=float, default=0.5, help="Dropout used in G-Net sub-networks")
@@ -105,9 +106,59 @@ def add_arguments(parser):
     group.add_argument("--guide_channel", type=int, default=2, help="1 or 2")
     group.add_argument("--fp_sample", action="store_true", help="Negative clicks sampled from false positive areas")
     group.add_argument("--sample_neg", type=float, default=0., help="Sample negative patches containing fp pixels")
+    group.add_argument("--fp_version", type=int, default=1, choices=[1, 2], help="fp version")
 
 
-def load_data(debug=False):
+def load_data(debug=False, sub_dir="nii_NF", img_pattern="volume*", cache="cache"):
+    global data_cache
+
+    if data_cache is not None:
+        return data_cache
+
+    data_dir = PROJ_ROOT / "data/NF" / sub_dir
+    path_list = list(data_dir.glob(img_pattern))
+
+    if debug:
+        path_list = path_list[:10]
+        print(f"Loading data ({len(path_list)} examples, for debug) ...")
+    else:
+        print(f"Loading data ({len(path_list)} examples) ...")
+
+    cache_path = PROJ_ROOT / f"data/NF/{cache}.gz.pkl"
+    if cache_path.exists():
+        print(f"Loading data cache from {cache_path}")
+        with cache_path.open("rb") as f:
+            data = zlib.decompress(f.read())
+            data_cache = pickle.loads(data)
+        print("Finished!")
+        return data_cache
+
+    data_cache = {}
+    for path in tqdm.tqdm(path_list):
+        pid = (path.name.split(".")[0].split("-")[-1] if sub_dir == "nii_NF" else
+               path.name.split("-")[0])
+        header, volume = nii_kits.read_nii(path)
+        la_path = path.parent / path.name.replace("volume", "segmentation").replace("img", "mask")
+        _, label = nii_kits.read_nii(la_path)
+        if sub_dir == "test_NF":
+            volume = volume.transpose(1, 0, 2)
+            label = label.transpose(1, 0, 2)
+        assert volume.shape == label.shape
+        data_cache[int(pid)] = {"im_path": path.absolute(), "la_path": la_path.absolute(),
+                                "img": volume,
+                                "lab": label.astype(np.uint8),
+                                "pos": np.stack(np.where(label > 0), axis=1),
+                                "meta": header, "lab_rng": np.unique(label)}
+    with cache_path.open("wb") as f:
+        print(f"Saving data cache to {cache_path}")
+        cache_s = pickle.dumps(data_cache, pickle.HIGHEST_PROTOCOL)
+        f.write(zlib.compress(cache_s))
+    print("Finished!")
+    return data_cache
+
+
+def load_data_ds(debug=False):
+    """ Load data downsampling (for accelerating) """
     global data_cache
 
     if data_cache is not None:
@@ -122,7 +173,7 @@ def load_data(debug=False):
     else:
         print(f"Loading data ({len(path_list)} examples) ...")
 
-    cache_path = PROJ_ROOT / "data/NF/cache.gz.pkl"
+    cache_path = PROJ_ROOT / "data/NF/cache_ds.gz.pkl"
     if cache_path.exists():
         print(f"Loading data cache from {cache_path}")
         with cache_path.open("rb") as f:
@@ -138,6 +189,8 @@ def load_data(debug=False):
         la_path = path.parent / path.name.replace("volume", "segmentation")
         _, label = nii_kits.read_nii(la_path)
         assert volume.shape == label.shape
+        volume = volume[:, ::2, ::2]
+        label = label[:, ::2, ::2]
         data_cache[int(pid)] = {"im_path": path.absolute(), "la_path": la_path.absolute(),
                                 "img": volume,
                                 "lab": label.astype(np.uint8),
@@ -209,8 +262,77 @@ def load_neg(data, dim=2):
     return neg_cache
 
 
-def load_split(test_fold=0, mode="train"):
-    fold_path = PROJ_ROOT / "DataLoader/NF/prepare/split.csv"
+def load_neg_v2(data, dim=2):
+    """ Load negative version 2:
+    Collect prediction from five checkpoints and take the union as the experiment prediction.
+    """
+    global neg_cache
+
+    if neg_cache is not None:
+        return neg_cache
+
+    neg_path = PROJ_ROOT / f"data/NF/neg_{dim}d_v2.gz.pkl"
+
+    if neg_path.exists():
+        print(f"Loading negative cache from {neg_path}")
+        with neg_path.open("rb") as f:
+            neg_cache = pickle.loads(zlib.decompress(f.read()))
+        print("Finished!")
+        return neg_cache
+
+    pred_dir_pat = PROJ_ROOT / "model_dir/101_unetinter_v10"
+    pred_dirs = list(pred_dir_pat.glob("thresh80_*"))
+    pred_list = list(pred_dirs[0].glob("predict-*.nii.gz"))
+    neg_cache = {}
+    if dim == 3:
+        struct = generate_binary_structure(3, 1)
+        for path in tqdm.tqdm(pred_list):
+            pid = int(path.name.split(".")[0].split("-")[-1])
+            predict = None
+            for dir_ in pred_dirs:
+                _, pred = nii_kits.read_nii(dir_ / path.name)
+                predict = pred if predict is None else predict + pred
+            predict = np.clip(predict, 0, 1)
+            label = data[pid]["lab"]
+            res, n_obj = label_connected(predict, struct)
+            slices = find_objects(res)
+            for i, sli in enumerate(slices):
+                cube = res[sli]
+                if ((cube == i + 1) * (label[sli] != 0)).sum() or (cube == i + 1).sum() <= 5:
+                    cube[cube == i + 1] = 0
+            neg_cache[pid] = np.clip(res, 0, 1).astype(np.uint8)
+    else:   # dim = 2
+        struct = generate_binary_structure(2, 1)
+        for path in tqdm.tqdm(pred_list):
+            pid = int(path.name.split(".")[0].split("-")[-1])
+            predict_3d = None
+            for dir_ in pred_dirs:
+                _, pred = nii_kits.read_nii(dir_ / path.name)
+                predict_3d = pred if predict_3d is None else predict_3d + pred
+            predict_3d = np.clip(predict_3d, 0, 1)
+            label_3d = data[pid]["lab"].copy()
+            result = np.zeros_like(predict_3d, dtype=np.uint8)
+            for s in np.where(predict_3d.max(axis=(1, 2)))[0]:
+                predict = predict_3d[s]
+                label = label_3d[s]
+                res, n_obj = label_connected(predict, struct)
+                slices = find_objects(res)
+                for i, sli in enumerate(slices):
+                    cube = res[sli]
+                    if ((cube == i + 1) * (label[sli] != 0)).sum() or (cube == i + 1).sum() <= 5:
+                        cube[cube == i + 1] = 0
+                result[s] = np.clip(res, 0, 1)
+            neg_cache[pid] = {"bin": result, "pos": np.stack(np.where(result > 0), axis=1)}
+
+    with neg_path.open("wb") as f:
+        print(f"Saving negative cache to {neg_path}")
+        f.write(zlib.compress(pickle.dumps(neg_cache, pickle.HIGHEST_PROTOCOL)))
+    print("Finished!")
+    return neg_cache
+
+
+def load_split(test_fold=0, mode="train", filename="split.csv"):
+    fold_path = PROJ_ROOT / "DataLoader/NF/prepare" / filename
     folds = pd.read_csv(str(fold_path))
     val_split = folds.loc[folds.split == test_fold]
     if mode != "train":
@@ -451,9 +573,12 @@ def gen_batch(dataset, batch_size, train, cfg):
     cfg: global config var
 
     """
-    data = load_data()
+    data = load_data() if not cfg.downsampling else load_data_ds()
     if cfg.sample_neg or cfg.fp_sample:
-        neg_data = load_neg(data)
+        if cfg.fp_version == 1:
+            neg_data = load_neg(data)
+        else:
+            neg_data = load_neg_v2(data)
     dataset = dataset[[True if pid in data else False for pid in dataset.pid]]
     # dataset containing nf (remove benign scans)
     dataset['nf'] = [True if len(data[pid]['lab_rng']) > 1 else False for pid in dataset.pid]
