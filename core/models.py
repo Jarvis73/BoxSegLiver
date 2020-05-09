@@ -28,13 +28,14 @@ from NetworksV2.LGNet import LGNet
 from NetworksV2.UNet3D import UNet3D
 from NetworksV2.SmallUNet import SmallUNet
 from NetworksV2.InterUNet import InterUNet
+from NetworksV2.VNet import VNet3D
 # from NetworksV2.DenseUNet import DenseUNet
 from entry import infer_2d
 
 ModeKeys = tfes.estimator.ModeKeys
 # Available models
 MODEL_ZOO = [
-    UNet, GUNet, UNetInter, LGNet, UNet3D, SmallUNet, InterUNet  # , DenseUNet
+    UNet, GUNet, UNetInter, LGNet, UNet3D, SmallUNet, InterUNet, VNet3D  # , DenseUNet
 ]
 
 
@@ -218,6 +219,7 @@ def init_dense_model():
     def init_fn(scaffold, session):
         _ = scaffold
         session.run(no_op)
+
     return init_fn
 
 

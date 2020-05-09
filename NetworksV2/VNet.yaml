@@ -1,0 +1,5 @@
+init_channels: 32
+num_pool_layers: 1
+norm_type: batch
+activation_type: prelu
+loss_name: sorensen
